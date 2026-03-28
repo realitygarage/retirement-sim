@@ -1,4 +1,4 @@
-// v2.10.5 -- add famLoanBal to HI debt breakdown chart; fix avalanche xtra overstatement; fix pin import rate conversion
+// v2.10.6 -- FCF chart: rename sweep line to "Sweep"; add debt-clear phase marker
 import React, { useState, useMemo, useCallback, useRef } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -626,6 +626,10 @@ export default function App(){
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
     return Math.ceil(raw/mag)*mag;
   },[chartData]);
+  // Year when HI debt clears and sweep redirects to savings (first year sweepToSavings > 0)
+  const debtClearYear = useMemo(()=>
+    (chartData||[]).find(r=>(r.sweepToSavings||0)>0)?.year ?? null,
+  [chartData]);
   const reqWorkMax = useMemo(()=>{
     const raw = Math.max(...liveRows.map(r=>r.reqWork||0), 1000);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -977,7 +981,7 @@ export default function App(){
               <svg width="14" height="4"><line x1="0" y1="2" x2="14" y2="2" stroke={color} strokeWidth="2.5"/></svg>
               <span>Free Cash</span>
               <svg width="14" height="4" style={{marginLeft:4}}><line x1="0" y1="2" x2="14" y2="2" stroke={secondaryColor||blue} strokeWidth="1.5" strokeDasharray="4 2"/></svg>
-              <span>→ Swept</span>
+              <span>{secondaryName||"→ Swept"}</span>
             </div>}
             {tertiaryDataKey&&<div style={{display:"flex",alignItems:"center",gap:6,fontSize:9,color:dim}}>
               <svg width="14" height="4"><line x1="0" y1="2" x2="14" y2="2" stroke={tertiaryColor||"#f59e0b"} strokeWidth="1.5" strokeDasharray="2 2"/></svg>
@@ -1254,7 +1258,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v2.10.5</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v2.10.6</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2033,13 +2037,18 @@ export default function App(){
               ]}/>
             <Chart title="Free Cash Flow / mo" dataKey="surplus" pinKey="di" color={green} chartId="surplus"
               yDomain={[0, surplusMax]}
-              secondaryDataKey="sweepToSavings" secondaryColor={blue} secondaryName="→ Savings sweep"
+              secondaryDataKey="sweepToSavings" secondaryColor={blue} secondaryName="Sweep"
               tertiaryDataKey="surplusPool" tertiaryColor={amber} tertiaryName="Surplus"
               quaternaryDataKey={(fcfSchedule||[]).length>0?"floorLine":undefined} quaternaryColor={green} quaternaryName="Floor schedule"
-              refLines={(fcfSchedule||[]).length===0
-                ? [{y:discFloor,stroke:dim,strokeDasharray:"2 4",label:{value:`$${discFloor.toLocaleString()} floor`,fill:dim,fontSize:8,position:"insideTopLeft"}}]
-                : []}  // phase schedule shown via floorLine data series instead
-              />
+              refLines={[
+                ...((fcfSchedule||[]).length===0
+                  ? [{y:discFloor,stroke:dim,strokeDasharray:"2 4",label:{value:`$${discFloor.toLocaleString()} floor`,fill:dim,fontSize:8,position:"insideTopLeft"}}]
+                  : []),
+                ...(debtClearYear!=null
+                  ? [{x:debtClearYear,stroke:blue,strokeOpacity:0.5,strokeDasharray:"3 3",
+                      label:{value:"debt clear",fill:blue,fontSize:7,position:"insideTopLeft"}}]
+                  : []),
+              ]}/>
             <Chart title="HI Debt Balance ($K)" dataKey="hiDebt" pinKey="debt" color={red} chartId="hiDebt"
               refLines={[{y:0,stroke:green,strokeDasharray:"3 3"}]}/>
             <Chart title="Net Worth ($M)" dataKey={nwMode==='liq'?'liqNW':'nw'} pinKey={nwMode==='liq'?'liqNW':'nw'} color={blue} chartId="nw"

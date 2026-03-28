@@ -1,0 +1,81 @@
+=== Journal Entry 2026-03-28 — Session 13 ===
+
+FILE: src/App.jsx
+VERSION: v2.10.6
+
+--- WORK COMPLETED (v2.10.5 -> v2.10.6, Claude Code session) ---
+
+[FEATURE] FCF chart: rename sweep line + debt-clear phase marker
+- Renamed secondary line from "→ Savings sweep" to "Sweep" everywhere:
+    secondaryName prop on <Chart> call (was "→ Savings sweep")
+    Legend span in Chart component now uses {secondaryName||"→ Swept"} (was hardcoded "→ Swept")
+    Tooltip formatter picks up the new name automatically via secondaryName
+- Added vertical ReferenceLine at debt-clear transition year:
+    New memo: debtClearYear = first chartData year where sweepToSavings > 0
+    Blue dashed vertical line (stroke:blue, opacity:0.5, strokeDasharray:"3 3")
+    Labeled "debt clear" in insideTopLeft position
+    Only renders when debt actually clears (debtClearYear != null)
+    Naturally aligned with sweep line lift-off (both driven by sweepToSavings)
+
+[TOOLING] Git Bash test runner
+- Created run_tests.sh as a Git Bash equivalent of run_tests.ps1
+    Starts Vite dev server (npx vite --port 5173 &)
+    Polls localhost:5173 with curl until ready (up to 30s)
+    Runs Playwright with --reporter=list --headed
+    Tees output to test-results/test-run.txt AND terminal
+    Kills Vite on exit via trap (handles pass, fail, and Ctrl-C)
+    Uses existing Vite server if already running on 5173
+
+--- BASELINE CONFIRMED (start of session 13) ---
+Test suite: 65/65 passed at v2.10.5 baseline
+Key numbers (unchanged):
+  Work needed at launch:    $5,738/mo
+  Work-free year:           2034
+  HI debt clear:            Nov '34
+  NW yr10 (book):           ~$4.8M
+  Sweep savings (final):    $312K compounded
+
+--- TEST SUITE STATUS ---
+Spec file: retirement-simulator.spec.js (65 tests)
+Tests covering new features (rename + phase marker) not yet written.
+E5 version test will need updating: "v2.10.5" → "v2.10.6"
+
+--- OPEN IDEAS / BACKLOG ---
+
+[OPEN -- P2] E3 Playwright test -- sell year viewport (passing via textContent,
+  not toBeVisible -- acceptable)
+[OPEN -- P3] Pin sweep timing off ~6mo vs monthly engine (annual approximation)
+[OPEN] Liquidation NW -- pin comparison table not yet updated to show liq mode
+[OPEN] Glossary entry for book vs liquidation NW not yet updated
+[OPEN] Tests for liquidation NW toggle and new fixed cost components (fc_prop,
+  fc_tax) not yet written
+[OPEN] Test for "debt clear" phase marker on FCF chart not yet written
+[OPEN] Test for renamed sweep line ("Sweep" not "→ Savings sweep") not yet written
+
+--- KEY NUMBERS (SC_DEFAULTS, unchanged) ---
+  duplex15thBasis: 600_000
+  lafayetteBasis:  300_000
+  (6th St: BASE.sixthBasis = 930_000 -- unchanged)
+
+--- ARCHITECTURE NOTES ---
+src/engine.js         -- 423 lines: pure functions, loan data, BASE
+src/defaults.js       -- ~130 lines: SC_DEFAULTS, DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION
+src/relationships-data.js -- 114 lines: diagram data only
+src/App.jsx           -- ~3260 lines: all React state/hooks/JSX
+
+--- ENVIRONMENT ---
+Stack: React + Vite + JSX (multi-file)
+Src dir: C:\Users\rober\retirement-sim\src\
+Vite dev server: localhost:5173
+Launcher: "Launch Retirement Simulator.bat" in project root
+Test runner (PowerShell): run_tests.ps1
+Test runner (Git Bash):   run_tests.sh  ← new in session 13
+Playwright spec: retirement-simulator.spec.js in project root
+Git: initialized (branch: master)
+Claude Code: installed via native Windows installer
+
+--- HOW TO RESUME IN A NEW CHAT ---
+1. Upload session13_journal.txt + src/App.jsx to new chat
+2. Upload src/engine.js and src/defaults.js if engine or defaults changes needed
+3. First task: run test suite (bash run_tests.sh), confirm baseline
+4. Then: pick up from backlog above
