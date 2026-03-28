@@ -1,4 +1,4 @@
-// v2.10.6 -- FCF chart: rename sweep line to "Sweep"; add debt-clear phase marker
+// v2.10.7 -- FCF chart: combinedSweep shows debt sweep + savings sweep on one line
 import React, { useState, useMemo, useCallback, useRef } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -478,12 +478,14 @@ export default function App(){
     // Aggregate monthly wfData into annual averages for the FCF chart.
     // Use disc (monthly engine's actual kept FCF) instead of annual engine surplus —
     // this ensures lifestyleSplit slider and graceDone sweep logic are reflected correctly.
-    const discByYear={}, sweepByYear={}, cntByYear={}, savAccByYear={}, abByYear={}, floorByYear={};
+    const discByYear={}, sweepByYear={}, totalSweepByYr={}, cntByYear={}, savAccByYear={}, abByYear={}, floorByYear={};
     const fc_mtgByYr={}, fc_hlthByYr={}, fc_coreByYr={}, fc_famByYr={}, fc_hiMinsByYr={}, fc_ropByYr={}, fc_propByYr={}, fc_taxByYr={};
     (wfData||[]).forEach(r=>{
       const yr=2026+Math.floor(r.mo/12);
       discByYear[yr]=(discByYear[yr]||0)+(r.disc||0);
       sweepByYear[yr]=(sweepByYear[yr]||0)+(r.sweepToSavings||0);
+      // combinedSweep: debt sweep while in debt, savings sweep after — mutually exclusive in wfData
+      totalSweepByYr[yr]=(totalSweepByYr[yr]||0)+(r.sweep||0)+(r.sweepToSavings||0);
       abByYear[yr]=(abByYear[yr]||0)+(r.afterBuckets||0);
       floorByYear[yr]=r.floor||discFloor;  // last month's floor (stable within year)
       fc_mtgByYr[yr]=(fc_mtgByYr[yr]||0)+(r.fc_mtg||0);
@@ -528,11 +530,13 @@ export default function App(){
       const fc_prop_=Math.round((fc_propByYr[r.cal]||0)/cnt);
       const fc_tax_=Math.round((fc_taxByYr[r.cal]||0)/cnt);
       const fixedTotal=fc_mtg_+fc_hlth_+fc_core_+fc_fam_+fc_hiMins_+fc_rop_+fc_prop_+fc_tax_;
+      const combinedSweep=Math.round((totalSweepByYr[r.cal]||0)/cnt);
       const pt={year:r.cal, cal:r.cal, reqWork:r.reqWork, surplus:disc, surplusPool, floorLine, hiDebt:r.hiDebt,
         fixedTotal, fc_mtg:fc_mtg_, fc_hlth:fc_hlth_, fc_core:fc_core_, fc_fam:fc_fam_, fc_hiMins:fc_hiMins_, fc_rop:fc_rop_, fc_prop:fc_prop_, fc_tax:fc_tax_,
         nw:(r.nw/1000)+savAccM,  // $M — annual engine NW + monthly wfData savingsAcc
         sweepSavK:savAccK,
         sweepToSavings:sweep,
+        combinedSweep,
         // NW breakdown fields (from annual engine, $K units — same as liveRows)
         reValue:r.reValue, reMortgage:r.reMortgage, reEquity:r.reEquity,
         hiDebtK:r.hiDebtK, invested:r.invested, savingsAccK:savAccK};
@@ -564,7 +568,7 @@ export default function App(){
         pt[`pin_${pin.id}_fc`]=Math.abs(pin.rows[i]?.mtg||0)+Math.abs(pin.rows[i]?.health||0)+Math.abs(pin.rows[i]?.core||0)+Math.abs(pin.rows[i]?.famLoan||0)+Math.abs(pin.rows[i]?.minDebt||0);
         pt[`pin_${pin.id}_rw`]=pin.rows[i]?.reqWork;
         pt[`pin_${pin.id}_di`]=Math.max(0,pin.rows[i]?.surplus);
-        pt[`pin_${pin.id}_sweep`]=Math.max(0,pin.rows[i]?.sweepToSavings||0);
+        pt[`pin_${pin.id}_sweep`]=Math.max(0,(pin.rows[i]?.debtSweep||0)+(pin.rows[i]?.sweepToSavings||0));
         pt[`pin_${pin.id}_debt`]=pin.rows[i]?.hiDebt;
         // NW for pin: annual engine nw + accumulated sweep savings (compounded annually)
         let pinSavAcc=0;
@@ -614,10 +618,10 @@ export default function App(){
   // Stable Y domains — rounded up to a clean ceiling so charts don't rescale while dragging
   const surplusMax = useMemo(()=>{
     const schedMax = (fcfSchedule||[]).reduce((m,s)=>Math.max(m,s.floor),0);
-    const sweepMax = Math.max(...(chartData||[]).map(r=>r.sweepToSavings||0), 0);
+    const sweepMax = Math.max(...(chartData||[]).map(r=>r.combinedSweep||0), 0);
     const pinSweepMax = pins.length>0 ? Math.max(...(chartData||[]).flatMap(r=>pins.map(p=>r[`pin_${p.id}_sweep`]||0)), 0) : 0;
     const poolMax = Math.max(...(chartData||[]).map(r=>r.surplusPool||0), 0);
-    const raw = Math.max(...(chartData||[]).map(r=>r.surplus||0), ...(chartData||[]).map(r=>r.sweepToSavings||0), discFloor*1.5, schedMax*1.5, sweepMax*1.2, pinSweepMax*1.2, poolMax*1.1, 500);
+    const raw = Math.max(...(chartData||[]).map(r=>r.surplus||0), ...(chartData||[]).map(r=>r.combinedSweep||0), discFloor*1.5, schedMax*1.5, sweepMax*1.2, pinSweepMax*1.2, poolMax*1.1, 500);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
     return Math.ceil(raw/mag)*mag;
   },[liveRows,discFloor,fcfSchedule,chartData]);
@@ -1258,7 +1262,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v2.10.6</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v2.10.7</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2037,7 +2041,7 @@ export default function App(){
               ]}/>
             <Chart title="Free Cash Flow / mo" dataKey="surplus" pinKey="di" color={green} chartId="surplus"
               yDomain={[0, surplusMax]}
-              secondaryDataKey="sweepToSavings" secondaryColor={blue} secondaryName="Sweep"
+              secondaryDataKey="combinedSweep" secondaryColor={blue} secondaryName="Sweep"
               tertiaryDataKey="surplusPool" tertiaryColor={amber} tertiaryName="Surplus"
               quaternaryDataKey={(fcfSchedule||[]).length>0?"floorLine":undefined} quaternaryColor={green} quaternaryName="Floor schedule"
               refLines={[

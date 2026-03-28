@@ -1,11 +1,14 @@
 === Journal Entry 2026-03-28 — Session 13 ===
 
 FILE: src/App.jsx
-VERSION: v2.10.6
+VERSION: v2.10.7
 
---- WORK COMPLETED (v2.10.5 -> v2.10.6, Claude Code session) ---
+⚠️  REMINDER: bump the minor version (vX.Y.Z → vX.Y.Z+1) with EVERY change —
+    two places in App.jsx: line 1 comment AND the UI badge near the version div.
 
-[FEATURE] FCF chart: rename sweep line + debt-clear phase marker
+--- WORK COMPLETED (v2.10.5 -> v2.10.7, Claude Code session) ---
+
+[FEATURE] FCF chart: rename sweep line + debt-clear phase marker  (v2.10.6)
 - Renamed secondary line from "→ Savings sweep" to "Sweep" everywhere:
     secondaryName prop on <Chart> call (was "→ Savings sweep")
     Legend span in Chart component now uses {secondaryName||"→ Swept"} (was hardcoded "→ Swept")
@@ -15,16 +18,25 @@ VERSION: v2.10.6
     Blue dashed vertical line (stroke:blue, opacity:0.5, strokeDasharray:"3 3")
     Labeled "debt clear" in insideTopLeft position
     Only renders when debt actually clears (debtClearYear != null)
-    Naturally aligned with sweep line lift-off (both driven by sweepToSavings)
 
-[TOOLING] Git Bash test runner
+[FIX] FCF chart: Sweep line now shows combined debt + savings sweep  (v2.10.7)
+- Bug: secondaryDataKey was "sweepToSavings" — zero during the entire debt phase
+- Fix: new totalSweepByYr aggregation in wfData forEach:
+    accumulates r.sweep (HI debt avalanche) + r.sweepToSavings (savings redirect)
+    mutually exclusive in wfData so sum = whichever is active each month
+- New chartData field: combinedSweep = monthly avg of totalSweepByYr
+- FCF chart secondaryDataKey changed to "combinedSweep"
+- Pin sweep updated: (pin.rows[i]?.debtSweep||0) + (pin.rows[i]?.sweepToSavings||0)
+- surplusMax Y-domain updated to use combinedSweep (debt sweep can be larger)
+- sweepToSavings field in chartData unchanged — still drives debtClearYear + NW calcs
+
+[TOOLING] Git Bash test runner  (v2.10.5 baseline commit)
 - Created run_tests.sh as a Git Bash equivalent of run_tests.ps1
     Starts Vite dev server (npx vite --port 5173 &)
     Polls localhost:5173 with curl until ready (up to 30s)
     Runs Playwright with --reporter=list --headed
     Tees output to test-results/test-run.txt AND terminal
     Kills Vite on exit via trap (handles pass, fail, and Ctrl-C)
-    Uses existing Vite server if already running on 5173
 
 --- BASELINE CONFIRMED (start of session 13) ---
 Test suite: 65/65 passed at v2.10.5 baseline
@@ -37,8 +49,8 @@ Key numbers (unchanged):
 
 --- TEST SUITE STATUS ---
 Spec file: retirement-simulator.spec.js (65 tests)
-Tests covering new features (rename + phase marker) not yet written.
-E5 version test will need updating: "v2.10.5" → "v2.10.6"
+Tests covering new features not yet written.
+E5 version test needs updating: "v2.10.5" → "v2.10.7"
 
 --- OPEN IDEAS / BACKLOG ---
 
@@ -49,8 +61,7 @@ E5 version test will need updating: "v2.10.5" → "v2.10.6"
 [OPEN] Glossary entry for book vs liquidation NW not yet updated
 [OPEN] Tests for liquidation NW toggle and new fixed cost components (fc_prop,
   fc_tax) not yet written
-[OPEN] Test for "debt clear" phase marker on FCF chart not yet written
-[OPEN] Test for renamed sweep line ("Sweep" not "→ Savings sweep") not yet written
+[OPEN] Tests for "debt clear" phase marker and combinedSweep line not yet written
 
 --- KEY NUMBERS (SC_DEFAULTS, unchanged) ---
   duplex15thBasis: 600_000
@@ -61,7 +72,7 @@ E5 version test will need updating: "v2.10.5" → "v2.10.6"
 src/engine.js         -- 423 lines: pure functions, loan data, BASE
 src/defaults.js       -- ~130 lines: SC_DEFAULTS, DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION
 src/relationships-data.js -- 114 lines: diagram data only
-src/App.jsx           -- ~3260 lines: all React state/hooks/JSX
+src/App.jsx           -- ~3265 lines: all React state/hooks/JSX
 
 --- ENVIRONMENT ---
 Stack: React + Vite + JSX (multi-file)
@@ -69,7 +80,7 @@ Src dir: C:\Users\rober\retirement-sim\src\
 Vite dev server: localhost:5173
 Launcher: "Launch Retirement Simulator.bat" in project root
 Test runner (PowerShell): run_tests.ps1
-Test runner (Git Bash):   run_tests.sh  ← new in session 13
+Test runner (Git Bash):   run_tests.sh
 Playwright spec: retirement-simulator.spec.js in project root
 Git: initialized (branch: master)
 Claude Code: installed via native Windows installer
