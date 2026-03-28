@@ -1,0 +1,151 @@
+=== Journal Entry 2026-03-21 — Session 11 (complete) ===
+
+FILE: /mnt/user-data/outputs/App.jsx
+VERSION: v2.9.1
+
+--- WORK COMPLETED THIS SESSION ---
+
+[INFRA] Multi-file refactor (Session 10 decision, executed Session 11)
+- Single 3756-line App.jsx split into 4 files:
+  src/engine.js         -- 405 lines: pure functions, no React
+                           SOPHIA_LOANS, NOLAN_LOANS, CC_BAL, CC_RATE, HI_TOTAL,
+                           BASE, calcPmt, remainBal, healthMonthly, workFromCurve,
+                           estimateTax, strScheduleIncome, mtrScheduleIncome,
+                           buildScenario, keyStats
+  src/defaults.js       -- 122 lines: DEFAULTS, makeParams, PIN_COLORS,
+                           SAVE_SCHEMA_VERSION, SC_DEFAULTS
+  src/relationships-data.js -- 114 lines: REL_COLORS, RNODES, REDGES,
+                           layout constants, rNodePos
+  src/App.jsx           -- 3104 lines: all React state, hooks, Chart,
+                           WorkCurveEditor, BREAKDOWNS, all JSX tabs
+- App.jsx imports from the three extracted files via ES module imports
+- Vite handles the multi-file build natively -- no config changes needed
+- Deployment: all 4 files go to src/, spec goes to project root
+
+[INFRA] Launcher bat simplified
+- Old bat auto-copied retirement-simulator.jsx from Downloads (single-file era)
+- New bat: just cd to project root + start browser + npm run dev
+- Manual copy of src files is now the deployment workflow
+
+[INFRA] Playwright test suite: 35 tests, Groups A-F, all passing
+- Added Group F (4 tests) for v2.9.0/v2.9.1 features:
+  F1 -- savingsAcc: NW yr10 increases as sweep % rises
+  F2 -- savingsAcc: NW breakdown Sweep savings row reflects engine value
+  F3 -- Pin comparison table: appears after pinning, shows Live + pin columns
+  F4 -- Pin comparison table: key metric rows present and non-empty
+- Fixed B8/F2 selector: span.getByText too strict -> text=Sweep savings
+- Fixed F2 assertion: parseInt("$2.1M") -> 21; fixed to parseFloat + threshold 0.5M
+- E5 version string kept in sync with each bump
+- Spec location: project root (NOT src/)
+- Old spec copy in old/ was causing double-runs (66 tests) -- deleted old/ dir
+
+[FEATURE v2.9.0/v2.9.1] Pin Comparison Table
+- Appears in pin panel whenever >= 1 pin exists
+- Shows Live + all visible pins as columns
+- 5 metric rows: Launch work needed, Work-free year, HI debt clear,
+  NW at yr 10, Sweep savings (final)
+- Green highlight on cells hitting "good" thresholds:
+  launchRW < $3K/mo, work-free <= 2034, debt clear <= 2031,
+  NW >= $5M, sweep final >= $1M
+- Controlled by the all/none pin visibility toggles
+- Hidden when no pins exist (clean default state)
+
+[FEATURE v2.9.1] savingsAcc -> NW wiring
+- Attempted engine-native annual savingsAcc accumulator -- caused NW to drop
+  $500K vs wfData monthly approach (annual approximation loses precision
+  on exact month debt clears)
+- Reverted engine.js to clean state (no savingsAcc)
+- Kept wfData monthly engine as source of truth for savingsAcc
+- chartData already had savAccByYear from wfData; restored that path
+- savingsAccK now exposed on every chartData point (for NW breakdown table)
+- NW breakdown series key: sweepSavK (chartData field, sourced from wfData)
+- NW chart = annual engine r.nw/1000 + savAccM from wfData -- accurate
+
+[FIX] Version bump: v2.7.8 -> v2.8.0 (refactor) -> v2.9.0 -> v2.9.1
+
+--- DEPLOYMENT NOTES ---
+- Place all 4 src files in C:\Users\rober\retirement-sim\src\
+- Place spec in C:\Users\rober\retirement-sim\ (project root)
+- Force-refresh browser (Ctrl+Shift+R) after deployment
+- Confirm version badge in UI header matches expected version
+- Common mistake: copying files to project root instead of src/ --
+  Vite will not pick up changes; version badge stays stale
+
+--- TEST SUITE STATUS (v2.9.1) ---
+35/35 passing. Groups A-F.
+Run: run_tests.ps1 (admin PowerShell, from project root)
+Key numbers (default scenario):
+  Work needed at launch:    $4,538/mo
+  Work-free year:           2034
+  HI debt clear:            Jun '30 (monthly) / 2029 (annual)
+  NW yr10:                  $5.2M (includes sweep savings)
+  Sweep savings compounded: $2,103K over 21yr at 30% keep
+  Rainy day full:           Jun '28
+  Op buffer full:           Apr '34
+
+--- OPEN IDEAS / BACKLOG ---
+
+[NEXT -- P1] Gross vs. Liquidation NW toggle
+  Design discussion from end of Session 11:
+  - Need TWO modes on the NW chart:
+    (a) Book NW (current) -- RE at market value, no selling costs
+    (b) Liquidation NW -- what you'd net if you sold everything today
+  - Liquidation deductions per property:
+      Selling costs: ~5% of sale price (commissions, closing)
+      Capital gains tax: (salePrice * 0.95 - costBasis) * (0.238 + 0.044)
+        federal: 20% LT cap gains + 3.8% NIIT = 23.8%
+        Colorado: 4.4% flat
+        married exclusion: $500K on primary residence only
+  - Need new SC_DEFAULTS / UI inputs for cost basis per property:
+      duplex15thBasis   -- default ~$600K (purchase + improvements)
+      lafayetteBasis    -- default ~$300K
+      (6th St basis already exists: BASE.sixthBasis = $930K)
+  - Toggle placement: NW chart header (small button, like "book | liq")
+  - Liquidation NW formula per year:
+      for each property still held:
+        saleNet = marketValue * (1 - sellingCosts)  // 5%
+        gain = max(0, saleNet - costBasis)
+        married excl = $500K on primary only
+        taxableGain = max(0, gain - marriedExcl)
+        capGainsTax = taxableGain * (0.238 + 0.044)
+        netEquity = saleNet - mortgageBalance - capGainsTax
+      liquidationNW = sum(netEquity) + investedCash + sweepSavings - hiDebt
+  - This is a "what if you sold everything today" snapshot, not a plan
+  - Glossary entry needed explaining book vs liquidation
+
+[OPEN -- P2] E3 Playwright test -- sell year viewport (currently passing via
+  textContent check, not toBeVisible -- acceptable for now)
+
+[OPEN -- P3] Pin sweep timing off ~6mo vs monthly engine
+  Annual approximation issue, low priority
+
+[SKIP] HOA fees -- not a factor for Bob's properties
+
+--- KEY ARCHITECTURE NOTES ---
+- Chart/WorkCurveEditor/BREAKDOWNS stay in App.jsx (close over ~40 App locals)
+- engine.js exports: all pure functions + BASE + loan constants
+- defaults.js exports: DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION,
+  SC_DEFAULTS
+- relationships-data.js exports: diagram data only, no React
+- chartData is the NW chart source (includes savingsAcc); liveRows is source
+  for all other charts
+- wfData is the monthly waterfall engine (Cash Flow tab source of truth)
+- savingsAcc lives in wfData, not engine.js -- annual engine stays clean
+
+--- ENVIRONMENT ---
+Stack: React + Vite + JSX (multi-file)
+Src dir: C:\Users\rober\retirement-sim\src\
+Vite dev server: localhost:5173
+Launcher: "Launch Retirement Simulator.bat" in project root (simplified)
+Test runner: run_tests.ps1 (admin PowerShell required)
+Playwright spec: retirement-simulator.spec.js in project root
+Chrome MCP: NOT available (extension disconnected between sessions)
+
+--- HOW TO RESUME IN A NEW CHAT ---
+1. Upload session11_journal.txt + current App.jsx to new Claude chat
+2. Say: "I'm continuing work on my retirement simulator. Please read the
+   session journal. Next feature: Gross vs Liquidation NW toggle."
+3. Run Launch bat first (Vite at localhost:5173)
+4. First task: Gross vs Liquidation NW toggle (see NEXT -- P1 design above)
+5. Inputs needed: duplex15thBasis and lafayetteBasis in SC_DEFAULTS + UI
+6. Run 35-test suite after any changes to confirm clean baseline

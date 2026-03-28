@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File run_tests.ps1 2>&1)"
+    ]
+  }
+}

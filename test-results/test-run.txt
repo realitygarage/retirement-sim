@@ -1,0 +1,187 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260328073125
+Username: RGROG23\rober
+RunAs User: RGROG23\rober
+Configuration Name: 
+Machine: RGROG23 (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+Process ID: 32004
+PSVersion: 5.1.26100.8115
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.8115
+BuildVersion: 10.0.26100.8115
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is test-results\test-run.txt
+
+Running 65 tests using 1 worker
+
+  ok  1 …Group A — Core Engine Correctness › A1 — Sweep 0% keep: debt clears earlier, avg sweep UP, interest DOWN (4.2s)
+  Baseline clear: 2036
+  Avg sweep yr1: $171/mo | Total interest: $114K over 21yr
+  ok  2 …roup A — Core Engine Correctness › A2 — FCF chart at 0% keep: green line flat at floor, blue dashed high (4.6s)
+  ok  3 …Group A — Core Engine Correctness › A3 — FCF chart at 100% keep: chart renders and sweep badge near zero (4.7s)
+  Avg sweep at 100% keep: $0/mo
+  A3 — FCF chart visible at 100% keep
+  ok  4 …s:102:3 › Group A — Core Engine Correctness › A4 — NW sensitivity: delta exists between 0% and 100% keep (6.9s)
+  NW yr10 @ 0%: $4.7M | @ 100%: $4.8M
+  NW delta: $0.10M
+  ok  5 … Group A — Core Engine Correctness › A5 — Rental op costs: platform 3% causes work income needed to rise (3.7s)
+  RW at default (3%): $5,738/mo | RW at 0%: $3,717/mo
+  ok  6 …:3 › Group A — Core Engine Correctness › A6 — Rental op costs at 0%: produces valid work required output (4.3s)
+  RW with 0% op costs: $3,717/mo
+  ok  7 …oup B — Chart Display › B1 — FCF legend labels: "Free Cash" and "→ Savings sweep" (not both "Free Cash") (2.9s)
+  ok  8 ….js:179:3 › Group B — Chart Display › B2 — FCF 3-line legend: Free Cash, Swept, Surplus swatches visible (2.9s)
+  ok  9 …lator.spec.js:186:3 › Group B — Chart Display › B3 — Surplus line renders (FCF chart has 3+ line series) (2.9s)
+  FCF chart line count: 15
+  ok 10 …t-simulator.spec.js:196:3 › Group B — Chart Display › B4 — Floor line renders when phase schedule active (4.9s)
+  FCF chart line count with phase schedule: 16
+  ok 11 retirement-simulator.spec.js:213:3 › Group B — Chart Display › B5 — Fixed Costs chart is visible (3.0s)
+  ok 12 …ator.spec.js:218:3 › Group B — Chart Display › B6 — Fixed Costs Y-axis shows "$12K" style (not "oooooK") (2.9s)
+  Y-axis ticks not found via class selector — skipping content check
+  ok 13 …spec.js:234:3 › Group B — Chart Display › B7 — Fixed Costs breakdown table shows cost components by year (3.4s)
+  ok 14 ….spec.js:248:3 › Group B — Chart Display › B8 — NW breakdown: Sweep savings row has non-zero final value (3.4s)
+  NW breakdown Sweep savings final value: $0.3M
+  ok 15 …ulator.spec.js:264:3 › Group B — Chart Display › B9 — NW yr10 stat card: ~$5.3M (includes sweep savings) (2.9s)
+  NW yr10: $4.8M
+  ok 16 ….js:274:3 › Group B — Chart Display › B10 — Sweep badge says "compounded value" (when sweep savings > 0) (3.5s)
+  Sweep badge: $312K compounded value
+  ok 17 …s:293:3 › Group B — Chart Display › B11 — NW breakdown year headers show calendar years (not "'defined") (3.4s)
+  NW breakdown year header count: 11
+  ok 18 …ement-simulator.spec.js:313:3 › Group C — Cash Flow Tab › C1 — All 7 waterfall badges populate correctly (3.6s)
+  Rainy day full: Apr '34
+  Op buffer full: Feb '40
+  HI debt clear: Nov '34
+  Avg sweep yr1: $5/mo
+  Min FCF: $800/mo
+  Total interest paid: $114K over 21yr
+  Total debt pmts: $374K
+  ok 19 …3 › Group C — Cash Flow Tab › C2 — Fixed Costs Breakdown panel expands with costs + not-modeled warnings (3.9s)
+  ok 20 …341:3 › Group C — Cash Flow Tab › C3 — Rental op sliders: STR shows platform%+cleaning%, LTR shows mgmt% (3.5s)
+  ok 21 …:353:3 › Group C — Cash Flow Tab › C4 — Op costs summary text shows non-zero value when platform fee > 0 (2.9s)
+  ok 22 …-simulator.spec.js:360:3 › Group C — Cash Flow Tab › C5 — Monthly table "→ Savings" column header exists (3.9s)
+  → Savings header by role: true, by text: true
+  ok 23 …nt-simulator.spec.js:382:3 › Group D — Pin System › D1 — Pin round-trip: pin saves and export JSON works (3.7s)
+  Pin export succeeded: retirement-scenarios-2026-03-28.json
+  ok 24 …irement-simulator.spec.js:399:3 › Group D — Pin System › D2 — Pin sweep dashed line visible on FCF chart (3.7s)
+  FCF line count with 1 pin: 13
+  ok 25 …lator.spec.js:411:3 › Group D — Pin System › D3 — Pin NW lines differ by sweep savings (0% vs 100% keep) (6.0s)
+  ok 26 …lator.spec.js:431:3 › Group D — Pin System › D4 — Pin NW yr10 in comparison table includes sweep savings (3.7s)
+  Pin card contains NW: true
+  ok 27 …nt-simulator.spec.js:452:3 › Group E — Sanity Checks › E1 — SS age 65→67: work-free year same or earlier (3.6s)
+  Work-free @ SS 65: 2034 | SS 67: 2032
+  ok 28 …ulator.spec.js:467:3 › Group E — Sanity Checks › E2 — Lafayette rental off: work income needed increases (3.5s)
+  RW Lafayette ON: $5,738/mo | OFF: $7,791/mo
+  ok 29 …t-simulator.spec.js:482:3 › Group E — Sanity Checks › E3 — Sell 6th St 2030: sell year indicator appears (3.9s)
+  E3 — sell year 2030 confirmed via sale panel content
+  ok 30 …nt-simulator.spec.js:506:3 › Group E — Sanity Checks › E4 — No crashes when switching between all 4 tabs (4.8s)
+  Tab "Simulator" — OK
+  Tab "Cash Flow" — OK
+  Tab "Input / Output Map" — OK
+  Tab "Glossary" — OK
+  ok 31 retirement-simulator.spec.js:519:3 › Group E — Sanity Checks › E5 — Version header shows "v2.10.5" (2.9s)
+  Version badge confirmed: v2.10.5
+  ok 32 …imulator.spec.js:531:3 › Group F — v2.9.1 Features › F1 — savingsAcc: NW yr10 increases as sweep % rises (4.4s)
+  NW yr10 @ 30% keep: $4.8M | @ 0% keep: $4.8M
+  ok 33 …lator.spec.js:557:3 › Group F — v2.9.1 Features › F2 — savingsAcc: NW breakdown Sweep savings row exists (3.5s)
+  Sweep savings final cell: $0.3M
+  ok 34 …› Group F — v2.9.1 Features › F3 — Pin comparison table: appears after pinning, shows Live + pin columns (3.7s)
+  Comparison table visible with Live + Compare F3 columns
+  ok 35 ….js:603:3 › Group F — v2.9.1 Features › F4 — Pin comparison table: key metric rows present and non-empty (3.7s)
+  Comparison table: all 5 metric rows present with values
+  ok 36 …:3 › Group G — HI Debt Engine Correctness › G1 — CC balance in '26 column > $35K (not cleared in year 1) (3.4s)
+  CC balance '26 column: $52
+  ok 37 …7:3 › Group G — HI Debt Engine Correctness › G2 — Total HI debt in '26 > $200K (all three loans present) (3.4s)
+  Total HI debt '26: $247
+  ok 38 … › Group G — HI Debt Engine Correctness › G3 — HI debt clear year ≥ 2030 (avalanche takes several years) (3.4s)
+  HI debt clear: Nov '34
+  Parsed clear year: 2034
+  ok 39 …ebt Engine Correctness › G4 — Nolan loans balance in '26 > $130K (5-month grace period, minimal paydown) (3.4s)
+  Nolan balance '26: $141
+  ok 40 …3 › Group G — HI Debt Engine Correctness › G5 — Family loan row visible at '26 with balance, gone by '28 (3.4s)
+  Family loan '26: $25
+  Family loan '28: $0
+  ok 41 …3:3 › Group G — HI Debt Engine Correctness › G6 — Sophia balance in '26 > $40K (not prematurely cleared) (3.4s)
+  Sophia balance '26: $54
+  ok 42 …:750:3 › Group H — Financial Events Timeline › H1 — Timeline visible on Simulator tab and has event rows (2.9s)
+  Timeline year rows: 14
+  ok 43 …3 › Group H — Financial Events Timeline › H2 — Timeline table column "Before -> After" header is visible (3.0s)
+  H2 — Timeline table headers (Before/Event) confirmed
+  ok 44 … Group H — Financial Events Timeline › H3 — "Nolan loans paid off" event description appears in timeline (2.9s)
+  H3 — Nolan loans paid off event confirmed
+  ok 45 …› Group H — Financial Events Timeline › H4 — "All HI debt cleared" event description appears in timeline (2.9s)
+  H4 — All HI debt cleared event confirmed
+  ok 46 …7:3 › Group H — Financial Events Timeline › H5 — WORK-FREE milestone note includes passive income amount (2.9s)
+  H5 — WORK-FREE milestone with passive income amount confirmed
+  ok 47 … H — Financial Events Timeline › H6 — Health event description includes cause name (Sophia/Nolan/Brenda) (2.9s)
+  H6 — Health cause found: Brenda$44,376/yrCBC / VR disbursementsSS clawback if over-$1,849/mowithheld -- recouped at FR
+A 67Cap ~4%/yr wage inflation: $25,459 in 2027, $26,478 in 2028 · Disappears entirely at your FRA age 67 (2028) · Brenda
+ has no SS yet -- no limit on her 1099sTotal Work Income Required / mobreakdown'26'27'28'29'30'31'32'33'34'35'36'37'38'3
+9'40'41'42'43'44'45'4602K3K5K6KWork-freeSS earnings capFree Cash Flow / moFree Cash→ SweptSurplusbreakdown'26'27'28'29'3
+0'31'32'33'34'35'36'37'38'39'40'41'42'43'44'45'46-968321K2K3K$800 floorHI Debt Balance ($K)breakdown'26'27'28'29'30'31'3
+2'33'34'35'36'37'38'39'40'41'42'43'44'45'46065130195260Net Worth ($M)bookliqbreakdown'26'27'28'29'30'31'32'33'34'35'36'3
+7'38'39'40'41'42'43'44'45'46$0.0M$3.0M$6.0M$9.0M$12.0M$2M$3MFixed Costs / mobreakdown'26'27'28'29'30'31'32'33'34'35'36'3
+7'38'39'40'41'42'43'44'45'46$0$8K$15K$23K$30KCumulative Income vs Cost20-year running totalsincomecostgapcollapsePension
+RentalSSWork'26'27'28'29'30'31'32'33'34'35'36'37'38'39'40'41'42'43'44'45'46$0K$1.5M$3.0M$4.5M$6.0MTotal earned (20yr)$5.
+4MTotal spent (20yr)$5.3MNet gap$98KPension share15%Rental share60%SS share21%Work share4%Financial Events Timeline▲ col
+lapseLive ScenarioIncome eventCost eventMilestoneYearAgeEventBefore -> AfterFCF /moNW $MReq Work /mo202665SSYour SS star
+ts (age 65)$3,271/mo$-321$2.3M$5,738202766WKWork income glide (per work curve)$5,417 → $4,257/mo$1,142$2.5M$3,114RERenta
+l income increase$9,470 → $9,754/moHLHealth insurance drops$1,798 → $1,618/moLNFamily loan paid off−$2,142/mo freed20286
+7WKWork income glide (per work curve)$4,257 → $3,170/mo$308$2.7M$2,862RERental income increase$9,754 → $10,047/mo202968W
+KWork income glide (per work curve)$3,170 → $2,364/mo$-325$3.0M$2,688RERental income increase$10,047 → $10,348/mo203069W
+KWork income glide (per work curve)$2,364 → $1,711/mo$-845$3.2M$2,556RERental income increase$10,348 → $10,659/mo203170W
+KWork income glide (per work curve)$1,711 → $1,148/mo$-890$3.4M$2,038RERental income increase$10,659 → $10,978/moHLHealt
+h insurance drops — Nolan off plan$1,711 → $1,332/mo203271WKWork income glide (per work curve)$1,148 → $699/mo$517$3.7M$
+182RERental income increase$10,978 → $11,308/moHLHealth insurance drops — Brenda → Medicare
+  ok 48 …js:811:3 › Group I — FCF Fixed Costs Breakdown › I1 — Fixed Costs breakdown has "Prop tax/insurance" row (3.4s)
+  I1 — Prop tax/insurance row confirmed in Fixed Costs breakdown
+  ok 49 …c.js:818:3 › Group I — FCF Fixed Costs Breakdown › I2 — Fixed Costs breakdown has "Income tax (est)" row (3.4s)
+  I2 — Income tax (est) row confirmed in Fixed Costs breakdown
+  ok 50 …or.spec.js:825:3 › Group I — FCF Fixed Costs Breakdown › I3 — FCF breakdown "Free Cash (net)" row exists (3.5s)
+  I3 — Free Cash (net) row confirmed in FCF breakdown
+  ok 51 … Costs Breakdown › I4 — FCF breakdown "Mortgage" value in '26 > $3K (covers IO payments on 3 properties) (3.4s)
+  Mortgage '26 (monthly avg): -$5,499
+  ok 52 …pec.js:852:3 › Group J — Liquidation NW Toggle › J1 — Book / liq toggle buttons visible on Simulator tab (3.0s)
+  J1 — book/liq toggle buttons visible
+  ok 53 …t-simulator.spec.js:859:3 › Group J — Liquidation NW Toggle › J2 — Clicking "liq" does not crash the app (3.7s)
+  J2 — liq mode renders without crash
+  ok 54 …:3 › Group J — Liquidation NW Toggle › J3 — Switching to liq mode and back to book renders without crash (4.0s)
+  NW yr10 (book): $4.8M
+  NW yr10 (after toggle back): $4.8M
+  ok 55 …spec.js:891:3 › Group J — Liquidation NW Toggle › J4 — "Liquidation NW Basis" section visible in sidebar (3.0s)
+  J4 — Liquidation NW Basis section visible
+  ok 56 …lator.spec.js:897:3 › Group J — Liquidation NW Toggle › J5 — 15th St basis slider visible and adjustable (4.1s)
+  J5 — 15th St basis slider adjustable without crash
+  ok 57 …ement-simulator.spec.js:917:3 › Group K — Pin Import Rate Fix › K1 — Importing saved JSON shows pin name (3.8s)
+  K1 — Imported pin "hustle" visible
+  ok 58 … K — Pin Import Rate Fix › K2 — Imported pin HI debt clear year is not "Never" (rate conversion correct) (3.8s)
+  Imported pin card: Pinned Scenarioslive on|all|nonePinExport JSONImport JSON1 pin -- auto-savedhustleLaunch RW: $3,717
+/moWork-free: 2029Debt clear: 2035NW yr10: $4.7MFree Cash: $800/moRD: $400/mo -> $10K capOB: $500/mo
+  ok 59 …c.js:945:3 › Group K — Pin Import Rate Fix › K3 — Imported pin NW yr10 is in reasonable range ($2M–$12M) (3.8s)
+  Imported pin NW yr10: $4.7M
+  ok 60 retirement-simulator.spec.js:972:3 › Group L — Regression › L1 — Version header shows v2.10.5 (2.9s)
+  L1 — Version v2.10.5 confirmed
+  ok 61 …or.spec.js:978:3 › Group L — Regression › L2 — payOffHI toggle hidden when sellYear is 2055 (never sell) (3.0s)
+  payOffHI toggle visible at sellYear=2055: false
+  ok 62 …c.js:989:3 › Group L — Regression › L3 — payOffHI resets to false when sellYear changes from 2030 → 2055 (4.3s)
+  payOffHI toggle visible after reset to 2055: false
+  ok 63 …028:3 › Group L — Regression › L4 — No "→ Savings" column before debt clears (sweep only kicks in after) (3.4s)
+  First month row: Jun '26$3,300$3,271$9,470$5,417$21,262-$20,514-$844$800$259KLaunch -- family loan starts
+  ok 64 …ent-simulator.spec.js:1042:3 › Group L — Regression › L5 — No JavaScript errors or crashes on fresh load (3.5s)
+  ok 65 …1051:3 › Group L — Regression › L6 — "Nolan loans paid off" contains dash not arrow (description format) (2.9s)
+  L6 — Event text: Nolan loans paid off (−$1,787/mo)$1,787 → $0/moHIAll HI debt cleared — avalanche
+
+  65 passed (5.2m)
+npm notice
+npm notice New minor version of npm available! 11.9.0 -> 11.12.1
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.12.1
+npm notice To update run: npm install -g npm@11.12.1
+npm notice
+**********************
+Windows PowerShell transcript end
+End time: 20260328073637
+**********************

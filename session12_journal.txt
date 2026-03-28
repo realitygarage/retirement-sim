@@ -1,0 +1,108 @@
+=== Journal Entry 2026-03-27 — Session 12 (reconstructed from App.jsx v2.10.5) ===
+NOTE: Session window was lost before journal was written (laptop reboot after
+Windows update). Journal reconstructed by reading current source files.
+
+FILE: src/App.jsx (primary changes)
+VERSION: v2.10.5
+
+--- WORK COMPLETED (v2.9.1 -> v2.10.5, Claude Code session) ---
+
+[FEATURE] Gross vs. Liquidation NW toggle
+- New SC_DEFAULTS fields: duplex15thBasis=600_000, lafayetteBasis=300_000
+  (6th St basis already existed as BASE.sixthBasis = $930K)
+- New UI sliders in left panel (under cost basis section):
+    "15th St (duplex) basis"  $200K-$1.2M in $25K steps
+    "Lafayette basis"         $100K-$600K in $25K steps
+- New state: const [nwMode, setNwMode] = useState('book') -- 'book' | 'liq'
+- NW chart gets headerExtra prop with book/liq toggle buttons (blue highlight)
+- Chart dataKey switches: nwMode==='liq' ? 'liqNW' : 'nw'
+- liqNW computed in chartData per year per property still held:
+    saleNet = marketValue * (1 - 0.05 selling costs)
+    taxableGain = max(0, saleNet - costBasis - $500K married excl [primary only])
+    capGainsTax = taxableGain * (0.238 fed + 0.044 CO) = 28.2%
+    netEquity = saleNet - mortgageBalance - capGainsTax
+    liqNW = sum(netEquity) + invested*1000 + savAccRaw - hiDebtRaw  (in $M)
+- Pin liqNW also computed per pin using pin's paramSnapshot basis values
+- New setters: setDuplex15thBasis, setLafayetteBasis
+
+[FEATURE] Fixed Costs breakdown expanded
+- Added prop tax/insurance (fc_prop) and income tax (fc_tax) to fixed costs
+- fc_propByYr and fc_taxByYr now tracked in wfData aggregation
+- Fixed costs breakdown table now shows all components including prop + tax
+- fc_prop and fc_tax added to fixedTotal calculation
+
+[FIX] famLoanBal added to HI debt breakdown chart
+- HI debt breakdown series now includes family loan balance (key: "famLoanBal")
+- Color: #a78bfa (purple), hideZero:true
+
+[FIX] Avalanche xtra overstatement
+- Bug: xtra (extra sweep above diCap) was being overstated
+- Fixed: let xtra=sweep (not baseDI - diCap) — correct source for avalanche extra
+
+[FIX] Pin import rate conversion
+- Bug: when importing pins from JSON, rate fields were being double-converted
+  (stored as % integers, re-divided by 100 on import)
+- Fixed: import now correctly handles rate field units
+
+[FIX] Chart headerExtra prop
+- Chart component now accepts headerExtra prop for injecting UI into chart header
+- Used by NW chart for the book/liq toggle buttons
+
+--- TEST SUITE STATUS (reconstructed) ---
+Spec file: retirement-simulator.spec.js (49KB, was 28KB in session 11)
+Tests likely expanded to cover new features -- exact count unknown (was 35/35)
+Need to run: .\run_tests.ps1 to confirm current pass rate
+
+Key numbers (default scenario, v2.10.5):
+  Work needed at launch:    $4,538/mo
+  Work-free year:           2034
+  HI debt clear:            Jun '30 (monthly engine)
+  NW yr10 (book):           ~$5.2M
+  NW yr10 (liq):            lower by ~$300-500K (cap gains + selling costs)
+  Sweep savings:            $2,103K compounded over 21yr at 30% keep
+
+--- OPEN IDEAS / BACKLOG ---
+
+[OPEN -- P2] E3 Playwright test -- sell year viewport (passing via textContent,
+  not toBeVisible -- acceptable)
+[OPEN -- P3] Pin sweep timing off ~6mo vs monthly engine (annual approximation)
+[OPEN] Liquidation NW -- pin comparison table not yet updated to show liq mode
+[OPEN] Glossary entry for book vs liquidation NW not yet updated to reflect
+  the new toggle (still says "book NW" as caveat rather than toggle explanation)
+[OPEN] Tests for liquidation NW toggle and new fixed cost components (fc_prop,
+  fc_tax) not yet written -- spec grew to 49KB but exact new tests unknown
+
+--- KEY NUMBERS (SC_DEFAULTS) ---
+New fields added to SC_DEFAULTS (in defaults.js):
+  duplex15thBasis: 600_000  -- cost basis for 15th St duplex
+  lafayetteBasis:  300_000  -- cost basis for Lafayette property
+  (6th St: BASE.sixthBasis = 930_000 -- unchanged)
+
+--- ARCHITECTURE NOTES (unchanged from session 11) ---
+src/engine.js         -- 405 lines: pure functions, loan data, BASE
+src/defaults.js       -- ~130 lines: SC_DEFAULTS (now with basis fields),
+                         DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION
+src/relationships-data.js -- 114 lines: diagram data only
+src/App.jsx           -- 3248 lines: all React state/hooks/JSX
+
+--- ENVIRONMENT ---
+Stack: React + Vite + JSX (multi-file)
+Src dir: C:\Users\rober\retirement-sim\src\
+Vite dev server: localhost:5173
+Launcher: "Launch Retirement Simulator.bat" in project root
+Test runner: run_tests.ps1 (admin PowerShell required)
+Playwright spec: retirement-simulator.spec.js in project root
+Git: NOT initialized (no .git folder) -- see setup instructions below
+Claude Code: installed via native Windows installer
+
+--- HOW TO RESUME IN A NEW CHAT ---
+1. Upload session12_journal.txt + src/App.jsx to new chat
+2. Upload src/engine.js and src/defaults.js if engine or defaults changes needed
+3. First task: initialize git (see below), run test suite, confirm baseline
+4. Then: pick up from backlog above
+
+--- GIT SETUP (do this once in Git Bash) ---
+cd /c/Users/rober/retirement-sim
+git init
+git add .
+git commit -m "v2.10.5 baseline -- initialize git tracking"
