@@ -1,11 +1,11 @@
-// v3.1.0 -- per-property dispositions, CPA liquidation defaults, settlement gain-offset, 6th St STR group, HI-paydown knob
+// v3.1.1 -- sold-state UI linkage, 6th St segmented income editor, settlement residual + reconciliation fixes
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS } from "./engine.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments } from "./engine.js";
 import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
@@ -14,6 +14,7 @@ if (typeof window !== 'undefined') {
     BASE, buildScenario, keyStats, disposeAsset, taxRecognized,
     DISPO_DEFAULTS, makeParams, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS,
     strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax,
+    sixthSegmentGross, validateSixthSegments,
   };
 }
 import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_W, SVG_H, rNodePos } from "./relationships-data.js";
@@ -65,6 +66,7 @@ export default function App(){
     hiPaydownPct=100, caGainCap=1_200_000,
     sixthIncomeMode='none', sixthSTRMonthly=9_000, sixthSTRSchedule=[],
     sixthSTRStartYear=2026, sixthSTRStopYear=2055, sixthSTRStopOnDebtClear=true,
+    sixthIncomeSegments=[],
   } = sc;
 
   // v3.1.0 shims -- expose disposition-derived legacy field names so existing UI
@@ -107,6 +109,7 @@ export default function App(){
   const setSixthSTRStartYear = v=>setSc(s=>({...s,sixthSTRStartYear:v}));
   const setSixthSTRStopYear  = v=>setSc(s=>({...s,sixthSTRStopYear:v}));
   const setSixthSTRStopOnDebtClear = v=>setSc(s=>({...s,sixthSTRStopOnDebtClear:v}));
+  const setSixthIncomeSegments = v=>setSc(s=>({...s,sixthIncomeSegments:typeof v==="function"?v(s.sixthIncomeSegments||[]):v}));
   const setSettlementNeed  = v=>setSc(s=>({...s,settlementNeed:v}));
   const setSettlementYear  = v=>setSc(s=>({...s,settlementYear:v}));
   const setGainOffsetPct   = v=>setSc(s=>({...s,gainOffsetPct:v}));
@@ -403,25 +406,36 @@ export default function App(){
           ? (_schedEntry ? strScheduleIncome(_schedEntry.segments)/12 : liveParams.duplexTopSTR)
           : topUnit==="ltr" ? liveParams.duplexTopLTR : liveParams.duplexTopMTR;
 
-      // 6th St primary income (MTR legacy or STR new)
-      // Auto-stop STR the year AFTER debt clears (if stopOnDebtClear)
+      // 6th St primary income -- v3.1.1: segments override the simple mode.
+      // Auto-stop the year AFTER debt clears (if stopOnDebtClear); with segments
+      // present the auto-stop applies to ALL kinds, not just STR.
       const _sixthMode = liveParams.sixthIncomeMode || 'none';
+      const _sixthSegs = liveParams.sixthIncomeSegments || [];
       const _debtClearedCalYr = (debtClearedMo>=0)
         ? (new Date(startDate.getFullYear(), startDate.getMonth()+debtClearedMo)).getFullYear()
         : null;
-      const _strActiveMo = (_sixthMode==='str' && keepingFn(calYear)
+      const _sixthDebtOk = !liveParams.sixthSTRStopOnDebtClear || _debtClearedCalYr==null || calYear <= _debtClearedCalYr;
+      const _seg = (_sixthSegs.length>0 && keepingFn(calYear) && _sixthDebtOk)
+        ? _sixthSegs.find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;})
+        : null;
+      const _strActiveMo = (_sixthSegs.length===0 && _sixthMode==='str' && keepingFn(calYear)
         && calYear >= (liveParams.sixthSTRStartYear || 2026)
         && calYear <  (liveParams.sixthSTRStopYear  || 2055)
-        && (!liveParams.sixthSTRStopOnDebtClear || _debtClearedCalYr==null || calYear <= _debtClearedCalYr));
-      const _sixthMtrMo = (_sixthMode==='mtr' && keepingFn(calYear)) ? (()=>{
-          const _me=(mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
-          return _me ? mtrScheduleIncome(_me.segments)/12*rg : sixthRent*(sixthMonths/12)*rg;
-        })() : 0;
-      const _sixthStrGrossMo = _strActiveMo ? (()=>{
-          const _se=(liveParams.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
-          const annualGross = _se ? strScheduleIncome(_se.segments) : (liveParams.sixthSTRMonthly||0)*12;
-          return annualGross/12 * rg;
-        })() : 0;
+        && _sixthDebtOk);
+      // MTR/LTR-kind gross (mgr % netted below); STR-kind gross (platform+clean+mgr netted below)
+      const _sixthMtrMo = _sixthSegs.length>0
+        ? ((_seg && _seg.kind!=='str') ? sixthSegmentGross(_seg)/12*rg : 0)
+        : ((_sixthMode==='mtr' && keepingFn(calYear)) ? (()=>{
+            const _me=(mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
+            return _me ? mtrScheduleIncome(_me.segments)/12*rg : sixthRent*(sixthMonths/12)*rg;
+          })() : 0);
+      const _sixthStrGrossMo = _sixthSegs.length>0
+        ? ((_seg && _seg.kind==='str') ? sixthSegmentGross(_seg)/12*rg : 0)
+        : (_strActiveMo ? (()=>{
+            const _se=(liveParams.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
+            const annualGross = _se ? strScheduleIncome(_se.segments) : (liveParams.sixthSTRMonthly||0)*12;
+            return annualGross/12 * rg;
+          })() : 0);
 
       // rentalMo is GROSS across all units; op costs deducted below
       const rentalMo = _bot*rg
@@ -998,6 +1012,22 @@ export default function App(){
   const gdP={strokeDasharray:"2 4",stroke:bg3};
   const ttP={contentStyle:{background:"#1a2535",border:`1px solid ${bdr}`,borderRadius:6,fontSize:10,color:bright,padding:"8px 12px"}};
 
+  // v3.1.1 sold-state linkage (UI only -- engine gating already exists)
+  const disabledStyle = {opacity:0.4, pointerEvents:"none"};
+  const soldFirstYear = d => !!d && d.mode && d.mode!=='keep' && (d.year||2055) <= BASE.startYear;
+  const soldLater     = d => !!d && d.mode && d.mode!=='keep' && (d.year||2055) >  BASE.startYear;
+  const soldBadge = (d,key) => (d && d.mode && d.mode!=='keep') ? (
+    <span data-testid={`sold-badge-${key}`} style={{fontSize:8,padding:"1px 6px",borderRadius:3,
+      background:red+"22",border:`1px solid ${red}55`,color:red,fontFamily:mono,fontWeight:"bold"}}>
+      SOLD in {d.year||2055}
+    </span>
+  ) : null;
+  const soldCaption = d => soldLater(d) ? (
+    <div style={{fontSize:8,color:dim,marginTop:3,fontStyle:"italic"}}>
+      income applies through {(d.year||2055)-1}, stops at sale
+    </div>
+  ) : null;
+
   // Breakdown config per chart key
   const BREAKDOWNS = {
     reqWork: {
@@ -1370,7 +1400,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.1.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.1.1</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1453,7 +1483,11 @@ export default function App(){
             {/* ONE-TIME DECISIONS */}
             {sect("One-Time Decisions")}
 
-            {/* 6th St sell year */}
+            {/* 6th St sell year -- legacy shim; disposition card is source of truth */}
+            {(()=>{
+              const sixthSliderOverridden = _dSixth.mode==='full_1031' || _dSixth.mode==='partial_1031';
+              const _sixthRes = liveRows.dispoResults?.sixth;
+              return (
             <div style={{marginBottom:12}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{fontSize:10,color:muted}}>Sell 6th St</span>
@@ -1462,32 +1496,27 @@ export default function App(){
                     ? <span style={{fontSize:10,color:red,fontFamily:mono,fontWeight:"bold"}}>{sellYear} (age {65+(sellYear-BASE.startYear)})</span>
                     : <span style={{fontSize:10,color:dim,fontFamily:mono}}>never</span>
                   }
-                  <button onClick={()=>setSellYear(2055)} style={{
+                  <button onClick={()=>setSellYear(2055)} disabled={sixthSliderOverridden} style={{
                     fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
                     background:sellYear>2046?"transparent":bg2,border:`1px solid ${sellYear>2046?dim:bdr}`,
                     color:sellYear>2046?dim:amber}}>never</button>
                 </div>
               </div>
-              <input type="range" min={2026} max={2055} step={1} value={Math.min(sellYear,2055)}
-                onChange={e=>setSellYear(parseInt(e.target.value))}
-                style={{width:"100%",accentColor:red,cursor:"pointer",height:4}}/>
+              <div data-testid="sell-sixth-slider" data-disabled={sixthSliderOverridden?"true":"false"}
+                style={sixthSliderOverridden?disabledStyle:undefined}>
+                <input type="range" min={2026} max={2055} step={1} value={Math.min(sellYear,2055)}
+                  onChange={e=>setSellYear(parseInt(e.target.value))}
+                  style={{width:"100%",accentColor:red,cursor:"pointer",height:4}}/>
+              </div>
+              {sixthSliderOverridden&&(
+                <div style={{fontSize:8,color:amber,marginTop:3,fontStyle:"italic"}}>
+                  Overridden — the 6th St disposition card below wins ({_dSixth.mode==='full_1031'?'Full 1031':'Partial 1031'} in {_dSixth.year||2055})
+                </div>
+              )}
               {sellYear<=2046&&(<>
                 <div style={{fontSize:8,color:dim,marginTop:4,display:"flex",justifyContent:"space-between"}}>
-                  <span>Net proceeds ~${liveParams.sixthNetProceeds>0?Math.round(liveParams.sixthNetProceeds/1000)+"K":"--"}</span>
-                  <span>Cap gains tax ~${liveParams.capGainsTax>0?Math.round(liveParams.capGainsTax/1000)+"K":"--"}</span>
-                </div>
-                <div style={{marginTop:8}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                    <span style={{fontSize:10,color:muted}}>Take as lifestyle draw at close</span>
-                    <span style={{fontSize:10,color:amber,fontFamily:mono}}>{Math.round(saleDrawFrac*100)}% (~${liveParams.sixthNetProceeds>0?Math.round(liveParams.sixthNetProceeds*saleDrawFrac/1000)+"K":"--"})</span>
-                  </div>
-                  <input type="range" min={0} max={0.8} step={0.05} value={saleDrawFrac}
-                    onChange={e=>setSaleDrawFrac(parseFloat(e.target.value))}
-                    style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-                  <div style={{fontSize:8,color:dim,marginTop:3,display:"flex",justifyContent:"space-between"}}>
-                    <span>0% = all to invested cash</span>
-                    <span style={{color:saleDrawFrac>0.5?amber:dim}}>Remainder ${liveParams.sixthNetProceeds>0?Math.round(liveParams.sixthNetProceeds*(1-saleDrawFrac)/1000)+"K":"--"} -> savings</span>
-                  </div>
+                  <span>Net proceeds ~${_sixthRes&&_sixthRes.afterTaxNetProceeds>0?Math.round(_sixthRes.afterTaxNetProceeds/1000)+"K":"--"}</span>
+                  <span>Sale tax ~${_sixthRes&&_sixthRes.totalTax>0?Math.round(_sixthRes.totalTax/1000)+"K":"--"}</span>
                 </div>
                 <div style={{marginTop:6}}>
                   <div style={{fontSize:10,color:muted,marginBottom:3}}>HI debt at closing</div>
@@ -1497,8 +1526,13 @@ export default function App(){
                 </div>
               </>)}
             </div>
+              );
+            })()}
 
-            {/* Lafayette stop year */}
+            {/* Lafayette stop year -- grayed when the Lafayette disposition sale preempts it */}
+            {(()=>{
+              const lafStopOverridden = _dLaf.mode && _dLaf.mode!=='keep' && (_dLaf.year||2055) <= lafStopYear;
+              return (
             <div style={{marginBottom:12}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{fontSize:10,color:muted}}>Lafayette rental stops</span>
@@ -1507,35 +1541,58 @@ export default function App(){
                     ? <span style={{fontSize:10,color:amber,fontFamily:mono,fontWeight:"bold"}}>{lafStopYear} (age {65+(lafStopYear-BASE.startYear)})</span>
                     : <span style={{fontSize:10,color:dim,fontFamily:mono}}>keeps renting</span>
                   }
-                  <button onClick={()=>setLafStopYear(2055)} style={{
+                  <button onClick={()=>setLafStopYear(2055)} disabled={lafStopOverridden} style={{
                     fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
                     background:lafStopYear>2046?"transparent":bg2,border:`1px solid ${lafStopYear>2046?dim:bdr}`,
                     color:lafStopYear>2046?dim:amber}}>never</button>
                 </div>
               </div>
-              <input type="range" min={2026} max={2055} step={1} value={Math.min(lafStopYear,2055)}
-                onChange={e=>setLafStopYear(parseInt(e.target.value))}
-                style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-              <div style={{fontSize:8,color:dim,marginTop:3}}>
-                {lafStopYear<=2046 ? "Lafayette income zeroes from this year (you move in, or stop renting)" : "Lafayette rental income continues through model horizon"}
+              <div data-testid="laf-stop-slider" data-disabled={lafStopOverridden?"true":"false"}
+                style={lafStopOverridden?disabledStyle:undefined}>
+                <input type="range" min={2026} max={2055} step={1} value={Math.min(lafStopYear,2055)}
+                  onChange={e=>setLafStopYear(parseInt(e.target.value))}
+                  style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
               </div>
+              {lafStopOverridden
+                ? <div style={{fontSize:8,color:amber,marginTop:3,fontStyle:"italic"}}>
+                    Overridden — the Lafayette disposition card below wins (sold in {_dLaf.year||2055}, before this stop year)
+                  </div>
+                : <div style={{fontSize:8,color:dim,marginTop:3}}>
+                    {lafStopYear<=2046 ? "Lafayette income zeroes from this year (you move in, or stop renting)" : "Lafayette rental income continues through model horizon"}
+                  </div>}
               {!lafRental&&<div style={{fontSize:8,color:dim,marginTop:2,fontStyle:"italic"}}>Lafayette rental toggle is off -- stop year has no effect</div>}
             </div>
+              );
+            })()}
 
             <div style={{marginBottom:10}}>
-              <div style={{fontSize:10,color:muted,marginBottom:5}}>15th St Top Unit</div>
-              {toggle(topUnit,setTopUnit,[
-                {v:"str",l:"STR"},{v:"ltr",l:"LTR"},{v:"mtr",l:"MTR",c:blue}
-              ])}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                <div style={{fontSize:10,color:muted}}>15th St Top Unit</div>
+                {soldBadge(_dDuplex,'fifteenth')}
+              </div>
+              <div data-testid="topunit-controls" data-disabled={soldFirstYear(_dDuplex)?"true":"false"}
+                style={soldFirstYear(_dDuplex)?disabledStyle:undefined}>
+                {toggle(topUnit,setTopUnit,[
+                  {v:"str",l:"STR"},{v:"ltr",l:"LTR"},{v:"mtr",l:"MTR",c:blue}
+                ])}
+              </div>
+              {soldCaption(_dDuplex)}
             </div>
 
             <div style={{marginBottom:10}}>
-              <div style={{fontSize:10,color:muted,marginBottom:5}}>Lafayette</div>
-              {toggle(lafRental,setLafRental,[{v:true,l:"Rented LTR",c:green},{v:false,l:"Your home / vacant"}])}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                <div style={{fontSize:10,color:muted}}>Lafayette</div>
+                {soldBadge(_dLaf,'barberry')}
+              </div>
+              <div data-testid="laf-controls" data-disabled={soldFirstYear(_dLaf)?"true":"false"}
+                style={soldFirstYear(_dLaf)?disabledStyle:undefined}>
+                {toggle(lafRental,setLafRental,[{v:true,l:"Rented LTR",c:green},{v:false,l:"Your home / vacant"}])}
+              </div>
+              {soldCaption(_dLaf)}
             </div>
 
             {/* v3.1.0 Dispositions & Settlement panel */}
-            {sect("Dispositions & Settlement (v3.1.0)")}
+            {sect("Dispositions & Settlement")}
             <div style={{fontSize:9,color:dim,marginBottom:10,lineHeight:1.5}}>
               Per-property sale / 1031 exchange decisions. Settlement funding pulls from sale proceeds.
               Residual after settlement can pay down HI debt (avalanche order) or stay invested.
@@ -1546,9 +1603,11 @@ export default function App(){
             {['sixth','fifteenth','barberry'].map(key => {
               const d = dispositions?.[key] || {};
               const liq = LIQUIDATION_DEFAULTS[key];
-              const engineRes = liveRows.dispoResults?.[key];
+              // v3.1.1: reconciliation compares against the offset-free engine run --
+              // the CPA sheet assumes no settlement gain-offset, so the slider must not move these rows
+              const engineRes = liveRows.dispoResultsNoOffset?.[key] || liveRows.dispoResults?.[key];
               return (
-                <div key={key} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
+                <div key={key} data-testid={`dispo-${key}-card`} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                     <span style={{fontSize:11,color:bright,fontWeight:"bold"}}>{liq.label}</span>
                     {d.mode!=='keep' && (
@@ -1655,9 +1714,26 @@ export default function App(){
               })()}
             </div>
 
-            {/* 6th St STR / MTR mode selector */}
+            {/* 6th St income mode + segmented editor (v3.1.1) */}
+            {(()=>{
+              const segErrors = validateSixthSegments(sixthIncomeSegments);
+              const segsActive = sixthIncomeSegments.length>0;
+              const updSeg = (ei,patch)=>setSixthIncomeSegments(list=>list.map((x,j)=>j===ei?{...x,...patch}:x));
+              return (
             <div style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:12}}>
-              <div style={{fontSize:11,color:bright,fontWeight:"bold",marginBottom:8}}>6th St Income Mode</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div style={{fontSize:11,color:bright,fontWeight:"bold"}}>6th St Income Mode</div>
+                {soldBadge(_dSixth,'sixth')}
+              </div>
+              {soldCaption(_dSixth)}
+              <div data-testid="sixth-income-controls" data-disabled={soldFirstYear(_dSixth)?"true":"false"}
+                style={soldFirstYear(_dSixth)?disabledStyle:undefined}>
+              {segsActive&&(
+                <div style={{fontSize:8,color:amber,marginBottom:6,fontStyle:"italic"}}>
+                  Income segments below override this mode selector.
+                </div>
+              )}
+              <div style={segsActive?disabledStyle:undefined}>
               <div style={{marginBottom:8}}>
                 {toggle(sixthIncomeMode,setSixthIncomeMode,[
                   {v:'none',l:'None'},{v:'mtr',l:'MTR',c:blue},{v:'str',l:'STR',c:amber}
@@ -1668,12 +1744,6 @@ export default function App(){
                   v=>"$"+v.toLocaleString()+"/mo")}
                 {slider("Start year",sixthSTRStartYear,setSixthSTRStartYear,2026,2046,1,v=>v+"")}
                 {slider("Stop year",sixthSTRStopYear,setSixthSTRStopYear,2026,2055,1,v=>v+"")}
-                <div style={{marginTop:6}}>
-                  <div style={{fontSize:9,color:muted,marginBottom:3}}>Auto-stop after HI debt clears</div>
-                  {toggle(sixthSTRStopOnDebtClear,setSixthSTRStopOnDebtClear,[
-                    {v:true,l:'Auto-stop',c:green},{v:false,l:'Continue'}
-                  ])}
-                </div>
                 <div style={{fontSize:8,color:dim,marginTop:6,fontStyle:"italic"}}>
                   Uses the same platform/cleaning/mgr % as duplex-top STR (see Rental Operating Costs).
                 </div>
@@ -1683,7 +1753,208 @@ export default function App(){
                   Configure rate and months in "Income &amp; Cost Knobs" below.
                 </div>
               )}
+              </div>
+
+              {/* Segmented income editor -- overrides simple mode when non-empty */}
+              <div style={{marginTop:10,borderTop:`1px dashed ${bdr}`,paddingTop:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                  <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Income Segments</span>
+                  <button data-testid="sixth-seg-add"
+                    onClick={()=>setSixthIncomeSegments(list=>{
+                      const prev=list[list.length-1];
+                      const yrFrom=prev?Math.min(2046,(prev.yrTo||prev.yrFrom||2026)+1):2026;
+                      return [...list,{yrFrom, yrTo:Math.min(2046,yrFrom+1), kind:'str',
+                        str:[{days:120,rate:280,type:"nightly"}],
+                        mtr:[{months:10,rate:6000}],
+                        ltr:{monthlyRent:6000}}];
+                    })}
+                    style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
+                      background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
+                    + add segment
+                  </button>
+                </div>
+                <div style={{fontSize:8,color:dim,marginBottom:8}}>
+                  Year-range segments, each STR (days &times; rate, &le;365d/yr), MTR (months &times; rate, &le;12mo/yr) or LTR (flat rent).
+                  Non-empty list overrides the simple mode above. Debt-clear auto-stop applies to all kinds.
+                </div>
+                {sixthIncomeSegments.length===0&&(
+                  <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>No segments -- using simple mode above</div>
+                )}
+                {sixthIncomeSegments.map((seg,ei)=>{
+                  const kColor = seg.kind==='str'?amber:seg.kind==='mtr'?blue:green;
+                  const gross = sixthSegmentGross(seg);
+                  const strDays = (seg.str||[]).reduce((s,g)=>s+(g.days||0),0);
+                  const mtrMos  = (seg.mtr||[]).reduce((s,g)=>s+(g.months||0),0);
+                  return (
+                    <div key={ei} style={{background:bg1,border:`1px solid ${kColor}55`,borderRadius:7,padding:"8px 10px",marginBottom:8}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                        <span style={{fontSize:9,color:kColor,fontWeight:"bold"}}>
+                          {seg.yrFrom}&ndash;{seg.yrTo} — {seg.kind.toUpperCase()} — ${Math.round(gross/12).toLocaleString()}/mo avg
+                        </span>
+                        <button onClick={()=>setSixthIncomeSegments(list=>list.filter((_,j)=>j!==ei))}
+                          style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                            background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
+                      </div>
+                      {/* Outer year range */}
+                      <div style={{display:"flex",gap:8,marginBottom:8}}>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                            <span style={{fontSize:9,color:muted}}>From</span>
+                            <span style={{fontSize:9,color:kColor,fontFamily:mono}}>{seg.yrFrom}</span>
+                          </div>
+                          <input type="range" min={2026} max={2046} step={1} value={seg.yrFrom}
+                            onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrFrom:v,yrTo:Math.max(v,seg.yrTo)});}}
+                            style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                        </div>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                            <span style={{fontSize:9,color:muted}}>To</span>
+                            <span style={{fontSize:9,color:kColor,fontFamily:mono}}>{seg.yrTo}</span>
+                          </div>
+                          <input type="range" min={2026} max={2046} step={1} value={seg.yrTo}
+                            onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrTo:v,yrFrom:Math.min(seg.yrFrom,v)});}}
+                            style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                        </div>
+                      </div>
+                      {/* Kind selector */}
+                      <div style={{marginBottom:8}}>
+                        {toggle(seg.kind,v=>updSeg(ei,{kind:v}),[
+                          {v:'str',l:'STR',c:amber},{v:'mtr',l:'MTR',c:blue},{v:'ltr',l:'LTR',c:green}
+                        ])}
+                      </div>
+                      {/* Inner editors */}
+                      {seg.kind==='str'&&(<>
+                        {(seg.str||[]).map((g,si)=>(
+                          <div key={si} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:5,padding:"6px 8px",marginBottom:6}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                              <div style={{display:"flex",gap:4}}>
+                                {["nightly","monthly"].map(t=>(
+                                  <button key={t} onClick={()=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,type:t}:x)})}
+                                    style={{fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                                      background:(g.type||'nightly')===t?amber+"33":"transparent",
+                                      border:`1px solid ${(g.type||'nightly')===t?amber:bdr}`,
+                                      color:(g.type||'nightly')===t?amber:dim}}>
+                                    {t==="nightly"?"$/night":"$/mo block"}
+                                  </button>
+                                ))}
+                              </div>
+                              {(seg.str||[]).length>1&&(
+                                <button onClick={()=>updSeg(ei,{str:seg.str.filter((_,k)=>k!==si)})}
+                                  style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                                    background:"transparent",border:`1px solid ${bdr}`,color:dim}}>x</button>
+                              )}
+                            </div>
+                            <div style={{marginBottom:5}}>
+                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                                <span style={{fontSize:9,color:muted}}>Days</span>
+                                <span style={{fontSize:9,color:amber,fontFamily:mono}}>{g.days}d</span>
+                              </div>
+                              <input type="range" min={0} max={365} step={5} value={g.days}
+                                onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,days:parseInt(e.target.value)}:x)})}
+                                style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                            </div>
+                            <div>
+                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                                <span style={{fontSize:9,color:muted}}>{(g.type||'nightly')==="nightly"?"Rate/night":"Rate/mo"}</span>
+                                <span style={{fontSize:9,color:amber,fontFamily:mono}}>${(g.rate||0).toLocaleString()}</span>
+                              </div>
+                              <input type="range"
+                                min={(g.type||'nightly')==="nightly"?100:1000}
+                                max={(g.type||'nightly')==="nightly"?1200:4500}
+                                step={(g.type||'nightly')==="nightly"?10:50}
+                                value={g.rate}
+                                onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
+                                style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                            </div>
+                          </div>
+                        ))}
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <button onClick={()=>updSeg(ei,{str:[...(seg.str||[]),{days:30,rate:200,type:"nightly"}]})}
+                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>+ seg</button>
+                          <span style={{fontSize:8,color:strDays>365?red:dim,fontFamily:mono}}>
+                            {strDays}d / 365 {strDays>365?"— over cap, excess ignored":""}
+                          </span>
+                        </div>
+                      </>)}
+                      {seg.kind==='mtr'&&(<>
+                        {(seg.mtr||[]).map((g,si)=>(
+                          <div key={si} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:5,padding:"6px 8px",marginBottom:6}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                              <span style={{fontSize:8,color:dim}}>Block {si+1}</span>
+                              {(seg.mtr||[]).length>1&&(
+                                <button onClick={()=>updSeg(ei,{mtr:seg.mtr.filter((_,k)=>k!==si)})}
+                                  style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                                    background:"transparent",border:`1px solid ${bdr}`,color:dim}}>x</button>
+                              )}
+                            </div>
+                            <div style={{marginBottom:5}}>
+                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                                <span style={{fontSize:9,color:muted}}>Months</span>
+                                <span style={{fontSize:9,color:blue,fontFamily:mono}}>{g.months}mo</span>
+                              </div>
+                              <input type="range" min={1} max={12} step={1} value={g.months}
+                                onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,months:parseInt(e.target.value)}:x)})}
+                                style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
+                            </div>
+                            <div>
+                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                                <span style={{fontSize:9,color:muted}}>Rate/mo</span>
+                                <span style={{fontSize:9,color:blue,fontFamily:mono}}>${(g.rate||0).toLocaleString()}</span>
+                              </div>
+                              <input type="range" min={2000} max={12000} step={250} value={g.rate}
+                                onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
+                                style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
+                            </div>
+                          </div>
+                        ))}
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <button onClick={()=>updSeg(ei,{mtr:[...(seg.mtr||[]),{months:1,rate:5000}]})}
+                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>+ block</button>
+                          <span style={{fontSize:8,color:mtrMos>12?red:dim,fontFamily:mono}}>
+                            {mtrMos}mo / 12 {mtrMos>12?"— over cap, excess ignored":""}
+                          </span>
+                        </div>
+                      </>)}
+                      {seg.kind==='ltr'&&(
+                        <div>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                            <span style={{fontSize:9,color:muted}}>Monthly rent</span>
+                            <span style={{fontSize:9,color:green,fontFamily:mono}}>${(seg.ltr?.monthlyRent||0).toLocaleString()}/mo</span>
+                          </div>
+                          <input type="range" min={2000} max={12000} step={250} value={seg.ltr?.monthlyRent||0}
+                            onChange={e=>updSeg(ei,{ltr:{...(seg.ltr||{}),monthlyRent:parseInt(e.target.value)}})}
+                            style={{width:"100%",accentColor:green,cursor:"pointer",height:4}}/>
+                        </div>
+                      )}
+                      <div style={{fontSize:8,color:kColor,textAlign:"right",marginTop:4}}>
+                        ${gross.toLocaleString()}/yr gross{seg.kind==='str'?" (platform+cleaning+mgr % netted out)":" (mgr % netted in cash flow)"}
+                      </div>
+                    </div>
+                  );
+                })}
+                {segErrors.length>0&&(
+                  <div data-testid="sixth-seg-errors" style={{fontSize:9,color:red,background:red+"11",
+                    border:`1px solid ${red}44`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
+                    {segErrors.map((e,i)=><div key={i}>&#9888; {e}</div>)}
+                  </div>
+                )}
+              </div>
+
+              {/* Debt-clear auto-stop applies to simple STR mode AND all segment kinds */}
+              {(segsActive||sixthIncomeMode==='str')&&(
+                <div style={{marginTop:8}}>
+                  <div style={{fontSize:9,color:muted,marginBottom:3}}>Auto-stop after HI debt clears</div>
+                  {toggle(sixthSTRStopOnDebtClear,setSixthSTRStopOnDebtClear,[
+                    {v:true,l:'Auto-stop',c:green},{v:false,l:'Continue'}
+                  ])}
+                </div>
+              )}
+              </div>
             </div>
+              );
+            })()}
 
             {/* Rental operating cost sliders */}
             {sect("Rental Operating Costs")}
@@ -1692,7 +1963,7 @@ export default function App(){
               {slider("Platform fee (Airbnb/VRBO)",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
               {slider("Cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
             </>)}
-            {(topUnit==="ltr"||topUnit==="mtr"||sc.lafRental||sc.sixthIncomeMode==='mtr'||sc.sixthIncomeMode==='str')&&
+            {(topUnit==="ltr"||topUnit==="mtr"||sc.lafRental||sc.sixthIncomeMode==='mtr'||sc.sixthIncomeMode==='str'||(sc.sixthIncomeSegments||[]).length>0)&&
               slider("Mgmt fee (LTR/MTR/Laf)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross")
             }
             <div style={{fontSize:8,color:dim,marginBottom:10,marginTop:-4}}>

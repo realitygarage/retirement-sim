@@ -522,10 +522,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v3.1.0"', async ({ page }) => {
+  test('E5 — Version header shows "v3.1.1"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v3.1.0');
+    await expect(page.locator('text=v3.1.1').first()).toBeVisible();
+    console.log('  Version badge confirmed: v3.1.1');
   });
 
 });
@@ -975,10 +975,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v3.1.0', async ({ page }) => {
+  test('L1 — Version header shows v3.1.1', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.0').first()).toBeVisible();
-    console.log('  L1 — Version v3.1.0 confirmed');
+    await expect(page.locator('text=v3.1.1').first()).toBeVisible();
+    console.log('  L1 — Version v3.1.1 confirmed');
   });
 
   test('L2 — payOffHI toggle hidden when sellYear is 2055 (never sell)', async ({ page }) => {
@@ -1070,10 +1070,10 @@ test.describe('Group L — Regression', () => {
 
 });
 
-// ─── Group M: v3.1.0 Dispositions & Settlement (spec §7) ────────────────────
+// ─── Group M: v3.1.1 Dispositions & Settlement (spec §7) ────────────────────
 // disposeAsset unit tests via window.__engine + integration tests via buildScenario
 
-test.describe('Group M — v3.1.0 Dispositions', () => {
+test.describe('Group M — v3.1.1 Dispositions', () => {
 
   test('M1 — disposeAsset home: sec121 applied, no recapture/clawback', async ({ page }) => {
     await loadApp(page);
@@ -1274,9 +1274,9 @@ test.describe('Group M — v3.1.0 Dispositions', () => {
     expect(result.ccBal).toBe(0);
   });
 
-  test('M11 — Version badge shows v3.1.0', async ({ page }) => {
+  test('M11 — Version badge shows v3.1.1', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.0').first()).toBeVisible();
+    await expect(page.locator('text=v3.1.1').first()).toBeVisible();
   });
 
   test('M12 — window.__engine exposed with disposeAsset/taxRecognized', async ({ page }) => {
@@ -1287,6 +1287,216 @@ test.describe('Group M — v3.1.0 Dispositions', () => {
         && typeof window.__engine?.taxRecognized === 'function';
     });
     expect(hasEngine).toBe(true);
+  });
+});
+
+// ─── Group N: v3.1.1 Sold-state UI linkage, 6th St segments, settlement fixes ─
+
+test.describe('Group N — v3.1.1 Sold-state UI + 6th St segments', () => {
+
+  test('N1 — 15th sold in FIRST year disables Top Unit controls + shows badge', async ({ page }) => {
+    await loadApp(page);
+    const card = page.locator('[data-testid="dispo-fifteenth-card"]');
+    await card.scrollIntoViewIfNeeded();
+    await card.getByRole('button', { name: 'Sell', exact: true }).click();
+    await page.waitForTimeout(200);
+    // Year slider = first range input in the card once mode != keep.
+    // Use the native prototype setter so React's value tracker sees the change.
+    const yearSlider = card.locator('input[type="range"]').first();
+    await yearSlider.evaluate(el => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, '2026');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForTimeout(250);
+    await expect(page.locator('[data-testid="sold-badge-fifteenth"]')).toHaveText(/SOLD in 2026/);
+    await expect(page.locator('[data-testid="topunit-controls"]')).toHaveAttribute('data-disabled', 'true');
+    console.log('  N1 — Top Unit controls disabled when 15th sold in 2026');
+  });
+
+  test('N2 — 15th sold LATER: controls active, caption shows income-through year', async ({ page }) => {
+    await loadApp(page);
+    const card = page.locator('[data-testid="dispo-fifteenth-card"]');
+    await card.scrollIntoViewIfNeeded();
+    await card.getByRole('button', { name: 'Sell', exact: true }).click();
+    const yearSlider = card.locator('input[type="range"]').first();
+    await yearSlider.evaluate(el => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, '2030');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForTimeout(250);
+    await expect(page.locator('[data-testid="sold-badge-fifteenth"]')).toHaveText(/SOLD in 2030/);
+    await expect(page.locator('[data-testid="topunit-controls"]')).toHaveAttribute('data-disabled', 'false');
+    await expect(page.getByText('income applies through 2029, stops at sale').first()).toBeVisible();
+    console.log('  N2 — Later sale keeps controls active with caption');
+  });
+
+  test('N3 — segments override the flat/simple mode selector', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const common = {sixthIncomeMode:'str', sixthSTRMonthly:9000, sixthSTRStopOnDebtClear:false,
+        strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0};
+      const flat = buildScenario(makeParams(common));
+      const seg  = buildScenario(makeParams(Object.assign({}, common, {
+        sixthIncomeSegments: [{yrFrom:2026, yrTo:2027, kind:'mtr', mtr:[{months:10, rate:6000}]}],
+      })));
+      const none = buildScenario(makeParams({sixthIncomeMode:'none'}));
+      return {
+        flat26: flat.find(r=>r.cal===2026).rental,
+        seg26:  seg.find(r=>r.cal===2026).rental,
+        none26: none.find(r=>r.cal===2026).rental,
+        seg28:  seg.find(r=>r.cal===2028).rental,   // no covering segment -> no 6th income
+        none28: none.find(r=>r.cal===2028).rental,
+      };
+    });
+    console.log('  N3 — flat26=$'+result.flat26+', seg26=$'+result.seg26+', seg28=$'+result.seg28);
+    // Segment (10mo x $6000 = $60K/yr = $5K/mo gross) != flat STR ($9K/mo x 93% = $8.37K/mo net)
+    expect(result.seg26).not.toBe(result.flat26);
+    expect(Math.abs((result.seg26 - result.none26) - 5000)).toBeLessThanOrEqual(2);
+    // Outside all segments, 6th contributes nothing (overrides simple mode entirely)
+    expect(result.seg28).toBe(result.none28);
+  });
+
+  test('N4 — empty segments list falls back to flat mode IDENTICALLY', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const mk = extra => buildScenario(makeParams(Object.assign({
+        sixthIncomeMode:'str', sixthSTRMonthly:9000, sixthSTRStopOnDebtClear:false,
+        strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0,
+      }, extra))).map(r=>({rental:r.rental, nw:r.nw, surplus:r.surplus}));
+      const a = mk({});
+      const b = mk({sixthIncomeSegments: []});
+      const mtrA = buildScenario(makeParams({sixthIncomeMode:'mtr'})).map(r=>r.rental);
+      const mtrB = buildScenario(makeParams({sixthIncomeMode:'mtr', sixthIncomeSegments:[]})).map(r=>r.rental);
+      return {
+        strIdentical: JSON.stringify(a)===JSON.stringify(b),
+        mtrIdentical: JSON.stringify(mtrA)===JSON.stringify(mtrB),
+      };
+    });
+    expect(result.strIdentical).toBe(true);
+    expect(result.mtrIdentical).toBe(true);
+    console.log('  N4 — empty segments identical to flat mode (STR + MTR back-compat)');
+  });
+
+  test('N5 — overlapping outer segment year ranges rejected by validator', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {validateSixthSegments} = window.__engine;
+      const overlapping = validateSixthSegments([
+        {yrFrom:2026, yrTo:2030, kind:'ltr', ltr:{monthlyRent:5000}},
+        {yrFrom:2029, yrTo:2032, kind:'mtr', mtr:[{months:10, rate:6000}]},
+      ]);
+      const clean = validateSixthSegments([
+        {yrFrom:2026, yrTo:2028, kind:'ltr', ltr:{monthlyRent:5000}},
+        {yrFrom:2029, yrTo:2032, kind:'mtr', mtr:[{months:10, rate:6000}]},
+      ]);
+      return {overlapErrs: overlapping.length, cleanErrs: clean.length, msg: overlapping[0]||''};
+    });
+    console.log('  N5 — validator: '+result.msg);
+    expect(result.overlapErrs).toBeGreaterThan(0);
+    expect(result.cleanErrs).toBe(0);
+  });
+
+  test('N6 — inner caps enforced: STR days clamp to 365, MTR months to 12', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {sixthSegmentGross, validateSixthSegments} = window.__engine;
+      return {
+        strClamped: sixthSegmentGross({kind:'str', str:[{days:300, rate:100},{days:200, rate:100}]}),
+        mtrClamped: sixthSegmentGross({kind:'mtr', mtr:[{months:10, rate:1000},{months:5, rate:1000}]}),
+        strErrs: validateSixthSegments([{yrFrom:2026, yrTo:2026, kind:'str', str:[{days:400, rate:100}]}]).length,
+        mtrErrs: validateSixthSegments([{yrFrom:2026, yrTo:2026, kind:'mtr', mtr:[{months:14, rate:1000}]}]).length,
+      };
+    });
+    expect(result.strClamped).toBe(365 * 100);   // 500 days entered, 365 counted
+    expect(result.mtrClamped).toBe(12 * 1000);   // 15 months entered, 12 counted
+    expect(result.strErrs).toBeGreaterThan(0);
+    expect(result.mtrErrs).toBeGreaterThan(0);
+    console.log('  N6 — caps: STR $'+result.strClamped+'/yr, MTR $'+result.mtrClamped+'/yr');
+  });
+
+  test('N7 — segment income nets costs and respects debt-clear auto-stop (all kinds)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const none = buildScenario(makeParams({sixthIncomeMode:'none'}));
+      // STR-kind segment: 100d x $300 = $30K/yr gross, 7% op cost -> $27.9K/yr net
+      const str = buildScenario(makeParams({
+        sixthIncomeMode:'none', sixthSTRStopOnDebtClear:false,
+        strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0,
+        sixthIncomeSegments: [{yrFrom:2026, yrTo:2046, kind:'str', str:[{days:100, rate:300, type:'nightly'}]}],
+      }));
+      const strDelta26 = (str.find(r=>r.cal===2026).rental - none.find(r=>r.cal===2026).rental) * 12;
+      // MTR-kind segment + auto-stop on debt clear
+      const mtrStop = buildScenario(makeParams({
+        sixthIncomeMode:'none', sixthSTRStopOnDebtClear:true,
+        sixthIncomeSegments: [{yrFrom:2026, yrTo:2046, kind:'mtr', mtr:[{months:10, rate:6000}]}],
+      }));
+      const clearYr = mtrStop.find(r=>r.hiDebt===0)?.cal;
+      return {
+        strDelta26,
+        clearYr,
+        rentalAtClear:    mtrStop.find(r=>r.cal===clearYr)?.rental,
+        rentalAfterClear: mtrStop.find(r=>r.cal===clearYr+1)?.rental,
+        noneAfterClear:   none.find(r=>r.cal===clearYr+1)?.rental,
+      };
+    });
+    console.log('  N7 — STR seg net delta 2026: $'+Math.round(result.strDelta26)+'/yr (expect ~$27.9K); MTR stops after '+result.clearYr);
+    expect(Math.abs(result.strDelta26 - 30000*0.93)).toBeLessThan(60);   // monthly rounding tolerance
+    expect(result.clearYr).toBeTruthy();
+    expect(result.rentalAfterClear).toBeLessThan(result.rentalAtClear);
+    expect(result.rentalAfterClear).toBe(result.noneAfterClear);         // MTR-kind fully stopped
+  });
+
+  test('N8 — REGRESSION: offset=0 -> residual === afterTaxNetProceeds - settlementNeed', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const rows = buildScenario(makeParams({
+        dispositions: {sixth: {mode:'sell_taxable', year:2026}},
+        settlementNeed: 525000, settlementYear: 2026, gainOffsetPct: 0, hiPaydownPct: 0,
+      }));
+      const d = rows.dispoResults.sixth;
+      const r26 = rows.find(r=>r.cal===2026);
+      return {
+        afterTax: d.afterTaxNetProceeds,
+        grossPrice: d.grossPrice,
+        residualFromRows: r26.dispoNet - r26.settlementOut,
+      };
+    });
+    const expectedResidual = Math.round(result.afterTax - 525000);
+    console.log('  N8 — proceeds=$'+Math.round(result.afterTax/1000)+'K, residual=$'+Math.round(result.residualFromRows/1000)+'K');
+    expect(Math.abs(result.residualFromRows - expectedResidual)).toBeLessThanOrEqual(1);
+    // v3.1.1: engine must honor the Sale price slider (was silently using BASE value x appreciation)
+    expect(result.grossPrice).toBe(1675000);
+  });
+
+  test('N9 — Reconciliation rows computed at offset=0 regardless of slider', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const mk = off => buildScenario(makeParams({
+        dispositions: {fifteenth: {mode:'sell_taxable', year:2026, salesPrice:1375000,
+          adjustedBasis:424309, caSourceDeferredGain:801441, depreciationRecapture:44000}},
+        settlementNeed:525000, settlementYear:2026, gainOffsetPct:off,
+      }));
+      const at0 = mk(0), at50 = mk(50);
+      return {
+        noOff0:  at0.dispoResultsNoOffset.fifteenth.totalTax,
+        noOff50: at50.dispoResultsNoOffset.fifteenth.totalTax,
+        live0:   at0.dispoResults.fifteenth.totalTax,
+        live50:  at50.dispoResults.fifteenth.totalTax,
+      };
+    });
+    console.log('  N9 — noOffset tax: $'+Math.round(result.noOff0/1000)+'K (slider 0) vs $'+Math.round(result.noOff50/1000)+'K (slider 50)');
+    expect(result.noOff50).toBe(result.noOff0);          // reconciliation rows immune to slider
+    expect(result.noOff0).toBe(result.live0);            // and equal to live results at offset 0
+    expect(result.live50).toBeLessThan(result.live0);    // while live results still respond
   });
 
 });

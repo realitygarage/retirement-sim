@@ -1,0 +1,159 @@
+=== SESSION 15 JOURNAL — v3.1.1 ===
+Date: 2026-07-02
+Session goal: Sold-state UI linkage, 6th St segmented income editor,
+settlement residual + reconciliation fixes.
+
+--- WHAT SHIPPED ---
+
+v3.1.1 -- sold-state UI linkage, 6th St segmented income editor, settlement
+residual + reconciliation fixes.
+
+--- 1. SOLD-STATE LINKAGE (UI only; engine gating already existed) ---
+
+- New helpers in App.jsx (after chart style consts): soldFirstYear / soldLater /
+  soldBadge(d,key) / soldCaption(d) / disabledStyle.
+- "SOLD in {year}" red badge shown on the three income-mode controls when the
+  matching disposition mode != keep:
+    * 15th St Top Unit selector        <- dispositions.fifteenth
+    * Lafayette Rented-LTR toggle      <- dispositions.barberry
+    * 6th St Income Mode card          <- dispositions.sixth
+- Disposition year == first model year (2026): controls fully disabled
+  (opacity .4 + pointerEvents none, data-disabled="true" for tests).
+  Later year: controls stay active with caption "income applies through
+  {year-1}, stops at sale".
+- Legacy slider graying:
+    * "Lafayette rental stops" grays when barberry disposition sells at or
+      before the stop year (sale preempts the stop) -- note says the
+      disposition card wins.
+    * "Sell 6th St" grays only when dispositions.sixth.mode is full_1031 or
+      partial_1031 (modes the shim slider can't express). For keep /
+      sell_taxable the slider and card write the same field, so it stays live.
+- Bonus: the Sell-6th "Net proceeds / Cap gains tax" readouts had shown "--"
+  since v3.1.0 (they read the removed liveParams.sixthNetProceeds). Now wired
+  to liveRows.dispoResults.sixth. The dead "Take as lifestyle draw at close"
+  slider (setter was a no-op since v3.1.0) was removed.
+
+--- 2. 6TH ST SEGMENTED INCOME EDITOR ---
+
+Data shape (defaults.js, in SIXTH_STR_DEFAULTS so it lands in DEFAULTS +
+SC_DEFAULTS + pin snapshots):
+  sixthIncomeSegments: [
+    { yrFrom, yrTo, kind: 'str'|'mtr'|'ltr',
+      str: [{ days, rate, type:'nightly'|'monthly' }],   // Σ days <= 365/yr
+      mtr: [{ months, rate }],                            // Σ months <= 12/yr
+      ltr: { monthlyRent } }
+  ]
+
+Engine (engine.js):
+- New exports: sixthSegmentGross(seg) -- annual gross for one outer segment,
+  inner caps ENFORCED by clamping (excess days/months ignored);
+  validateSixthSegments(segs) -- returns human-readable errors for overlapping
+  outer year ranges and cap violations (UI display + tests).
+- buildScenario 6th-income block consolidated: one sixthIncome value feeds
+  both the annual loop and the monthly mirror (previously duplicated code --
+  guarantees "empty segments == flat mode" identity).
+- Precedence: non-empty sixthIncomeSegments overrides the simple mode selector
+  (and sixthSTRStartYear/StopYear); empty list = simple mode + sixthMTR
+  back-compat unchanged.
+- Costs: STR-kind nets platform+cleaning+mgr % inline (like duplex-top STR);
+  MTR/LTR kinds stay gross in the annual engine and net mgr % in the monthly
+  wfData engine (same as the pre-existing 6th MTR treatment).
+- rentGrowth applied via the same rg multiplier the duplex schedules use.
+- sixthSTRStopOnDebtClear applies across ALL segment kinds (income continues
+  through the clear year, stops the year after -- same semantics as STR).
+- wfData (App.jsx) mirrors this: segment gross feeds the existing
+  _sixthMtrMo/_sixthStrGrossMo variables so the existing rentalOpCost lines
+  net the right knobs.
+
+UI: "Income Segments" list inside the 6th St Income Mode card, same nested
+pattern as the duplex strSchedule/mtrSchedule editors: outer rows with
+From/To year sliders + STR/MTR/LTR kind toggle; inner editors per kind
+(STR: days x nightly-or-monthly rate segs; MTR: months x rate blocks;
+LTR: single rent slider). Cap counters go red over 365d/12mo; validator
+errors render in a red box (data-testid="sixth-seg-errors"). When any
+segment exists the simple-mode selector grays with a note.
+
+--- 3. BUG FIXES ---
+
+(a) Settlement card "Sale proceeds" showed $919K where ~$770K expected.
+    Diagnosis (via node harness dumping the disposeAsset return object --
+    the temporary console.log equivalent; not left in committed code):
+    the card ALREADY used afterTaxNetProceeds and tax + mortgage payoff WERE
+    subtracted. The real drop-out was upstream: computeDispo derived
+    fmv = BASE value x (1+reApp)^yrIdx and silently IGNORED the disposition
+    card's Sale price slider (d.salesPrice). A 2028 6th sale off 1.7M grown
+    = $919K; off the $1,675K slider price = $787K-at-2026-level. Fix:
+    fmv = def.salesPrice when > 0 (the slider IS the sale-year price; no
+    appreciation growth applied to it), fallback to the old formula.
+    NOTE: engine tax (~$49K, 23.8%+4.4% on post-§121 gain) still runs below
+    the CPA sheet's $62K -- that residual delta shows in the reconciliation
+    card and is a rate-calibration question for the CPA, not a plumbing bug.
+(b) Reconciliation-vs-CPA rows now compare against a snapshot taken BEFORE
+    the settlement gain-offset and same-year bump mutate the results
+    (rows.dispoResultsNoOffset, shallow-cloned after the CA-cap pass).
+    The CPA sheet assumes no offset, so the gainOffsetPct slider no longer
+    moves the reconciliation deltas. Live totals (settlement panel, cash
+    flow) still respond to the slider.
+
+--- FILES CHANGED ---
+
+src/engine.js      sixthSegmentGross + validateSixthSegments; salesPrice fix
+                   in computeDispo; dispoResultsNoOffset snapshot; 6th income
+                   block consolidated (annual + mirror now share one value).
+src/defaults.js    sixthIncomeSegments: [] added to SIXTH_STR_DEFAULTS.
+src/App.jsx        v3.1.1 header + badge; sold-state helpers + badges/
+                   disables/captions; legacy slider graying; segment editor;
+                   reconciliation uses dispoResultsNoOffset; wfData segment
+                   support; window.__engine += sixthSegmentGross,
+                   validateSixthSegments; data-testids (dispo-{key}-card,
+                   sold-badge-{key}, topunit-controls, laf-controls,
+                   sixth-income-controls, laf-stop-slider, sell-sixth-slider,
+                   sixth-seg-add, sixth-seg-errors); section header renamed
+                   "Dispositions & Settlement" (version suffix dropped).
+retirement-simulator.spec.js
+                   E5/L1/M11 -> v3.1.1. New Group N (9 tests):
+                   N1 sold-in-first-year disables Top Unit + badge
+                   N2 later sale keeps controls + caption
+                   N3 segments override flat mode
+                   N4 empty segments identical to flat (STR + MTR)
+                   N5 overlapping outer ranges rejected (validator)
+                   N6 inner caps enforced (clamp + validator)
+                   N7 segment income nets costs + debt-clear auto-stop (MTR
+                      kind stops too)
+                   N8 REGRESSION offset=0: residual == afterTaxNetProceeds -
+                      settlementNeed; grossPrice honors salesPrice slider
+                   N9 reconciliation rows immune to gainOffsetPct slider
+
+--- FINAL TEST RESULTS ---
+
+  86 passed (first run 84/86 -- N1/N2 failed because plain el.value
+  assignment doesn't trip React's input value tracker; fixed by setting via
+  the native HTMLInputElement prototype setter before dispatching input).
+
+--- SEMANTIC NOTES ---
+
+- Sale price slider is now the sale-YEAR price, not a 2026 figure grown by
+  appreciation. Selling in a late year without touching the slider will
+  understate proceeds -- drag the slider to your expected future price.
+- Inner-cap enforcement is by clamping (excess days/months earn nothing),
+  plus a visible validator error. Overlapping outer ranges: engine uses the
+  first covering segment; validator flags it in red -- not silently merged.
+- Segments override the START/STOP years of simple STR mode entirely; only
+  sixthSTRStopOnDebtClear carries over (all kinds).
+- The reconciliation card intentionally diverges from live totals when
+  gainOffsetPct > 0 -- that is the point of fix (b).
+
+--- OPEN BACKLOG (carried + new) ---
+
+[P1] Phase 2: per-property disposeAsset in liquidation-NW chart math.
+[P1] CPA rate calibration: engine 6th-sale tax $49K vs CPA sheet $62K
+     (visible in reconciliation card) -- ask accountant which rates differ.
+[P2] Pin Comparison Table book/liq NW mode toggle.
+[P2] Glossary: dispositions, settlement, segments, paydown, cashAst floor.
+[P3] E3 scroll-into-view.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Read this journal + v3_phase1_consolidated_spec.md.
+2. Version bump on every change (App.jsx header comment + UI badge div).
+   This session: v3.1.0 -> v3.1.1.

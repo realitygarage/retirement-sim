@@ -67,6 +67,10 @@ export const SIXTH_STR_DEFAULTS = {
   sixthSTRStartYear:         2026,
   sixthSTRStopYear:          2055,
   sixthSTRStopOnDebtClear:   true,   // auto-stop STR the year HI debt hits 0
+  // v3.1.1 segmented income editor -- overrides the simple mode selector when non-empty.
+  // [{ yrFrom, yrTo, kind:'str'|'mtr'|'ltr',
+  //    str:[{days,rate,type}], mtr:[{months,rate}], ltr:{monthlyRent} }]
+  sixthIncomeSegments:         [],
 };
 
 // -----------------------------------------------------------------------------

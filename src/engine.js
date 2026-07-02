@@ -140,6 +140,60 @@ export function mtrScheduleIncome(segments){
 }
 
 // =============================================================================
+// 6TH ST SEGMENTED INCOME (v3.1.1)
+// Outer segment: { yrFrom, yrTo, kind:'str'|'mtr'|'ltr',
+//                  str:[{days,rate,type?}], mtr:[{months,rate}], ltr:{monthlyRent} }
+// Inner caps enforced here: STR days clamp to 365/yr, MTR months to 12/yr.
+// =============================================================================
+export function sixthSegmentGross(seg){
+  if(!seg) return 0;
+  if(seg.kind==='ltr') return (seg.ltr?.monthlyRent||0)*12;
+  if(seg.kind==='mtr'){
+    let used=0,total=0;
+    for(const g of (seg.mtr||[])){
+      if(!g.months||!g.rate) continue;
+      const m=Math.min(g.months, Math.max(0,12-used));
+      total+=m*g.rate; used+=m;
+    }
+    return total;
+  }
+  // 'str' -- same inner shape as strSchedule segments (days x nightly or monthly rate)
+  let used=0,total=0;
+  for(const g of (seg.str||[])){
+    if(!g.days||!g.rate) continue;
+    const d=Math.min(g.days, Math.max(0,365-used));
+    total += g.type==='monthly' ? (d/30)*g.rate : d*g.rate;
+    used+=d;
+  }
+  return total;
+}
+
+// Returns [] when valid; list of human-readable errors otherwise.
+export function validateSixthSegments(segs){
+  const errors=[];
+  const list=segs||[];
+  for(let i=0;i<list.length;i++){
+    const a=list[i];
+    const aF=a.yrFrom??a.yr??2026, aT=a.yrTo??a.yr??2026;
+    for(let j=i+1;j<list.length;j++){
+      const b=list[j];
+      const bF=b.yrFrom??b.yr??2026, bT=b.yrTo??b.yr??2026;
+      if(aF<=bT && bF<=aT)
+        errors.push(`Segments ${i+1} and ${j+1} overlap (${aF}–${aT} vs ${bF}–${bT})`);
+    }
+    if(a.kind==='str'){
+      const d=(a.str||[]).reduce((s,g)=>s+(g.days||0),0);
+      if(d>365) errors.push(`Segment ${i+1}: ${d} STR days exceeds 365/yr cap`);
+    }
+    if(a.kind==='mtr'){
+      const m=(a.mtr||[]).reduce((s,g)=>s+(g.months||0),0);
+      if(m>12) errors.push(`Segment ${i+1}: ${m} MTR months exceeds 12/yr cap`);
+    }
+  }
+  return errors;
+}
+
+// =============================================================================
 // DISPOSITION MODEL (v3.1.0)  --  per-property sale / 1031 tax math
 // =============================================================================
 export const DISPO_DEFAULTS = {
@@ -288,7 +342,9 @@ export function buildScenario(p) {
   function computeDispo(def, baseVal, baseMtg, baseRate, isPrimary){
     if(def.mode==='keep') return {mode:'keep', year:Infinity, afterTaxNetProceeds:0, totalTax:0, recognizedGain:0, caSourceDeferredGain:0};
     const yrIdx = Math.max(0, (def.year||2055) - BASE.startYear);
-    const fmv   = baseVal * Math.pow(1+p.reAppreciation, yrIdx);
+    // v3.1.1: the Sale price slider IS the sale-year price. Previously fmv came from
+    // BASE value x appreciation and salesPrice was silently ignored (proceeds ran high).
+    const fmv   = (def.salesPrice > 0) ? def.salesPrice : baseVal * Math.pow(1+p.reAppreciation, yrIdx);
     const mtgB  = remainBal(baseMtg, baseRate, 30, 5+yrIdx);
     const depTaken = (def.depreciationRecapture || 0) / DISPO_DEFAULTS.recaptureRate;
     const propObj = {
@@ -337,6 +393,15 @@ export function buildScenario(p) {
     }
     capUsed += cappedCaSlice;
   }
+
+  // v3.1.1: snapshot per-property results BEFORE settlement gain-offset and
+  // same-year bump -- the CPA sheet assumes no offset, so the Reconciliation-vs-CPA
+  // card must compare against these regardless of the gainOffsetPct slider.
+  const dispoResNoOffset = {
+    sixth:     { ...dispoRes.sixth },
+    barberry:  { ...dispoRes.barberry },
+    fifteenth: { ...dispoRes.fifteenth },
+  };
 
   // Settlement gain-offset (§4.4)
   const settleYr      = p.settlementYear || BASE.startYear;
@@ -467,24 +532,35 @@ export function buildScenario(p) {
     }
     if(lafRenting) rental += BASE.lafayetteRent*12*rg;
 
-    // 6th St primary income (MTR legacy or STR new, v3.1.0)
+    // 6th St primary income -- v3.1.1: segmented editor overrides the simple mode
+    // selector when non-empty. Debt-clear auto-stop (spec §4.3) applies to STR in
+    // simple mode and to ALL segment kinds in segment mode.
     const sixthMode = p.sixthIncomeMode || 'none';
-    if(sixthMode==='mtr' && keepPrimary){
+    const sixthSegs = p.sixthIncomeSegments || [];
+    const sixthDebtOk = !p.sixthSTRStopOnDebtClear || debtClearedYr==null || cal <= debtClearedYr;
+    const strCostPct = (p.strPlatformPct||0) + (p.strCleanPct||0) + (p.mgrPct||0);
+    let sixthIncome = 0;   // annual $, net of STR op costs (MTR/LTR costs handled as before)
+    if(sixthSegs.length > 0){
+      if(keepPrimary && sixthDebtOk){
+        const seg = sixthSegs.find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
+        if(seg){
+          const gross = sixthSegmentGross(seg)*rg;
+          sixthIncome = seg.kind==='str' ? gross*(1-strCostPct) : gross;
+        }
+      }
+    } else if(sixthMode==='mtr' && keepPrimary){
       const mtrEntry=(p.mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
       const mtrAnnual=mtrEntry ? mtrScheduleIncome(mtrEntry.segments) : p.sixthMTRRent*p.sixthMTRMonths;
-      rental += mtrAnnual*rg;
-    }
-    // STR auto-stops the year AFTER debt clears (spec §4.3)
-    const strActive = sixthMode==='str' && keepPrimary
+      sixthIncome = mtrAnnual*rg;
+    } else if(sixthMode==='str' && keepPrimary
       && cal >= (p.sixthSTRStartYear || 2026)
       && cal <  (p.sixthSTRStopYear  || 2055)
-      && (!p.sixthSTRStopOnDebtClear || debtClearedYr==null || cal <= debtClearedYr);
-    if(strActive){
+      && sixthDebtOk){
       const strEntry=(p.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
       const strAnnualGross = strEntry ? strScheduleIncome(strEntry.segments) : (p.sixthSTRMonthly||0)*12;
-      const strCostPct = (p.strPlatformPct||0) + (p.strCleanPct||0) + (p.mgrPct||0);
-      rental += strAnnualGross * (1 - strCostPct) * rg;
+      sixthIncome = strAnnualGross * (1 - strCostPct) * rg;
     }
+    rental += sixthIncome;
 
     // -- cashAst: rerun from y=0..yr with dispositions, settlement, paydown, draws --
     let cashAst = 0;
@@ -534,17 +610,7 @@ export function buildScenario(p) {
       else                       _rental0+=p.duplexTopSTR*_rg0;
     }
     if(lafRenting) _rental0+=BASE.lafayetteRent*_rg0;
-    if(sixthMode==='mtr' && keepPrimary){
-      const _mtrEntry=(p.mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
-      const _mtrAnnual=_mtrEntry ? mtrScheduleIncome(_mtrEntry.segments) : p.sixthMTRRent*p.sixthMTRMonths;
-      _rental0 += _mtrAnnual/12*_rg0;
-    }
-    if(strActive){
-      const _strEntry=(p.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
-      const _strAnnualGross = _strEntry ? strScheduleIncome(_strEntry.segments) : (p.sixthSTRMonthly||0)*12;
-      const _strCostPct = (p.strPlatformPct||0) + (p.strCleanPct||0) + (p.mgrPct||0);
-      _rental0 += _strAnnualGross * (1 - _strCostPct) / 12 * _rg0;
-    }
+    _rental0 += sixthIncome/12;   // v3.1.1: same annual figure as main loop (rg already applied)
     const _ss0    = ((p.ssStartYear&&(BASE.startYear+yr)>=p.ssStartYear)?p.ssAmount:0)+((BASE.startYear+yr)>=BASE.brendaFraYear?BASE.brendaSsFRA:0);
     const _work0  = workFromCurve(yr, p.workPts)*_inf0;
     const _incMo  = BASE.pensionMonthly + _ss0 + _rental0 + _work0;
@@ -687,6 +753,7 @@ export function buildScenario(p) {
   }
   // Expose disposition details for reconciliation card / UI
   rows.dispoResults = dispoRes;
+  rows.dispoResultsNoOffset = dispoResNoOffset;  // v3.1.1: offset-free, for CPA reconciliation
   let cumInc=0,cumCost=0,cumPension=0,cumWork=0,cumSS=0,cumRental=0,cumDraw=0;
   let cumMtg=0,cumHealth=0,cumCore=0,cumProp=0,cumMaint=0,cumDebt=0,cumTax=0;
   for(const r of rows){
