@@ -1,0 +1,212 @@
+=== RETIREMENT SIMULATOR — PROJECT JOURNAL ===
+=== Comprehensive handoff document for new Claude Project ===
+Last updated: 2026-03-27 (covers through v2.10.5)
+
+--- WHAT THIS PROJECT IS ---
+
+A personal retirement financial planning simulator modeling income streams,
+debt paydown, real estate equity, and net worth projections over a 21-year
+horizon (2026-2046). Built for Bob's personal retirement planning -- not a
+commercial product. Models a complex household financial picture: pension,
+Social Security (self + spouse Brenda), rental income from multiple
+properties (6th St primary residence, 15th St duplex, Lafayette property),
+high-interest debt paydown (credit cards + family loans ~$306K total at
+launch), and work income tapering toward zero ("work-free" target).
+
+--- TECH STACK ---
+React + Vite + JSX, multi-file architecture (refactored from a single
+3700+ line file in Session 11).
+  src/engine.js          -- pure calculation functions, no React
+  src/defaults.js        -- default scenario values, params builder
+  src/relationships-data.js -- Input/Output Map diagram data
+  src/App.jsx            -- all React state, hooks, UI, charts
+
+Playwright test suite (retirement-simulator.spec.js, project root) is the
+quality gate -- every change should be followed by a test run.
+
+Deployment path: C:\Users\rober\retirement-sim\
+  src/ -- the 4 app files above
+  retirement-simulator.spec.js -- project root (NOT src/)
+  run_tests.ps1 -- admin PowerShell test runner
+  Launch Retirement Simulator.bat -- starts Vite dev server at localhost:5173
+
+--- CURRENT STATE (v2.10.5) ---
+
+Key default-scenario numbers:
+  Work needed at launch:    $4,538/mo
+  Work-free year:           2034
+  HI debt clear:            Jun '30 (monthly engine)
+  Net worth yr10 (book):    ~$5.2M (includes sweep savings)
+  Net worth yr10 (liq):     lower by ~$300-500K (cap gains + selling costs)
+  Sweep savings compounded: ~$2.1M over 21yr at 30% lifestyle-keep split
+
+Feature set as of v2.10.5:
+  - Simulator tab: sliders for sell timing, rental modes, SS timing,
+    work income curve (drag-to-shape), debt params, appreciation/inflation
+    assumptions, cost basis inputs for liquidation NW
+  - Cash Flow tab: monthly waterfall engine (wfData) -- Fixed Costs ->
+    Maintenance Reserves -> Safety Buckets (Rainy Day + Op Buffer) ->
+    FCF Floor -> Surplus (sweep to debt/savings or extra lifestyle)
+  - Input/Output Map tab: visual diagram of how inputs flow to outputs
+  - Glossary tab: definitions and methodology notes
+  - Pin system: save up to N scenarios, compare via dashed lines on charts
+  - Pin Comparison Table: side-by-side Live + pins, 5 key metrics, green
+    highlights for hitting target thresholds
+  - Gross vs Liquidation NW toggle (book | liq) on the NW chart -- liq mode
+    deducts ~5% selling costs + capital gains tax (28.2% combined fed+CO)
+    above cost basis, with $500K married exclusion on primary residence
+
+--- ARCHITECTURE / ENGINE NOTES ---
+
+Two parallel calculation engines exist by design:
+  1. ANNUAL ENGINE (engine.js: buildScenario) -- one row per year, used for
+     most charts (NW, debt balance, income/cost breakdowns). Faster, used
+     for most chart series.
+  2. MONTHLY ENGINE (wfData, lives inside App.jsx) -- one row per month,
+     used for the Cash Flow tab waterfall and as the authoritative source
+     for sweep-to-savings timing (savingsAcc). More precise on exact months
+     (e.g. exactly when HI debt clears), but NOT exposed via engine.js.
+
+IMPORTANT LESSON (Session 11): Don't try to replace wfData's savingsAcc
+with an annual-engine approximation -- this was attempted and caused NW
+to under-report by ~$500K because the annual engine loses precision on
+the exact month debt clears and sweep starts. The monthly wfData engine
+is correct; chartData blends annual engine NW + wfData savingsAcc.
+
+Components that must stay inside App.jsx (do not extract):
+  Chart, WorkCurveEditor, BREAKDOWNS -- all close over ~40 App-local
+  variables (state, setters, computed values). Extracting them would
+  require extensive prop-drilling. Not worth it given current scale.
+
+Key naming/units conventions:
+  - Dollar values often stored in $K (thousands) in engine rows (nw, hiDebtK,
+    reEquity, etc.) but $M (millions) in chartData points for NW chart
+    (matches yFmt on the Y axis)
+  - savingsAccK = $K, used in NW breakdown table
+  - liqNW = $M, used by the book/liq toggle
+
+--- KEY BUGS FIXED (chronological) ---
+
+Session 10-11:
+  - Single-file JSX (~3700 lines) was unreliable for Claude artifact
+    round-tripping -- led to the multi-file refactor decision
+  - PowerShell patches with template literals were fragile -- python
+    str.replace via bash_tool became the reliable patch method
+  - Brace balance checker showing -1 is EXPECTED (known JSX comment false
+    positive) -- this confirms 0 net depth, not an error
+
+Session 11:
+  - Attempted engine-native savingsAcc accumulator in buildScenario --
+    caused NW to drop ~$500K vs the accurate wfData monthly value.
+    REVERTED. Keep savingsAcc logic in wfData (monthly), not engine.js.
+  - Playwright selector fragility: `locator('span').getByText(...)` too
+    strict when label renders in a different element -- prefer
+    `locator('text=...')` for resilience.
+  - parseInt() on currency strings like "$2.1M" parses as 21, not 2.1 --
+    use parseFloat with proper regex (`/[^0-9.]/g`) when parsing $M values
+    in tests.
+  - Stale /old/ directory was causing the Playwright suite to run twice
+    (66 tests instead of 33) -- delete duplicate spec copies.
+
+Session 12 (Claude Code, reconstructed from source -- exact details may be
+incomplete since the session window was lost before journaling):
+  - Avalanche "xtra" (extra debt sweep above DI cap) was overstated --
+    fixed to source from `sweep` variable correctly
+  - Pin import from JSON had a rate-field double-conversion bug (stored as
+    % integer, re-divided by 100 on import) -- fixed
+  - famLoanBal added to HI debt breakdown chart (was missing from that
+    specific breakdown, though tracked elsewhere)
+  - Fixed Costs breakdown expanded to include property tax/insurance
+    (fc_prop) and estimated income tax (fc_tax) as explicit line items
+
+--- TESTING NOTES ---
+
+Test runner: run_tests.ps1 in project root, must run from ADMIN PowerShell.
+Spec file: retirement-simulator.spec.js -- belongs in PROJECT ROOT, not src/.
+Test groups (as of last confirmed 35/35 run, v2.9.1):
+  Group A -- Core Engine Correctness (sweep %, NW sensitivity, op costs)
+  Group B -- Chart Display (FCF legend, NW breakdown, version badge)
+  Group C -- Cash Flow Tab (waterfall badges, op cost sliders)
+  Group D -- Pin System (round-trip, export, NW comparison)
+  Group E -- Sanity Checks (SS timing, Lafayette toggle, tab switching)
+  Group F -- v2.9.x feature tests (savingsAcc NW, pin comparison table)
+
+Spec file grew to 49KB by v2.10.5 (was 28KB at v2.9.1) -- likely new tests
+for liquidation NW toggle and fixed cost breakdown additions, but the exact
+new test list is UNCONFIRMED since that session's journal was lost. First
+action in a new session should be running the suite and reading the spec
+file to catalog what's actually covered.
+
+Common test-writing gotchas learned:
+  - Use native React setter pattern for sliders in tests:
+    `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set`
+    then dispatch both 'input' and 'change' events with bubbles:true --
+    setting el.value directly does NOT trigger React's onChange.
+  - Prefer `text=` locators over element-type-specific ones (span, div) for
+    resilience against markup changes.
+  - When parsing currency strings with M/K suffixes in assertions, always
+    use parseFloat with a decimal-preserving regex, not parseInt.
+
+--- DEVELOPMENT WORKFLOW (established practices) ---
+
+Two-tool workflow:
+  1. claude.ai (chat interface) -- for design discussions, screenshot
+     review, feature planning, journal writing. Best when you want to think
+     through a feature before coding it, or review test results/behavior.
+  2. Claude Code (terminal, via Git Bash) -- for actual file edits, running
+     tests, multi-file coordinated changes. Reads/writes files directly on
+     disk, no upload/download cycle needed.
+
+Recommended session pattern:
+  1. (Optional) Design discussion in claude.ai with journal + screenshots
+  2. Open Git Bash: cd /c/Users/rober/retirement-sim && claude
+  3. Give Claude Code the journal + task, let it read source files directly
+  4. After changes: have it run run_tests.ps1 and report results
+  5. Have it commit to git: git add -A && git commit -m "v2.X.X -- desc"
+  6. CRITICAL: before ending session, ask Claude Code to write the next
+     session's journal file -- this is the safety net if the window closes
+     unexpectedly (this happened once already, Session 12 had to be
+     reconstructed from source code alone)
+
+Git setup (initialized Session 12-13):
+  - core.autocrlf set to false
+  - .gitattributes enforces LF for JS/JSX/JSON/MD/TXT, CRLF for .ps1
+  - This prevents noisy diffs and patch failures from line-ending drift
+
+Version bumping rule (Bob's standing instruction): ALWAYS bump the patch
+version number for every change to App.jsx, no matter how small. The
+version badge in the UI header is the confirmation signal that Vite has
+loaded the new file after a deploy + hard refresh (Ctrl+Shift+R).
+
+Deployment gotcha: files must go in src/, NOT the project root. Copying to
+the wrong directory is a recurring mistake -- Vite won't pick up the change
+and the version badge will stay stale, which is the tell-tale symptom.
+
+--- OPEN BACKLOG (as of last known state) ---
+
+[P1] Verify v2.10.5 test suite coverage -- run tests, read spec, confirm
+     what Session 12 (lost window) actually added test-wise
+[P2] Pin Comparison Table -- doesn't yet reflect book/liq NW mode toggle;
+     should show liq NW when toggle is in liq mode
+[P2] Glossary entry for NW caveat -- still describes the old "book NW only"
+     limitation rather than explaining the new book/liq toggle
+[P3] E3 Playwright test (sell year viewport) -- passes via textContent
+     check rather than toBeVisible; works but could be made more robust
+     with explicit scroll-into-view
+[P3] Pin sweep timing off ~6mo vs monthly engine -- annual approximation
+     artifact, low priority, cosmetic only
+[SKIPPED] HOA fees field -- not a factor for Bob's properties, explicitly
+     deprioritized
+
+--- HOW TO START A NEW SESSION WITH THIS JOURNAL ---
+
+1. Create/open the Claude Project for this simulator
+2. Upload this journal file
+3. Upload current src/App.jsx (and engine.js / defaults.js if engine-level
+   changes are anticipated)
+4. Say: "Read the project journal. We're continuing work on the retirement
+   simulator. [Describe what you want to do next, or ask to first verify
+   current test suite state since the last session journal was lost.]"
+5. For actual code changes, hand off to Claude Code in Git Bash:
+   cd /c/Users/rober/retirement-sim && claude
+   Give it this same journal + the specific task.

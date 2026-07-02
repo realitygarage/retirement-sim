@@ -68,7 +68,7 @@ test.describe('Group A — Core Engine Correctness', () => {
 
     // Use exact match to avoid matching "Free Cash Flow / mo"
     await expect(page.getByText('Free Cash', { exact: true })).toBeVisible();
-    await expect(page.locator('text=→ Swept').or(page.locator('text=Savings sweep'))).toBeVisible();
+    await expect(page.getByText(/^(→ Swept|Savings sweep|Sweep)$/).first()).toBeVisible();
   });
 
   test('A3 — FCF chart at 100% keep: chart renders and sweep badge near zero', async ({ page }) => {
@@ -146,7 +146,13 @@ test.describe('Group A — Core Engine Correctness', () => {
 
     console.log(`  RW at default (3%): ${rwBase} | RW at 0%: ${rwZero}`);
 
-    const parse = s => parseInt((s || '0').replace(/[^0-9]/g, ''));
+    // "COVERED" (needs fully met) -> treat as 0
+    const parse = s => {
+      const t = s || '0';
+      if (/COVERED/i.test(t)) return 0;
+      const n = parseInt(t.replace(/[^0-9]/g, ''));
+      return isNaN(n) ? 0 : n;
+    };
     expect(parse(rwZero)).toBeLessThanOrEqual(parse(rwBase));
   });
 
@@ -173,13 +179,13 @@ test.describe('Group B — Chart Display', () => {
     await loadApp(page);
     // Use exact match to avoid "Free Cash Flow / mo" false match
     await expect(page.getByText('Free Cash', { exact: true })).toBeVisible();
-    await expect(page.locator('span:has-text("→ Swept"), span:has-text("Savings sweep")')).toBeVisible();
+    await expect(page.getByText(/^(→ Swept|Savings sweep|Sweep)$/).first()).toBeVisible();
   });
 
   test('B2 — FCF 3-line legend: Free Cash, Swept, Surplus swatches visible', async ({ page }) => {
     await loadApp(page);
     await expect(page.getByText('Free Cash', { exact: true })).toBeVisible();
-    await expect(page.locator('span:has-text("→ Swept"), span:has-text("Savings sweep")')).toBeVisible();
+    await expect(page.getByText(/^(→ Swept|Savings sweep|Sweep)$/).first()).toBeVisible();
     await expect(page.getByText('Surplus', { exact: true })).toBeVisible();
   });
 
@@ -516,10 +522,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v2.10.5"', async ({ page }) => {
+  test('E5 — Version header shows "v3.1.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v2.10.5')).toBeVisible();
-    console.log('  Version badge confirmed: v2.10.5');
+    await expect(page.locator('text=v3.1.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v3.1.0');
   });
 
 });
@@ -969,10 +975,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v2.10.5', async ({ page }) => {
+  test('L1 — Version header shows v3.1.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v2.10.5')).toBeVisible();
-    console.log('  L1 — Version v2.10.5 confirmed');
+    await expect(page.locator('text=v3.1.0').first()).toBeVisible();
+    console.log('  L1 — Version v3.1.0 confirmed');
   });
 
   test('L2 — payOffHI toggle hidden when sellYear is 2055 (never sell)', async ({ page }) => {
@@ -1060,6 +1066,227 @@ test.describe('Group L — Regression', () => {
       expect(nolanMatch[0]).not.toMatch(/->/);
       console.log(`  L6 — Event text: ${nolanMatch[0].slice(0, 80)}`);
     }
+  });
+
+});
+
+// ─── Group M: v3.1.0 Dispositions & Settlement (spec §7) ────────────────────
+// disposeAsset unit tests via window.__engine + integration tests via buildScenario
+
+test.describe('Group M — v3.1.0 Dispositions', () => {
+
+  test('M1 — disposeAsset home: sec121 applied, no recapture/clawback', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {disposeAsset} = window.__engine;
+      return disposeAsset({
+        fmv: 1675000, basis: 899550, mortgageBalance: 500000,
+        isPrimary: true, sec121Exclusion: 500000,
+      }, 'sell_taxable');
+    });
+    console.log('  Home dispo: tax $'+Math.round(result.totalTax/1000)+'K, net $'+Math.round(result.afterTaxNetProceeds/1000)+'K');
+    expect(result.recaptureTax).toBe(0);
+    expect(result.caClawbackTax).toBe(0);
+    expect(result.recognizedGain).toBeGreaterThan(150000);
+    expect(result.recognizedGain).toBeLessThan(200000);
+    expect(result.totalTax).toBeGreaterThan(0);
+  });
+
+  test('M2 — disposeAsset rental sell_taxable: recapture + CA clawback + CO credit', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {disposeAsset} = window.__engine;
+      return disposeAsset({
+        fmv: 1375000, basis: 424309, mortgageBalance: 300000,
+        isPrimary: false, caSourceDeferredGain: 801441, depreciationTaken: 44000/0.25,
+      }, 'sell_taxable');
+    });
+    console.log('  15th sell_taxable: tax $'+Math.round(result.totalTax/1000)+'K');
+    expect(result.recaptureTax).toBeGreaterThan(0);
+    expect(result.caClawbackTax).toBeGreaterThan(0);
+    expect(result.otherStateCredit).toBeGreaterThan(0);
+    expect(Math.round(result.recaptureTax)).toBe(44000);
+  });
+
+  test('M3 — disposeAsset full_1031: zero tax, full deferral', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {disposeAsset} = window.__engine;
+      return disposeAsset({
+        fmv: 1375000, basis: 424309, mortgageBalance: 300000,
+        isPrimary: false, caSourceDeferredGain: 801441, depreciationTaken: 176000,
+      }, 'full_1031');
+    });
+    expect(result.totalTax).toBe(0);
+    expect(result.afterTaxNetProceeds).toBe(0);
+    expect(result.deferredCarryForward).toBe(801441);
+    expect(result.recognizedGain).toBe(0);
+    expect(result.deferredGain).toBeGreaterThan(0);
+  });
+
+  test('M4 — disposeAsset partial_1031: recognized = min(gain, boot); proceeds = boot - tax', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {disposeAsset} = window.__engine;
+      return disposeAsset({
+        fmv: 1375000, basis: 424309, mortgageBalance: 300000,
+        isPrimary: false, caSourceDeferredGain: 801441, depreciationTaken: 176000,
+      }, 'partial_1031', { cashBoot: 150000 });
+    });
+    console.log('  partial_1031 boot 150K: recog $'+Math.round(result.recognizedGain/1000)+'K, tax $'+Math.round(result.totalTax/1000)+'K');
+    expect(result.cashBoot).toBe(150000);
+    expect(result.recognizedGain).toBe(150000);
+    expect(result.totalTax).toBeGreaterThan(0);
+    expect(result.afterTaxNetProceeds).toBeCloseTo(150000 - result.totalTax, 0);
+    expect(result.deferredCarryForward).toBeGreaterThan(0);
+  });
+
+  test('M5 — Forced sale applies discount; net lower than market', async ({ page }) => {
+    await loadApp(page);
+    const both = await page.evaluate(() => {
+      const {disposeAsset} = window.__engine;
+      const prop = {
+        fmv: 1375000, basis: 424309, mortgageBalance: 300000,
+        isPrimary: false, caSourceDeferredGain: 801441, depreciationTaken: 176000,
+      };
+      return {
+        m: disposeAsset(prop, 'sell_taxable', {saleMode:'market'}),
+        f: disposeAsset(prop, 'sell_taxable', {saleMode:'forced'}),
+      };
+    });
+    console.log('  Market $'+Math.round(both.m.afterTaxNetProceeds/1000)+'K, forced $'+Math.round(both.f.afterTaxNetProceeds/1000)+'K');
+    expect(both.f.grossPrice).toBeLessThan(both.m.grossPrice);
+    expect(both.f.afterTaxNetProceeds).toBeLessThan(both.m.afterTaxNetProceeds);
+    expect(both.m.grossPrice - both.f.grossPrice).toBeCloseTo(1375000 * 0.15, -3);
+  });
+
+  test('M6 — Sell 15th in 2028: rental drops, RE value drops post-sale', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const p = makeParams({
+        dispositions: {
+          fifteenth: { mode:'sell_taxable', year:2028, salesPrice:1375000,
+            adjustedBasis:424309, caSourceDeferredGain:801441, depreciationRecapture:44000 },
+        },
+        rentGrowth: 0.03, inflation: 0.028, reAppreciation: 0.04,
+      });
+      const rows = buildScenario(p);
+      return {
+        r27: rows.find(r=>r.cal===2027),
+        r29: rows.find(r=>r.cal===2029),
+      };
+    });
+    console.log('  Rental 2027=$'+result.r27.rental+', 2029=$'+result.r29.rental);
+    expect(result.r27.rental).toBeGreaterThan(0);
+    expect(result.r29.rental).toBeLessThan(result.r27.rental);
+    console.log('  reValue 2027='+result.r27.reValue+'K, 2029='+result.r29.reValue+'K');
+    expect(result.r29.reValue).toBeLessThan(result.r27.reValue - 1000);
+  });
+
+  test('M7 — 6th STR income adds only within window', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const noSTR = buildScenario(makeParams({sixthIncomeMode:'none'}));
+      const withSTR = buildScenario(makeParams({
+        sixthIncomeMode:'str', sixthSTRMonthly:9000,
+        sixthSTRStartYear:2026, sixthSTRStopYear:2030,
+        sixthSTRStopOnDebtClear:false,
+        strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0,
+      }));
+      const noSTR2 = buildScenario(makeParams({sixthIncomeMode:'none'}));
+      return {
+        r26_none: noSTR.find(r=>r.cal===2026).rental,
+        r26_str : withSTR.find(r=>r.cal===2026).rental,
+        r29_str : withSTR.find(r=>r.cal===2029).rental,
+        r31_str : withSTR.find(r=>r.cal===2031).rental,
+        r31_none: noSTR2.find(r=>r.cal===2031).rental,
+      };
+    });
+    console.log('  Rental 2026 noSTR=$'+result.r26_none+', STR=$'+result.r26_str+', 2031 STR=$'+result.r31_str);
+    expect(result.r26_str).toBeGreaterThan(result.r26_none);
+    expect(result.r29_str).toBeGreaterThan(result.r26_none);
+    expect(result.r31_str).toBeCloseTo(result.r31_none, -1);
+  });
+
+  test('M8 — STR stopOnDebtClear stops STR the year after debt clears', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const p = makeParams({
+        sixthIncomeMode:'str', sixthSTRMonthly:9000,
+        sixthSTRStartYear:2026, sixthSTRStopYear:2050,
+        sixthSTRStopOnDebtClear:true,
+        strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0,
+      });
+      const rows = buildScenario(p);
+      const debtClearYr = rows.find(r=>r.hiDebt===0)?.cal;
+      const rentalAtClear    = rows.find(r=>r.cal===debtClearYr)?.rental;
+      const rentalAfterClear = rows.find(r=>r.cal===debtClearYr+1)?.rental;
+      return {debtClearYr, rentalAtClear, rentalAfterClear};
+    });
+    console.log('  Debt clear: '+result.debtClearYr+', rental at clear: $'+result.rentalAtClear+', after: $'+result.rentalAfterClear);
+    expect(result.debtClearYr).toBeTruthy();
+    expect(result.rentalAfterClear).toBeLessThan(result.rentalAtClear);
+  });
+
+  test('M9 — Gain offset 0% == no-offset; nonzero reduces tax', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const common = {
+        dispositions: {
+          fifteenth: { mode:'sell_taxable', year:2026, salesPrice:1375000,
+            adjustedBasis:424309, caSourceDeferredGain:801441, depreciationRecapture:44000 },
+        },
+        settlementNeed:525000, settlementYear:2026, requireSameYearForOffset:true,
+      };
+      const noOffset   = buildScenario(makeParams(Object.assign({}, common, {gainOffsetPct:0})));
+      const halfOffset = buildScenario(makeParams(Object.assign({}, common, {gainOffsetPct:50})));
+      return {
+        tax0:  noOffset.dispoResults?.fifteenth?.totalTax || 0,
+        tax50: halfOffset.dispoResults?.fifteenth?.totalTax || 0,
+      };
+    });
+    console.log('  Tax offset0=$'+Math.round(result.tax0/1000)+'K, offset50=$'+Math.round(result.tax50/1000)+'K');
+    expect(result.tax50).toBeLessThan(result.tax0);
+    expect(result.tax50).toBeGreaterThan(0);
+  });
+
+  test('M10 — HI paydown avalanche: CC extinguished before Sophia/Nolan', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const p = makeParams({
+        dispositions: {
+          fifteenth: { mode:'sell_taxable', year:2026, salesPrice:1375000,
+            adjustedBasis:424309, caSourceDeferredGain:801441, depreciationRecapture:44000 },
+        },
+        settlementNeed:0, hiPaydownPct:100,
+      });
+      const rows = buildScenario(p);
+      const r26 = rows.find(r=>r.cal===2026);
+      return {ccBal:r26?.ccBal, hiDebt:r26?.hiDebt, hiPaydown:r26?.hiPaydown};
+    });
+    console.log('  2026: CC=$'+result.ccBal+'K, HI=$'+result.hiDebt+'K, paydown=$'+Math.round(result.hiPaydown/1000)+'K');
+    expect(result.hiPaydown).toBeGreaterThan(0);
+    expect(result.ccBal).toBe(0);
+  });
+
+  test('M11 — Version badge shows v3.1.0', async ({ page }) => {
+    await loadApp(page);
+    await expect(page.locator('text=v3.1.0').first()).toBeVisible();
+  });
+
+  test('M12 — window.__engine exposed with disposeAsset/taxRecognized', async ({ page }) => {
+    await loadApp(page);
+    const hasEngine = await page.evaluate(() => {
+      return typeof window.__engine?.disposeAsset === 'function'
+        && typeof window.__engine?.buildScenario === 'function'
+        && typeof window.__engine?.taxRecognized === 'function';
+    });
+    expect(hasEngine).toBe(true);
   });
 
 });

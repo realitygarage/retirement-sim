@@ -1,0 +1,199 @@
+=== SESSION 14 JOURNAL — v3.1.0 ===
+Date: 2026-07-02
+Session goal: Implement Phase 1 of the v3 spec (per-property dispositions).
+
+--- WHAT SHIPPED ---
+
+v3.1.0 -- per-property dispositions, CPA liquidation defaults, settlement
+gain-offset, 6th St STR group, HI-paydown knob.
+
+Replaces the bespoke 6th-only sell path with a per-property disposition model
+covering all three properties (6th, 15th, Lafayette). Introduces the Tartell
+settlement scenario as first-class state (funded by sale proceeds; residual
+routes to HI-debt paydown or invested cash). Adds STR income mode for the 6th
+St primary (mirrors the duplex-top STR pattern, auto-stops on HI debt clear).
+
+Source of truth: v3_phase1_consolidated_spec.md in project root.
+
+--- BASELINE DECISIONS (locked before coding) ---
+
+1. NO legacy pin support. Bumped SAVE_SCHEMA_VERSION 2 -> 3, so old
+   localStorage pins are silently dropped on load. Old JSON pin exports are
+   unloadable. `sellYear`, `sixthSalePrice`, `sixthCostOfSale`, `sixthMTR`,
+   `saleDrawFrac`, `keepPrimary` fields removed from DEFAULTS/SC_DEFAULTS.
+
+2. Depreciation UI: single $-amount slider (`depreciationRecapture`), engine
+   backs into depreciationTaken via `$ / DISPO_DEFAULTS.recaptureRate`.
+
+3. Test scaffolding: `window.__engine` exposed for Playwright page.evaluate.
+
+4. UI location: new "Dispositions & Settlement" panel in the Simulator tab,
+   between "One-Time Decisions" and "Rental Operating Costs".
+
+5. Barberry <-> Lafayette mapping: assumed correct per accountant sheet.
+   Values/mortgages line up with BASE.lafayetteValue/Mortgage.
+
+--- WHAT CHANGED (files) ---
+
+src/engine.js  (+270 lines):
+  - New: DISPO_DEFAULTS (fedCapGains 23.8%, recapture 25%, CO 4.4%,
+    caClawback 12.3%, sellingCosts 6%, forcedSaleDiscount 15%)
+  - New: taxRecognized(recognized, opts) -- exported helper. Extracted from
+    the disposeAsset closure so §4.4 offset math can reuse it.
+  - New: disposeAsset(prop, mode, opts) -- pure per-property tax math for
+    keep / sell_taxable / full_1031 / partial_1031. Home path applies §121;
+    rental path applies recapture-first ordering + CA clawback + CO
+    other-state credit; partial_1031 recognizes min(gain, boot).
+  - buildScenario rewritten to consume `p.dispositions`:
+      * keepFor gating (annual + monthly mirror) on rental / propCost /
+        maint / mtgPmt / NW value / mortgage balance -- for ALL 3 properties
+      * Per-property disposition proceeds injected into cashAst at
+        respective dispo year
+      * 6th St STR income branch (auto-stops year after HI debt clears if
+        sixthSTRStopOnDebtClear); MTR path preserved
+      * Settlement outflow at settlementYear (cashAst floors at 0 if
+        insufficient funds -- see "Semantic notes" below)
+      * Gain-offset: pro-rata reduction of recognizedGain across a year's
+        dispositions, requires same year unless overridden
+      * Same-year 3-sale tax bump ($50K default), pro-rata across dispositions
+      * HI paydown at sale-year boundary BEFORE monthly debt loop
+        (avalanche order: CC 14% -> Nolan 8.4% -> Sophia 8.14%)
+      * CA $1.2M cap allocated across barberry+fifteenth in year order
+      * IRMAA fires 2yrs after any taxable dispo (not just 6th)
+
+src/defaults.js  (rewritten):
+  - New exports: LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS
+  - DEFAULTS + SC_DEFAULTS restructured: legacy 6th-sale fields removed;
+    dispositions.{sixth,barberry,fifteenth} added with all disposition-mode
+    knobs + CPA reference figures for reconciliation.
+  - makeParams simplified: no bespoke sale math (moved to disposeAsset).
+    Just normalizes disposition entries so partial overrides work.
+
+src/App.jsx  (+~500 lines):
+  - Import DISPO_DEFAULTS, disposeAsset, taxRecognized, LIQUIDATION_DEFAULTS,
+    SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS.
+  - `window.__engine` exposed at module scope for test evaluations.
+  - sc destructure: removed legacy fields; added `dispositions`,
+    settlementNeed/Year, gainOffsetPct, sameYearSaleTaxBump*, hiPaydownPct,
+    sixthIncomeMode + all sixthSTR* fields.
+  - Shim locals (`sellYear`, `sixthSalePrice`, `sixthMTR`, `keepPrimary`,
+    `sixthCostOfSale`) derived from dispositions/sixthIncomeMode -- lets
+    existing UI panels keep rendering without changes.
+  - Shim setters (`setSellYear`, `setSixthSalePrice`, `setSixthMTR`,
+    `setKeepPrimary`) write to `dispositions.sixth` or `sixthIncomeMode`.
+    `setSixthCostOfSale` / `setSaleDrawFrac` are no-ops (sellingCosts is
+    now a DISPO_DEFAULTS constant; saleDrawFrac replaced by residual/paydown).
+  - setDispo(key, patch) helper for per-property updates.
+  - New setters for all v3.1.0 fields.
+  - wfData: three parallel "keep" gates (keepingFn / duplexKeepingFn /
+    lafKeepingFn) applied to rental / rentalOpCost / mtg / propCost /
+    mortgage-interest / maint reserves. STR income mode wired. HI paydown
+    at sale-year boundary applied at the first month of the dispo year
+    (before interest accrual and min-pmt) via _paidYears Set.
+  - chartData liquidation-NW block: per-property ownership gates so
+    already-sold properties don't contribute liq-NW. Pin liq-NW read
+    dispositions from pin.paramSnapshot.dispositions.
+  - Transform paths (liveParams / buildRowsFromSnapshot / effectivePins /
+    confirmSwitch): removed `sixthCostOfSale/100` passthrough; kept
+    strPlatformPct/strCleanPct/mgrPct.
+  - restorePin / switchToPin: simplified (v3.1.0 sc format only; no legacy
+    field migration).
+  - New "Dispositions & Settlement (v3.1.0)" UI section:
+      * Per-property cards (mode toggle, year/salesPrice/adjustedBasis/
+        caSourceDeferredGain/depreciationRecapture sliders; cashBoot for
+        partial_1031; market/forced toggle)
+      * Reconciliation vs CPA: engine tax + engine net vs CPA figures,
+        warning when |delta| > 10%
+      * Global settlement panel (need/year/offset%/same-year bump/paydown%
+        with live residual + paydown + invested breakdown)
+      * 6th St STR / MTR mode group with schedule + start/stop years +
+        auto-stop-on-debt-clear
+  - Version bumped: v2.10.7 -> v3.1.0 (header comment + UI badge).
+
+retirement-simulator.spec.js  (+~230 lines):
+  - New Group M — v3.1.0 Dispositions (12 tests):
+      M1: disposeAsset home (§121 applied, no recapture/clawback)
+      M2: rental sell_taxable (recapture-first + CA clawback + CO credit)
+      M3: full_1031 (zero tax, full deferral, CA carries forward)
+      M4: partial_1031 (recognized = min(gain, boot); proceeds = boot - tax)
+      M5: Forced sale applies discount
+      M6: Sell 15th in 2028 -> rental + reValue drop from 2029+
+      M7: 6th STR active only within [start, stop) window
+      M8: sixthSTRStopOnDebtClear stops STR year after debt clears
+      M9: gainOffsetPct 0% vs 50% -- offset reduces tax
+      M10: HI paydown avalanche -- CC extinguished first
+      M11: Version badge shows v3.1.0
+      M12: window.__engine exposed
+  - Preexisting E5, L1 updated: v2.10.5 -> v3.1.0; use .first() to avoid
+    strict-mode collision with new UI section header.
+  - A2, B1, B2 updated to match FCF chart's current "Sweep" label
+    (renamed in v2.10.6, was "→ Savings sweep").
+  - A5 parse hardened for "COVERED" and NaN cases.
+
+--- FINAL TEST RESULTS ---
+
+  77 passed  (was 70/77 mid-session; 7 failures triaged and fixed)
+
+Fixes applied to make it green:
+  1. Settlement outflow was compounding negatively in cashAst — floored at 0
+     ("if funds insufficient, deficit not modeled explicitly" is now the
+     documented semantic).
+  2. Version selector strict-mode collision — use .first() on `text=v3.1.0`
+     since the "Dispositions & Settlement (v3.1.0)" section header also
+     matches.
+  3. FCF legend label mismatch (was v2.10.6 rename we hadn't caught in tests).
+
+--- SEMANTIC NOTES / FLAG-IN-GLOSSARY ---
+
+- `cashAst` floors at 0. Meaning: if the settlement is $525K but sale
+  proceeds + prior savings don't cover it, the shortfall is assumed to be
+  funded outside the sim (loan / retirement account / deferral). NW is not
+  artificially depressed by phantom debt.
+
+- STR income on the 6th St primary uses the same platform + clean + manager
+  % as the duplex-top STR. Set to 0 to model self-managed operations.
+  The tax impact on §121 (partial-home STR erodes future exclusion via
+  non-excludable depreciation) is NOT modeled — flag for CPA.
+
+- CA $1.2M cap on prior-1031 gain is allocated across barberry + fifteenth
+  in year order (earliest sale claims cap first). If both are sold same
+  year, the first key in [barberry, fifteenth] wins — should really be
+  pro-rata; deferred to Phase 2.
+
+- Depreciation-taken derived internally as `depreciationRecapture / 0.25`.
+  If CPA sheet's recapture is ordinary-income-rated (not §1250), the back-
+  into is wrong; single-slider UI can be updated if that becomes an issue.
+
+- Gain-offset is UNCONFIRMED (Kimbell/Arrowsmith position). Default OFF
+  (`gainOffsetPct: 0`). Requires CPA validation before enabling.
+
+- IRMAA now fires 2yrs after ANY taxable disposition, not just 6th St
+  (previous behavior was 6th-specific + suppressed if sixthMTR).
+
+- Old "sellYear" is now derived from `dispositions.sixth.year` for shim
+  compatibility with existing UI. The one-time-decisions "Sell 6th St"
+  slider drives the sixth disposition; setting year > 2046 flips mode to
+  'keep' automatically.
+
+--- OPEN BACKLOG (unchanged / new) ---
+
+[P1] Phase 2: replace inline chartData liquidation-NW math with
+     per-property disposeAsset calls, so liq-view honors 1031 deferral
+     properly and picks up the settlement/offset/paydown interactions.
+[P1] Send §10 of the spec (CPA/counsel questions) to accountant.
+[P2] Pin Comparison Table doesn't yet reflect book/liq NW mode toggle.
+[P2] Glossary needs updating: dispositions model, settlement, STR,
+     paydown semantics, cashAst-floor caveat.
+[P3] E3 Playwright test (sell year viewport) could use explicit
+     scroll-into-view instead of textContent check.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Open Claude Project for this simulator.
+2. Upload session14_journal.txt + v3_phase1_consolidated_spec.md (both in
+   project root) + current src/App.jsx / engine.js / defaults.js.
+3. For next session, likely Phase 2 (per-property disposeAsset in liq NW,
+   §121-on-conversion haircut, deferred-equity replacement-asset tracking)
+   or CPA reconciliation-driven rate calibration once accountant responds.
+4. Reminder: version bump on every code change (App.jsx header comment
+   + UI badge div). Session 13's version was v2.10.7 -> this is v3.1.0.

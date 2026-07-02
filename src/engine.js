@@ -140,6 +140,117 @@ export function mtrScheduleIncome(segments){
 }
 
 // =============================================================================
+// DISPOSITION MODEL (v3.1.0)  --  per-property sale / 1031 tax math
+// =============================================================================
+export const DISPO_DEFAULTS = {
+  fedCapGainsRate:    0.238,  // 20% LTCG + 3.8% NIIT
+  recaptureRate:      0.25,   // unrecaptured §1250 max
+  coTaxRate:          0.044,  // CO flat
+  caClawbackRate:     0.123,  // CA rate on CA-source deferred gain
+  sellingCostsPct:    0.06,
+  forcedSaleDiscount: 0.15,
+};
+
+// Recapture-first ordering + CA clawback + CO with other-state credit.
+// Exported so settlement gain-offset math (§4.4) can recompute after reducing
+// the recognized amount.
+export function taxRecognized(recognized, opts = {}) {
+  const cfg = { ...DISPO_DEFAULTS, ...(opts.rates || {}) };
+  const depTaken = opts.depreciationTaken || 0;
+  const caSrc    = opts.caSourceDeferredGain || 0;
+  const recapturePortion = Math.min(recognized, depTaken);
+  const capGainPortion   = Math.max(0, recognized - recapturePortion);
+  const recaptureTax     = recapturePortion * cfg.recaptureRate;
+  const fedCapGainsTax   = capGainPortion * cfg.fedCapGainsRate;
+  const caRecognized     = Math.min(recognized, caSrc);
+  const caClawbackTax    = caRecognized * cfg.caClawbackRate;
+  const coOnCaSlice      = caRecognized * cfg.coTaxRate;
+  const otherStateCredit = Math.min(caClawbackTax, coOnCaSlice);
+  const coTax            = Math.max(0, recognized * cfg.coTaxRate - otherStateCredit);
+  const caDeferredLeft   = Math.max(0, caSrc - caRecognized);
+  return { recaptureTax, fedCapGainsTax, caClawbackTax, coTax, otherStateCredit, caDeferredLeft };
+}
+
+// prop: { fmv, basis, mortgageBalance, isPrimary?, sec121Exclusion?,
+//         caSourceDeferredGain?, depreciationTaken? }
+// mode: 'keep' | 'sell_taxable' | 'full_1031' | 'partial_1031'
+// opts: { saleMode?, cashBoot?, sellingCostsPct?, rates? }
+export function disposeAsset(prop, mode, opts = {}) {
+  if (mode === 'keep') return null;
+  const cfg = { ...DISPO_DEFAULTS, ...(opts.rates || {}) };
+  const sellingCostsPct = opts.sellingCostsPct ?? cfg.sellingCostsPct;
+  const forced = opts.saleMode === 'forced';
+
+  const grossPrice   = prop.fmv * (forced ? (1 - cfg.forcedSaleDiscount) : 1);
+  const sellingCosts = grossPrice * sellingCostsPct;
+  const netSale      = grossPrice - sellingCosts;
+  const mortgagePayoff = prop.mortgageBalance || 0;
+  const realizedGain = Math.max(0, netSale - (prop.basis || 0));
+
+  const r = {
+    mode, grossPrice, sellingCosts, netSale, mortgagePayoff, realizedGain,
+    recognizedGain: 0, deferredGain: 0, cashBoot: 0,
+    recaptureTax: 0, fedCapGainsTax: 0, caClawbackTax: 0,
+    coTax: 0, otherStateCredit: 0, totalTax: 0,
+    afterTaxNetProceeds: 0, deferredCarryForward: 0,
+  };
+
+  // ---- HOME: §121, no recapture, no CA clawback ----
+  if (prop.isPrimary) {
+    const taxableGain = Math.max(0, realizedGain - (prop.sec121Exclusion || 0));
+    r.recognizedGain = taxableGain;
+    r.fedCapGainsTax = taxableGain * cfg.fedCapGainsRate;
+    r.coTax          = taxableGain * cfg.coTaxRate;
+    r.totalTax       = r.fedCapGainsTax + r.coTax;
+    r.afterTaxNetProceeds = netSale - mortgagePayoff - r.totalTax;
+    return r;
+  }
+
+  // ---- RENTALS ----
+  const taxOpts = {
+    rates: opts.rates,
+    depreciationTaken: prop.depreciationTaken || 0,
+    caSourceDeferredGain: prop.caSourceDeferredGain || 0,
+  };
+
+  if (mode === 'sell_taxable') {
+    r.recognizedGain = realizedGain;
+    const t = taxRecognized(realizedGain, taxOpts);
+    Object.assign(r, t);
+    r.totalTax = t.recaptureTax + t.fedCapGainsTax + t.caClawbackTax + t.coTax;
+    r.afterTaxNetProceeds = netSale - mortgagePayoff - r.totalTax;
+    r.deferredCarryForward = 0;
+    return r;
+  }
+
+  if (mode === 'full_1031') {
+    r.recognizedGain = 0;
+    r.deferredGain   = realizedGain;
+    r.deferredCarryForward = prop.caSourceDeferredGain || 0;
+    r.totalTax = 0;
+    r.afterTaxNetProceeds = 0;
+    return r;
+  }
+
+  if (mode === 'partial_1031') {
+    const freedEquity = Math.max(0, netSale - mortgagePayoff);
+    const boot = Math.min(Math.max(0, opts.cashBoot || 0), freedEquity);
+    const recognized = Math.min(realizedGain, boot);
+    const t = taxRecognized(recognized, taxOpts);
+    Object.assign(r, t);
+    r.cashBoot = boot;
+    r.recognizedGain = recognized;
+    r.deferredGain = realizedGain - recognized;
+    r.deferredCarryForward = t.caDeferredLeft;
+    r.totalTax = t.recaptureTax + t.fedCapGainsTax + t.caClawbackTax + t.coTax;
+    r.afterTaxNetProceeds = boot - r.totalTax;
+    return r;
+  }
+
+  return r;
+}
+
+// =============================================================================
 // ANNUAL PROJECTION ENGINE
 // =============================================================================
 export function buildScenario(p) {
@@ -155,20 +266,175 @@ export function buildScenario(p) {
   const nolanMin  = p.nolanMin  || 1787;
   let nolanActive=false;
   let debtCleared = p.payOffHI ? true : false;
+  let debtClearedYr = p.payOffHI ? BASE.startYear-1 : null;
 
   const flr=p.famLoanRate/12;
   const famLoanMoPmt=p.famLoanAmt>0
     ?p.famLoanAmt*(flr*Math.pow(1+flr,BASE.famLoanMonths))/(Math.pow(1+flr,BASE.famLoanMonths)-1)
     :0;
 
-  const sellYr  = p.sellYear || 2055;
+  // -----------------------------------------------------------------
+  // v3.1.0 dispositions (per-property sale / 1031)
+  // -----------------------------------------------------------------
+  const dispo    = p.dispositions || {};
+  const dSixth   = dispo.sixth     || {mode:'keep'};
+  const dLaf     = dispo.barberry  || {mode:'keep'};
+  const dDuplex  = dispo.fifteenth || {mode:'keep'};
+  const sixthYr  = dSixth.mode ==='keep' ? Infinity : (dSixth.year || 2055);
+  const lafYr    = dLaf.mode   ==='keep' ? Infinity : (dLaf.year   || 2055);
+  const duplexYr = dDuplex.mode==='keep' ? Infinity : (dDuplex.year|| 2055);
   const lafStopYr = p.lafStopYear || 2055;
+
+  function computeDispo(def, baseVal, baseMtg, baseRate, isPrimary){
+    if(def.mode==='keep') return {mode:'keep', year:Infinity, afterTaxNetProceeds:0, totalTax:0, recognizedGain:0, caSourceDeferredGain:0};
+    const yrIdx = Math.max(0, (def.year||2055) - BASE.startYear);
+    const fmv   = baseVal * Math.pow(1+p.reAppreciation, yrIdx);
+    const mtgB  = remainBal(baseMtg, baseRate, 30, 5+yrIdx);
+    const depTaken = (def.depreciationRecapture || 0) / DISPO_DEFAULTS.recaptureRate;
+    const propObj = {
+      fmv,
+      basis: def.adjustedBasis || 0,
+      mortgageBalance: mtgB,
+      isPrimary,
+      sec121Exclusion: def.sec121Exclusion || 0,
+      caSourceDeferredGain: def.caSourceDeferredGain || 0,
+      depreciationTaken: depTaken,
+    };
+    const res = disposeAsset(propObj, def.mode, {
+      saleMode: def.saleMode,
+      cashBoot: def.cashBoot || 0,
+    });
+    return { ...res, year: def.year, mode: def.mode, caSourceDeferredGain: def.caSourceDeferredGain || 0 };
+  }
+  const dispoRes = {
+    sixth:     computeDispo(dSixth,  BASE.primaryValue,   BASE.primaryMortgage,   BASE.primaryRate,   true),
+    barberry:  computeDispo(dLaf,    BASE.lafayetteValue, BASE.lafayetteMortgage, BASE.lafayetteRate, false),
+    fifteenth: computeDispo(dDuplex, BASE.duplexValue,    BASE.duplexMortgage,    BASE.duplexRate,    false),
+  };
+
+  // CA $1.2M cap: applies across barberry + fifteenth in year order
+  const caCap = p.caGainCap || 1_200_000;
+  const rentalDispos = [dispoRes.barberry, dispoRes.fifteenth]
+    .filter(d => d.mode && d.mode!=='keep' && (d.recognizedGain||0)>0);
+  rentalDispos.sort((a,b)=>a.year-b.year);
+  let capUsed = 0;
+  for(const d of rentalDispos){
+    const origCaSlice = Math.min(d.recognizedGain || 0, d.caSourceDeferredGain || 0);
+    if(origCaSlice<=0) continue;
+    const capAllowed = Math.max(0, caCap - capUsed);
+    const cappedCaSlice = Math.min(origCaSlice, capAllowed);
+    if(cappedCaSlice < origCaSlice){
+      const newCaTax = cappedCaSlice * DISPO_DEFAULTS.caClawbackRate;
+      const coOnCa   = cappedCaSlice * DISPO_DEFAULTS.coTaxRate;
+      const newOSC   = Math.min(newCaTax, coOnCa);
+      const newCoTax = Math.max(0, d.recognizedGain * DISPO_DEFAULTS.coTaxRate - newOSC);
+      const delta = (d.caClawbackTax - newCaTax) + (d.coTax - newCoTax);
+      d.caClawbackTax    = newCaTax;
+      d.coTax            = newCoTax;
+      d.otherStateCredit = newOSC;
+      d.totalTax        -= delta;
+      d.afterTaxNetProceeds += delta;
+    }
+    capUsed += cappedCaSlice;
+  }
+
+  // Settlement gain-offset (§4.4)
+  const settleYr      = p.settlementYear || BASE.startYear;
+  const settleNeed    = p.settlementNeed || 0;
+  const offsetPct     = (p.gainOffsetPct || 0) / 100;
+  const requireSameYr = p.requireSameYearForOffset !== false;
+
+  const activeList = [dispoRes.sixth, dispoRes.barberry, dispoRes.fifteenth]
+    .filter(d => d.mode && d.mode!=='keep');
+
+  if(offsetPct > 0){
+    const yrGroups = {};
+    for(const d of activeList){ (yrGroups[d.year] = yrGroups[d.year] || []).push(d); }
+    for(const [yStr, group] of Object.entries(yrGroups)){
+      const yr = +yStr;
+      if(requireSameYr && yr !== settleYr) continue;
+      const gainsPool = group.reduce((s,d)=>s+(d.recognizedGain||0), 0);
+      if(gainsPool <= 0) continue;
+      const applied = Math.min(settleNeed * offsetPct, gainsPool);
+      const scale = 1 - applied/gainsPool;
+      for(const d of group){
+        if(d.recognizedGain <= 0) continue;
+        const newTotal = (d.recaptureTax + d.fedCapGainsTax + d.caClawbackTax + d.coTax) * scale;
+        const delta = d.totalTax - newTotal;
+        d.recognizedGain *= scale;
+        d.recaptureTax   *= scale;
+        d.fedCapGainsTax *= scale;
+        d.caClawbackTax  *= scale;
+        d.coTax          *= scale;
+        d.totalTax        = newTotal;
+        d.afterTaxNetProceeds += delta;
+      }
+    }
+  }
+
+  // Same-year-sale tax bump: only when all 3 sold in same calendar year
+  const bumpOn  = p.sameYearSaleTaxBumpOn !== false;
+  const bumpAmt = p.sameYearSaleTaxBump || 0;
+  if(bumpOn && bumpAmt > 0 && activeList.length === 3){
+    const uniqueYrs = new Set(activeList.map(d=>d.year));
+    if(uniqueYrs.size === 1){
+      const totalT = activeList.reduce((s,d)=>s+(d.totalTax||0),0);
+      for(const d of activeList){
+        const share = totalT>0 ? d.totalTax/totalT : 1/3;
+        d.totalTax += bumpAmt * share;
+        d.afterTaxNetProceeds -= bumpAmt * share;
+      }
+    }
+  }
+
+  // Per-year cash inflows / outflows
+  const yearCashAdd = {};   // dispo year -> $ inflow (afterTaxNetProceeds sum)
+  const yearCashSub = {};   // year -> $ outflow (settlement)
+  for(const d of activeList){
+    yearCashAdd[d.year] = (yearCashAdd[d.year] || 0) + (d.afterTaxNetProceeds || 0);
+  }
+  if(settleNeed > 0){
+    yearCashSub[settleYr] = (yearCashSub[settleYr] || 0) + settleNeed;
+  }
+  const paydownByYear = {};
+
+  // IRMAA fires 2 yrs after any taxable dispo (mode != 'full_1031', recognized gain > 0)
+  const irmaaYears = new Set();
+  for(const d of activeList){
+    if((d.recognizedGain||0) > 0 && d.mode !== 'full_1031'){
+      irmaaYears.add(d.year + 2);
+    }
+  }
 
   for(let yr=0;yr<=20;yr++){
     const cal=BASE.startYear+yr;
-    const keepPrimary = cal < sellYr;
-    const sold        = cal >= sellYr;
-    const lafRenting  = p.lafRental && cal < lafStopYr;
+    const keepPrimary  = cal < sixthYr;
+    const keepLafOwned = cal < lafYr;
+    const keepDuplex   = cal < duplexYr;
+    const lafRenting   = p.lafRental && keepLafOwned && cal < lafStopYr;
+
+    // -- HI paydown (§4.5): apply BEFORE this year's monthly debt loop --
+    if(!p.payOffHI && yearCashAdd[cal] != null){
+      const residual = Math.max(0, (yearCashAdd[cal] - (yearCashSub[cal]||0)));
+      const paydownPct = (p.hiPaydownPct || 0) / 100;
+      const totalHI = ccBal + sophiaBal + nolanBal;
+      let paydownAmt = Math.min(residual * paydownPct, totalHI);
+      if(paydownAmt > 0){
+        const paydownQ = [
+          {g:()=>ccBal,     s:(v)=>{ccBal=v;},     r:ccRate},
+          {g:()=>sophiaBal, s:(v)=>{sophiaBal=v;}, r:sophiaRate},
+          {g:()=>nolanBal,  s:(v)=>{nolanBal=v;},  r:nolanRate},
+        ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
+        let payLeft = paydownAmt;
+        for(const loan of paydownQ){
+          if(payLeft<=0) break;
+          const pay = Math.min(payLeft, loan.g());
+          loan.s(loan.g()-pay);
+          payLeft -= pay;
+        }
+        paydownByYear[cal] = paydownAmt - payLeft;
+      }
+    }
 
     const inf    =Math.pow(1+p.inflation,yr);
     const coreinf=Math.pow(1+(p.coreCpi||p.inflation),yr);
@@ -182,40 +448,62 @@ export function buildScenario(p) {
     const pension =BASE.pensionMonthly*12;
     const workInc =workFromCurve(yr, p.workPts)*12*inf;
 
-    let rental=p.duplexBottomLTR*12*rg;
-    if(p.topUnit==="mtr"){
-      rental+=p.duplexTopMTR*12*rg;
-    } else if(p.topUnit==="ltr"){
-      rental+=p.duplexTopLTR*12*rg;
-    } else {
-      const schedEntry=(p.strSchedule||[]).find(s=>{
-        const f=s.yrFrom??s.yr; const t=s.yrTo??s.yr;
-        return cal>=f && cal<=t;
-      });
-      const strAnnual=schedEntry ? strScheduleIncome(schedEntry.segments) : p.duplexTopSTR*12;
-      rental+=strAnnual*rg;
+    // -- Rental income (per-property, gated by ownership) --
+    let rental = 0;
+    if(keepDuplex){
+      rental += p.duplexBottomLTR*12*rg;
+      if(p.topUnit==="mtr"){
+        rental += p.duplexTopMTR*12*rg;
+      } else if(p.topUnit==="ltr"){
+        rental += p.duplexTopLTR*12*rg;
+      } else {
+        const schedEntry=(p.strSchedule||[]).find(s=>{
+          const f=s.yrFrom??s.yr; const t=s.yrTo??s.yr;
+          return cal>=f && cal<=t;
+        });
+        const strAnnual=schedEntry ? strScheduleIncome(schedEntry.segments) : p.duplexTopSTR*12;
+        rental += strAnnual*rg;
+      }
     }
-    if(lafRenting)              rental+=BASE.lafayetteRent*12*rg;
-    if(p.sixthMTR&&keepPrimary){
+    if(lafRenting) rental += BASE.lafayetteRent*12*rg;
+
+    // 6th St primary income (MTR legacy or STR new, v3.1.0)
+    const sixthMode = p.sixthIncomeMode || 'none';
+    if(sixthMode==='mtr' && keepPrimary){
       const mtrEntry=(p.mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
       const mtrAnnual=mtrEntry ? mtrScheduleIncome(mtrEntry.segments) : p.sixthMTRRent*p.sixthMTRMonths;
-      rental+=mtrAnnual*rg;
+      rental += mtrAnnual*rg;
+    }
+    // STR auto-stops the year AFTER debt clears (spec §4.3)
+    const strActive = sixthMode==='str' && keepPrimary
+      && cal >= (p.sixthSTRStartYear || 2026)
+      && cal <  (p.sixthSTRStopYear  || 2055)
+      && (!p.sixthSTRStopOnDebtClear || debtClearedYr==null || cal <= debtClearedYr);
+    if(strActive){
+      const strEntry=(p.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
+      const strAnnualGross = strEntry ? strScheduleIncome(strEntry.segments) : (p.sixthSTRMonthly||0)*12;
+      const strCostPct = (p.strPlatformPct||0) + (p.strCleanPct||0) + (p.mgrPct||0);
+      rental += strAnnualGross * (1 - strCostPct) * rg;
     }
 
+    // -- cashAst: rerun from y=0..yr with dispositions, settlement, paydown, draws --
     let cashAst = 0;
     for(let y=0; y<=yr; y++){
       const yCal = BASE.startYear + y;
-      if(yCal === sellYr && p.sixthNetProceeds > 0){
-        cashAst += (p.sixthNetProceeds - (p.saleDraw||0));
-      }
+      cashAst += (yearCashAdd[yCal] || 0);
+      cashAst -= (yearCashSub[yCal] || 0);
+      cashAst -= (paydownByYear[yCal] || 0);
+      // Floor at 0: if settlement/paydown exceeds available cash, the shortfall
+      // is funded outside the model (loan / retirement acct / deferral). Not modeled explicitly.
+      if(cashAst < 0) cashAst = 0;
       if(y>0) cashAst *= (1+p.investReturn);
       for(const d of (p.lifestyleDraws||[])){
         if(d && y===d.yr && d.amount>0) cashAst = Math.max(0, cashAst - d.amount);
       }
     }
 
+    // Lifestyle draws as income (no more sale-year draw under v3.1.0)
     let drawInc = 0;
-    if(cal === sellYr && p.saleDraw > 0) drawInc += p.saleDraw;
     for(const d of (p.lifestyleDraws||[])){
       if(d && yr===d.yr && d.amount>0){
         const preDraw = cashAst + d.amount;
@@ -224,40 +512,53 @@ export function buildScenario(p) {
     }
     const totalIncome=pension+workInc+(yourSs+brendaSs)*12+rental+drawInc;
 
-    const dplxVal =BASE.duplexValue*app;
-    const lafVal  =BASE.lafayetteValue*app;
-    const primVal =keepPrimary?BASE.primaryValue*app:0;
-    const dplxBal =remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+yr);
-    const lafBal  =remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+yr);
-    const primBal =keepPrimary?remainBal(BASE.primaryMortgage,BASE.primaryRate,30,5+yr):0;
-    const _mtgInt =(dplxBal*BASE.duplexRate+lafBal*BASE.lafayetteRate+(keepPrimary?primBal*BASE.primaryRate:0));
+    // -- NW pieces (per-property, gated) --
+    const dplxVal = keepDuplex   ? BASE.duplexValue*app    : 0;
+    const lafVal  = keepLafOwned ? BASE.lafayetteValue*app : 0;
+    const primVal = keepPrimary  ? BASE.primaryValue*app   : 0;
+    const dplxBal = keepDuplex   ? remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+yr)       : 0;
+    const lafBal  = keepLafOwned ? remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+yr) : 0;
+    const primBal = keepPrimary  ? remainBal(BASE.primaryMortgage,BASE.primaryRate,30,5+yr)     : 0;
+    const _mtgInt = dplxBal*BASE.duplexRate + lafBal*BASE.lafayetteRate + primBal*BASE.primaryRate;
     const taxAnnual=estimateTax(p,pension,workInc,yourSs,brendaSs,rental,_mtgInt);
 
+    // -- Monthly mirror (same gating) --
     const _rg0  = Math.pow(1+p.rentGrowth, yr);
     const _inf0 = Math.pow(1+p.inflation, yr);
     const _pinf0= Math.pow(1+p.propInflation, yr);
-    let _rental0 = p.duplexBottomLTR*_rg0;
-    if(p.topUnit==="mtr")      _rental0+=p.duplexTopMTR*_rg0;
-    else if(p.topUnit==="ltr") _rental0+=p.duplexTopLTR*_rg0;
-    else                       _rental0+=p.duplexTopSTR*_rg0;
-    if(lafRenting)   _rental0+=BASE.lafayetteRent*_rg0;
-    if(p.sixthMTR&&keepPrimary){
+    let _rental0 = 0;
+    if(keepDuplex){
+      _rental0 += p.duplexBottomLTR*_rg0;
+      if(p.topUnit==="mtr")      _rental0+=p.duplexTopMTR*_rg0;
+      else if(p.topUnit==="ltr") _rental0+=p.duplexTopLTR*_rg0;
+      else                       _rental0+=p.duplexTopSTR*_rg0;
+    }
+    if(lafRenting) _rental0+=BASE.lafayetteRent*_rg0;
+    if(sixthMode==='mtr' && keepPrimary){
       const _mtrEntry=(p.mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
       const _mtrAnnual=_mtrEntry ? mtrScheduleIncome(_mtrEntry.segments) : p.sixthMTRRent*p.sixthMTRMonths;
-      _rental0+=_mtrAnnual/12*_rg0;
+      _rental0 += _mtrAnnual/12*_rg0;
+    }
+    if(strActive){
+      const _strEntry=(p.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
+      const _strAnnualGross = _strEntry ? strScheduleIncome(_strEntry.segments) : (p.sixthSTRMonthly||0)*12;
+      const _strCostPct = (p.strPlatformPct||0) + (p.strCleanPct||0) + (p.mgrPct||0);
+      _rental0 += _strAnnualGross * (1 - _strCostPct) / 12 * _rg0;
     }
     const _ss0    = ((p.ssStartYear&&(BASE.startYear+yr)>=p.ssStartYear)?p.ssAmount:0)+((BASE.startYear+yr)>=BASE.brendaFraYear?BASE.brendaSsFRA:0);
     const _work0  = workFromCurve(yr, p.workPts)*_inf0;
     const _incMo  = BASE.pensionMonthly + _ss0 + _rental0 + _work0;
-    let _propC0   = (BASE.dplxTaxMo+BASE.dplxInsMo)*_pinf0;
-    _propC0 += (keepPrimary?BASE.primTaxMo+BASE.primInsMo:BASE.lafTaxMo+BASE.lafInsMo)*_pinf0;
-    if(lafRenting) _propC0+=(BASE.lafTaxMo+BASE.lafInsMo)*_pinf0;
-    const _maint0 = (BASE.duplexValue+BASE.lafayetteValue+(keepPrimary?BASE.primaryValue:0))*p.maintRate*_pinf0/12;
+    let _propC0 = 0;
+    if(keepDuplex)   _propC0 += (BASE.dplxTaxMo+BASE.dplxInsMo)*_pinf0;
+    if(keepPrimary)  _propC0 += (BASE.primTaxMo+BASE.primInsMo)*_pinf0;
+    if(keepLafOwned) _propC0 += (BASE.lafTaxMo+BASE.lafInsMo)*_pinf0;
+    let _maint0 = 0;
+    if(keepDuplex)   _maint0 += BASE.duplexValue*p.maintRate*_pinf0/12;
+    if(keepLafOwned) _maint0 += BASE.lafayetteValue*p.maintRate*_pinf0/12;
+    if(keepPrimary)  _maint0 += BASE.primaryValue*p.maintRate*_pinf0/12;
     const _core0  = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*_inf0;
     const _hlth0  = healthMonthly(BASE.startYear+yr, 99, p);
-    const _mtg0   = (BASE.duplxIO + BASE.lafPnI + (p.keepPrimary?BASE.primIO:0));
-    // _baseDI: monthly income minus fixed costs (excl. debt minimums, fam loan, tax --
-    // those are subtracted per-month inside the loop so xtra reflects actual available cash)
+    const _mtg0   = (keepDuplex?BASE.duplxIO:0) + (keepLafOwned?BASE.lafPnI:0) + (keepPrimary?BASE.primIO:0);
     const _fixedMo= _mtg0 + _hlth0 + _propC0 + _core0 + _maint0 + taxAnnual/12;
     const _baseDI = _incMo - _fixedMo;
 
@@ -266,7 +567,6 @@ export function buildScenario(p) {
         const absMo=yr*12+mo;
         if(absMo<5){ nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)); }
         else{ nolanActive=true; }
-        // Capture minimums before applying payments (so _avail is net of what's already owed)
         const _minCC0  = ccBal>0?ccMin:0;
         const _minSoph0= sophiaBal>0?sophiaMin:0;
         const _minNol0 = nolanActive&&nolanBal>0?nolanMin:0;
@@ -276,7 +576,6 @@ export function buildScenario(p) {
         if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
         const _famMo = absMo<BASE.famLoanMonths ? famLoanMoPmt : 0;
         const loopDebt=ccBal+sophiaBal+nolanBal;
-        // _avail = income left after all fixed costs, minimums, and fam loan -- this is what avalanche can use
         const _avail = _baseDI - _minsMo - _famMo;
         const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
         let xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
@@ -289,23 +588,26 @@ export function buildScenario(p) {
       }
     }
     const hiDebt=p.payOffHI?0:ccBal+sophiaBal+nolanBal;
-    if(hiDebt<=0 && !debtCleared) debtCleared=true;
+    if(hiDebt<=0 && !debtCleared){ debtCleared=true; debtClearedYr=cal; }
 
-    const duplxPmt=(!p.payOffHI&&hiDebt>0)?BASE.duplxIO:BASE.duplxPnI;
-    const primPmt =keepPrimary?((!p.payOffHI&&hiDebt>0)?BASE.primIO:BASE.primPnI):0;
-    const mtgPmt  =(duplxPmt+BASE.lafPnI+primPmt)*12;
+    const duplxPmt = keepDuplex   ? ((!p.payOffHI&&hiDebt>0)?BASE.duplxIO:BASE.duplxPnI) : 0;
+    const lafPmt   = keepLafOwned ? BASE.lafPnI : 0;
+    const primPmt  = keepPrimary  ? ((!p.payOffHI&&hiDebt>0)?BASE.primIO:BASE.primPnI)   : 0;
+    const mtgPmt   = (duplxPmt + lafPmt + primPmt)*12;
 
     const healthAnnual=yr===0
       ?(5*BASE.healthYouEricsson+7*BASE.healthYouMedicare+12*BASE.healthBrendaEricsson+12*BASE.healthKids)
       :healthMonthly(cal,99,p)*12;
-    const irmaaSaleYr = (sold && !p.sixthMTR) ? sellYr+2 : 0;
-    const irmaaAdd = (irmaaSaleYr>0 && cal===irmaaSaleYr) ? BASE.irmaaSurge*2*12 : 0;
-    let propCost=(BASE.dplxTaxMo+BASE.dplxInsMo)*12*pinf;
-    propCost+=(keepPrimary?BASE.primTaxMo+BASE.primInsMo:BASE.lafTaxMo+BASE.lafInsMo)*12*pinf;
-    if(lafRenting) propCost+=(BASE.lafTaxMo+BASE.lafInsMo)*12*pinf;
+    const irmaaAdd = irmaaYears.has(cal) ? BASE.irmaaSurge*2*12 : 0;
+    let propCost = 0;
+    if(keepDuplex)   propCost += (BASE.dplxTaxMo+BASE.dplxInsMo)*12*pinf;
+    if(keepLafOwned) propCost += (BASE.lafTaxMo+BASE.lafInsMo)*12*pinf;
+    if(keepPrimary)  propCost += (BASE.primTaxMo+BASE.primInsMo)*12*pinf;
     const core=(BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf*12;
-    let maint=(BASE.duplexValue+BASE.lafayetteValue)*p.maintRate*pinf;
-    if(keepPrimary) maint+=BASE.primaryValue*p.maintRate*pinf;
+    let maint = 0;
+    if(keepDuplex)   maint += BASE.duplexValue*p.maintRate*pinf;
+    if(keepLafOwned) maint += BASE.lafayetteValue*p.maintRate*pinf;
+    if(keepPrimary)  maint += BASE.primaryValue*p.maintRate*pinf;
     const famLoanAnnual=yr===0?famLoanMoPmt*Math.min(12,BASE.famLoanMonths)
                        :yr===1?famLoanMoPmt*Math.max(0,BASE.famLoanMonths-12):0;
     const minDebt=p.payOffHI?0:(
@@ -325,9 +627,6 @@ export function buildScenario(p) {
     const reqWork =Math.max(0,totalOut-passive);
     const nw      =Math.round((dplxVal+lafVal+primVal+cashAst-dplxBal-lafBal-primBal-hiDebt)/1000);
 
-    // Family loan balance at START of this year (before this year's payments).
-    // Shown at year-start so the chart reflects what was owed entering 2026.
-    // With famLoanMonths=8 the loan completes within yr=0, so yr≥1 = 0.
     const _flMos = Math.min(yr*12, BASE.famLoanMonths);
     const famLoanBal = (p.famLoanAmt>0 && famLoanMoPmt>0 && _flMos<BASE.famLoanMonths)
       ? Math.max(0, Math.round(
@@ -335,6 +634,11 @@ export function buildScenario(p) {
            - (flr>0 ? famLoanMoPmt*(Math.pow(1+flr,_flMos)-1)/flr : famLoanMoPmt*_flMos)
           ) / 1000))
       : 0;
+
+    // Per-year disposition summary (nonzero only when a sale happens this year)
+    const dispoTaxYr = (dispoRes.sixth.year===cal    ? dispoRes.sixth.totalTax    : 0)
+                     + (dispoRes.barberry.year===cal ? dispoRes.barberry.totalTax : 0)
+                     + (dispoRes.fifteenth.year===cal? dispoRes.fifteenth.totalTax: 0);
 
     rows.push({
       cal, yr,
@@ -373,9 +677,16 @@ export function buildScenario(p) {
       ccBal:    Math.round(ccBal/1000),
       sophiaBal:Math.round(sophiaBal/1000),
       nolanBal: Math.round(nolanBal/1000),
-      ioMode:   hiDebt>0 && !p.payOffHI && keepPrimary,
+      ioMode:   hiDebt>0 && !p.payOffHI && (keepPrimary||keepDuplex),
+      // v3.1.0 dispo-year summary fields
+      dispoTax: Math.round(dispoTaxYr),
+      dispoNet: Math.round(yearCashAdd[cal] || 0),
+      settlementOut: Math.round(yearCashSub[cal] || 0),
+      hiPaydown: Math.round(paydownByYear[cal] || 0),
     });
   }
+  // Expose disposition details for reconciliation card / UI
+  rows.dispoResults = dispoRes;
   let cumInc=0,cumCost=0,cumPension=0,cumWork=0,cumSS=0,cumRental=0,cumDraw=0;
   let cumMtg=0,cumHealth=0,cumCore=0,cumProp=0,cumMaint=0,cumDebt=0,cumTax=0;
   for(const r of rows){

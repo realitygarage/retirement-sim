@@ -1,16 +1,102 @@
 // =============================================================================
 // defaults.js  --  DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, SC_DEFAULTS
+// v3.1.0: per-property dispositions replace bespoke 6th-only sale block.
+//         Schema v3 -- old pins from v2.x are silently dropped on load.
 // =============================================================================
-import { BASE, CC_BAL, remainBal, SOPHIA_LOANS, NOLAN_LOANS } from "./engine.js";
+import { BASE, DISPO_DEFAULTS } from "./engine.js";
 
+// -----------------------------------------------------------------------------
+// LIQUIDATION_DEFAULTS -- per-property CPA-worksheet figures.
+// Source: Ottinger.xlsx, 2026 accountant liquidation worksheet (Remax net sheets).
+// All figures are estimates; UI slider range = +/-50% of default.
+// -----------------------------------------------------------------------------
+export const LIQUIDATION_DEFAULTS = {
+  sixth: {
+    label: '6th St (home)',
+    salesPrice:             1_675_000,
+    adjustedBasis:            899_550,  // $735K cost + $76K improvements + $88.55K closing
+    sec121Exclusion:          500_000,
+    caSourceDeferredGain:           0,
+    depreciationRecapture:          0,
+    cpaEstTax:                 62_000,  // Fed 50K + CO 12K + CA 0
+    cpaNetProceedsAfterTax:   708_881,
+  },
+  barberry: {                            // = Lafayette in sim (see spec §0)
+    label: '540 Barberry / Lafayette (rental)',
+    salesPrice:               625_000,
+    adjustedBasis:            183_043,  // carryover after 1031, per sheet
+    sec121Exclusion:                0,
+    caSourceDeferredGain:     391_507,
+    depreciationRecapture:     21_500,
+    cpaEstTax:                124_000,  // Fed 80K + CO 0 + CA 44K
+    cpaNetProceedsAfterTax:   283_567,
+  },
+  fifteenth: {
+    label: '2224 15th St (rental)',
+    salesPrice:             1_375_000,
+    adjustedBasis:            424_309,
+    sec121Exclusion:                0,
+    caSourceDeferredGain:     801_441,
+    depreciationRecapture:     44_000,
+    cpaEstTax:                288_000,  // Fed 200K + CO 8K + CA 80K
+    cpaNetProceedsAfterTax:   656_470,
+  },
+};
+
+// -----------------------------------------------------------------------------
+// SETTLEMENT_DEFAULTS
+// -----------------------------------------------------------------------------
+export const SETTLEMENT_DEFAULTS = {
+  settlementNeed:        525_000,   // slider band 450K-525K; hard range +/-50%
+  settlementYear:        2026,
+  gainOffsetPct:              0,    // 0-100, DEFAULT OFF (Kimbell/Arrowsmith, UNCONFIRMED)
+  sameYearSaleTaxBump:   50_000,    // +tax if all 3 sold same calendar year
+  sameYearSaleTaxBumpOn:  true,
+  requireSameYearForOffset: true,
+  hiPaydownPct:             100,    // 0-100% of residual, default 100 (avalanche)
+  caGainCap:          1_200_000,    // CA $1.2M prior-1031 gain cap (§4.6)
+};
+
+// -----------------------------------------------------------------------------
+// SIXTH_STR_DEFAULTS -- 6th St short-term rental (mirrors duplex-top STR pattern)
+// -----------------------------------------------------------------------------
+export const SIXTH_STR_DEFAULTS = {
+  sixthIncomeMode:         'none',   // 'none' | 'mtr' | 'str'
+  sixthSTRMonthly:          9_000,   // $/mo gross when STR-active; slider +/-50%
+  sixthSTRSchedule:            [],   // same shape as strSchedule
+  sixthSTRStartYear:         2026,
+  sixthSTRStopYear:          2055,
+  sixthSTRStopOnDebtClear:   true,   // auto-stop STR the year HI debt hits 0
+};
+
+// -----------------------------------------------------------------------------
+// Helper: build one disposition entry from LIQUIDATION_DEFAULTS
+// -----------------------------------------------------------------------------
+function dispoEntry(key) {
+  const liq = LIQUIDATION_DEFAULTS[key];
+  return {
+    mode:      'keep',                 // 'keep' | 'sell_taxable' | 'full_1031' | 'partial_1031'
+    year:      2055,
+    saleMode:  'market',               // 'market' | 'forced'
+    cashBoot:  0,                      // partial_1031 only
+    salesPrice:             liq.salesPrice,
+    adjustedBasis:          liq.adjustedBasis,
+    sec121Exclusion:        liq.sec121Exclusion,
+    caSourceDeferredGain:   liq.caSourceDeferredGain,
+    depreciationRecapture:  liq.depreciationRecapture,
+    // CPA reference (for reconciliation card, not simulated)
+    cpaEstTax:              liq.cpaEstTax,
+    cpaNetProceedsAfterTax: liq.cpaNetProceedsAfterTax,
+  };
+}
+
+// =============================================================================
+// DEFAULTS  --  engine-facing values (rates as decimals)
+// =============================================================================
 export const DEFAULTS = {
-  sellYear:      2055,
-  lafStopYear:   2055,
-  saleDrawFrac:  0,
-  keepPrimary:   true,
+  lafStopYear:   2055,     // rental-stop year for Lafayette (independent of sale)
   topUnit:       "str",
   lafRental:     true,
-  sixthMTR:      false,
   payOffHI:      false,
   ssStartYear:   2026,
   ssAmount:      BASE.yourSsEarly,
@@ -41,55 +127,42 @@ export const DEFAULTS = {
   lifestyleDraws: [],
   strSchedule:   [],
   mtrSchedule:   [],
-  sixthSalePrice:  1_700_000,
-  sixthCostOfSale: 0.05,
-  capGainsTax:     0,
-  sixthNetProceeds:0,
+  // v3.1.0 per-property dispositions
+  dispositions: {
+    sixth:     dispoEntry('sixth'),
+    barberry:  dispoEntry('barberry'),
+    fifteenth: dispoEntry('fifteenth'),
+  },
+  // v3.1.0 settlement
+  ...SETTLEMENT_DEFAULTS,
+  // v3.1.0 6th St STR group
+  ...SIXTH_STR_DEFAULTS,
 };
 
+// =============================================================================
+// makeParams  --  spread + normalize dispositions (no bespoke sale math)
+// =============================================================================
 export function makeParams(overrides={}){
   const p={...DEFAULTS,...overrides};
-  const willSell = (p.sellYear||2055) <= 2046;
-  if(willSell){
-    const salePrice   = p.sixthSalePrice || BASE.primaryValue;
-    const costOfSale  = p.sixthCostOfSale || BASE.sellingCosts;
-    const saleNet     = salePrice * (1 - costOfSale);
-    const gain        = Math.max(0, saleNet - BASE.sixthBasis);
-    const taxableGain = Math.max(0, gain - BASE.marriedExcl);
-    const capGainsTax = taxableGain * (BASE.fedCapGains + BASE.coCapGains);
-    const hiPayoff    = p.payOffHI ? ((p.ccBal||CC_BAL)+(p.sophiaBal||58057)+(p.nolanBal||141117)) : 0;
-    const yrsPaidAtSale = 5 + ((p.sellYear||2055) - BASE.startYear);
-    const mtgPayoff   = remainBal(BASE.primaryMortgage, BASE.primaryRate, 30, yrsPaidAtSale);
-    const netProceeds = Math.max(0, saleNet - mtgPayoff - capGainsTax - hiPayoff);
-    const saleDraw    = Math.round(netProceeds * (p.saleDrawFrac||0));
-    p.investedCash    = Math.max(0, netProceeds - saleDraw);
-    p.capGainsTax     = Math.round(capGainsTax);
-    p.sixthSaleNet    = Math.round(saleNet);
-    p.sixthNetProceeds= Math.round(netProceeds);
-    p.saleDraw        = saleDraw;
-  } else {
-    p.capGainsTax = 0;
-    p.sixthSaleNet = 0;
-    p.sixthNetProceeds = 0;
-    p.saleDraw = 0;
-    p.investedCash = p.investedCash || 0;
-  }
+  // Merge disposition entries so partial overrides pick up default field values
+  p.dispositions = {
+    sixth:     { ...DEFAULTS.dispositions.sixth,     ...(overrides.dispositions?.sixth     || {}) },
+    barberry:  { ...DEFAULTS.dispositions.barberry,  ...(overrides.dispositions?.barberry  || {}) },
+    fifteenth: { ...DEFAULTS.dispositions.fifteenth, ...(overrides.dispositions?.fifteenth || {}) },
+  };
   return p;
 }
 
 export const PIN_COLORS = ["#f59e0b","#f472b6","#34d399","#60a5fa","#a78bfa","#fb923c"];
-export const SAVE_SCHEMA_VERSION = 2;
+export const SAVE_SCHEMA_VERSION = 3;  // v3.1.0: schema break, no back-compat with v2.x
 
+// =============================================================================
+// SC_DEFAULTS  --  UI-facing scenario snapshot (rates as %, ints where UI is int)
+// =============================================================================
 export const SC_DEFAULTS = {
-  sellYear:      2055,
   lafStopYear:   2055,
-  saleDrawFrac:  0,
-  keepPrimary:   true,
-  sixthSalePrice:1700000,
-  sixthCostOfSale:5.0,
   topUnit:       "str",
   lafRental:     true,
-  sixthMTR:      false,
   payOffHI:      false,
   ssAge:         65,
   workPts:       [{yr:0,val:5417},{yr:2,val:3000},{yr:5,val:1000},{yr:8,val:0}],
@@ -119,6 +192,14 @@ export const SC_DEFAULTS = {
   strPlatformPct: 3.0,
   strCleanPct:    4.0,
   mgrPct:         0.0,
-  duplex15thBasis: 600_000,
-  lafayetteBasis:  300_000,
+  // v3.1.0 per-property dispositions (dollars, no % conversion needed)
+  dispositions: {
+    sixth:     dispoEntry('sixth'),
+    barberry:  dispoEntry('barberry'),
+    fifteenth: dispoEntry('fifteenth'),
+  },
+  // v3.1.0 settlement
+  ...SETTLEMENT_DEFAULTS,
+  // v3.1.0 6th St STR group
+  ...SIXTH_STR_DEFAULTS,
 };

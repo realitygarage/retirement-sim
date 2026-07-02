@@ -1,12 +1,21 @@
-// v2.10.7 -- FCF chart: combinedSweep shows debt sweep + savings sweep on one line
-import React, { useState, useMemo, useCallback, useRef } from "react";
+// v3.1.0 -- per-property dispositions, CPA liquidation defaults, settlement gain-offset, 6th St STR group, HI-paydown knob
+import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax } from "./engine.js";
-import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION } from "./defaults.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS } from "./engine.js";
+import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS } from "./defaults.js";
+
+// v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
+if (typeof window !== 'undefined') {
+  window.__engine = {
+    BASE, buildScenario, keyStats, disposeAsset, taxRecognized,
+    DISPO_DEFAULTS, makeParams, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS,
+    strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax,
+  };
+}
 import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_W, SVG_H, rNodePos } from "./relationships-data.js";
 
 export default function App(){
@@ -41,7 +50,7 @@ export default function App(){
 
   // Destructure active scenario for use in controls + engines
   const {
-    sellYear, lafStopYear, saleDrawFrac, keepPrimary, sixthSalePrice, sixthCostOfSale, topUnit, lafRental, sixthMTR, payOffHI,
+    lafStopYear, topUnit, lafRental, payOffHI,
     ssAge, workPts, lifestyleSplit, strRent, bottomRent, ltrRent, sixthRent, sixthMonths,
     reApp, rentGr, cpi, healthCpi, propCpi, taxEnabled, investRet, lifestyleDraws, strSchedule, mtrSchedule,
     ccBal, ccRate, ccMin, sophiaBal, sophiaRate, sophiaMin, nolanBal, nolanRate, nolanMin,
@@ -49,20 +58,61 @@ export default function App(){
     rdTopUp, rdCap, obTopUp, obCap, discFloor, fcfSchedule, sweepDelay, struct6, struct15, structLaf, maintStr, bufferMode,
     strPlatformPct=3, strCleanPct=4, mgrPct=0,
     duplex15thBasis=600_000, lafayetteBasis=300_000,
+    // v3.1.0 dispositions + settlement + STR
+    dispositions,
+    settlementNeed=525_000, settlementYear=2026, gainOffsetPct=0,
+    sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true, requireSameYearForOffset=true,
+    hiPaydownPct=100, caGainCap=1_200_000,
+    sixthIncomeMode='none', sixthSTRMonthly=9_000, sixthSTRSchedule=[],
+    sixthSTRStartYear=2026, sixthSTRStopYear=2055, sixthSTRStopOnDebtClear=true,
   } = sc;
 
+  // v3.1.0 shims -- expose disposition-derived legacy field names so existing UI
+  // panels keep rendering. New Disposition panel writes directly to dispositions.
+  const _dSixth  = dispositions?.sixth     || {mode:'keep', year:2055, salesPrice:1_675_000};
+  const _dLaf    = dispositions?.barberry  || {mode:'keep', year:2055};
+  const _dDuplex = dispositions?.fifteenth || {mode:'keep', year:2055};
+  const sellYear        = _dSixth.mode==='keep' ? 2055 : (_dSixth.year || 2055);
+  const sixthSalePrice  = _dSixth.salesPrice ?? 1_675_000;
+  const sixthCostOfSale = (DISPO_DEFAULTS.sellingCostsPct * 100);  // constant now (6%)
+  const sixthMTR        = sixthIncomeMode === 'mtr';
+  const keepPrimary     = _dSixth.mode === 'keep';                 // UI-facing "hold indefinitely" flag
+  const saleDrawFrac    = 0;                                        // gone in v3.1.0 (residual → HI paydown)
+
   // Individual setters -- all route through setSc
-  const setSellYear       = v=>setSc(s=>({...s,sellYear:v,...(v>2046?{payOffHI:false}:{})}));
+  const setDispo = useCallback((key, patch) => setSc(s => {
+    const cur = s.dispositions?.[key] || {};
+    return { ...s, dispositions: { ...(s.dispositions||{}), [key]: { ...cur, ...patch } } };
+  }), []);
+  // Legacy-shim setters -- write to dispositions.sixth for back-compat with existing UI
+  const setSellYear       = v=>setSc(s=>{
+    const cur = s.dispositions?.sixth || {};
+    const newMode = v>2046 ? 'keep' : (cur.mode==='keep' ? 'sell_taxable' : cur.mode || 'sell_taxable');
+    return {...s, dispositions:{...(s.dispositions||{}), sixth:{...cur, year:v, mode:newMode}}, ...(v>2046?{payOffHI:false}:{})};
+  });
   const setLafStopYear    = v=>setSc(s=>({...s,lafStopYear:v}));
-  const setSaleDrawFrac   = v=>setSc(s=>({...s,saleDrawFrac:v}));
+  const setSaleDrawFrac   = _v=>{};   // no-op under v3.1.0
   const setSweepDelay     = v=>setSc(s=>({...s,sweepDelay:v}));
-  const setKeepPrimary    = v=>setSc(s=>({...s,keepPrimary:v}));
-  const setSixthSalePrice = v=>setSc(s=>({...s,sixthSalePrice:v}));
-  const setSixthCostOfSale= v=>setSc(s=>({...s,sixthCostOfSale:v}));
+  const setKeepPrimary    = v=>setDispo('sixth', {mode: v ? 'keep' : 'sell_taxable'});
+  const setSixthSalePrice = v=>setDispo('sixth', {salesPrice: v});
+  const setSixthCostOfSale= _v=>{};   // no-op; sellingCostsPct is now a DISPO_DEFAULTS constant
   const setTopUnit        = v=>setSc(s=>({...s,topUnit:v}));
   const setLafRental      = v=>setSc(s=>({...s,lafRental:v}));
-  const setSixthMTR       = v=>setSc(s=>({...s,sixthMTR:v}));
+  const setSixthMTR       = v=>setSc(s=>({...s,sixthIncomeMode: v ? 'mtr' : 'none'}));
   const setPayOffHI       = v=>setSc(s=>({...s,payOffHI:v}));
+  // v3.1.0 setters for new fields
+  const setSixthIncomeMode = v=>setSc(s=>({...s,sixthIncomeMode:v}));
+  const setSixthSTRMonthly = v=>setSc(s=>({...s,sixthSTRMonthly:v}));
+  const setSixthSTRSchedule= v=>setSc(s=>({...s,sixthSTRSchedule:typeof v==="function"?v(s.sixthSTRSchedule||[]):v}));
+  const setSixthSTRStartYear = v=>setSc(s=>({...s,sixthSTRStartYear:v}));
+  const setSixthSTRStopYear  = v=>setSc(s=>({...s,sixthSTRStopYear:v}));
+  const setSixthSTRStopOnDebtClear = v=>setSc(s=>({...s,sixthSTRStopOnDebtClear:v}));
+  const setSettlementNeed  = v=>setSc(s=>({...s,settlementNeed:v}));
+  const setSettlementYear  = v=>setSc(s=>({...s,settlementYear:v}));
+  const setGainOffsetPct   = v=>setSc(s=>({...s,gainOffsetPct:v}));
+  const setSameYearSaleTaxBumpOn = v=>setSc(s=>({...s,sameYearSaleTaxBumpOn:v}));
+  const setSameYearSaleTaxBump   = v=>setSc(s=>({...s,sameYearSaleTaxBump:v}));
+  const setHiPaydownPct    = v=>setSc(s=>({...s,hiPaydownPct:v}));
   const setSsAge          = v=>setSc(s=>({...s,ssAge:v}));
   const setWorkPts        = v=>setSc(s=>({...s,workPts:typeof v==="function"?v(s.workPts):v}));
   const setLifestyleSplit = v=>setSc(s=>({...s,lifestyleSplit:v}));
@@ -117,8 +167,13 @@ export default function App(){
     const totalMaint=(sc.struct6||600)*1000*(sc.maintStr||0.75)/100
                     +(sc.struct15||500)*1000*(sc.maintStr||0.75)/100
                     +(sc.structLaf||250)*1000*(sc.maintStr||0.75)/100;
-    const keepP=(sc.sellYear||2055)>BASE.startYear;
-    const totalVal=(keepP?BASE.primaryValue:0)+BASE.duplexValue+(sc.lafRental!==false?BASE.lafayetteValue:0);
+    const _dS = sc.dispositions?.sixth     || {mode:'keep'};
+    const _dL = sc.dispositions?.barberry  || {mode:'keep'};
+    const _dD = sc.dispositions?.fifteenth || {mode:'keep'};
+    const keepP = _dS.mode==='keep';
+    const keepL = _dL.mode==='keep';
+    const keepD = _dD.mode==='keep';
+    const totalVal=(keepP?BASE.primaryValue:0)+(keepD?BASE.duplexValue:0)+(keepL?BASE.lafayetteValue:0);
     const maintRate_=totalVal>0?totalMaint/totalVal:0.005;
     return buildScenario(makeParams({
       ...sc,
@@ -132,7 +187,7 @@ export default function App(){
       investReturn:sc.investRet/100,
       lifestyleDraws:(sc.lifestyleDraws||[]).filter(d=>d.enabled),
       ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
-      famLoanRate:sc.famLoanRate/100, sixthCostOfSale:sc.sixthCostOfSale/100,
+      famLoanRate:sc.famLoanRate/100,
       strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
     }));
   }
@@ -172,13 +227,15 @@ export default function App(){
   const diCap = discFloor + rdTopUp + obTopUp;
 
   // Maintenance: derived from Cash Flow structure values + rate -- source of truth
-  // Derived keepPrimary for UI: holding 6th in the current year (2026)
-  const uiKeepPrimary = sellYear > BASE.startYear;
+  // uiKeepPrimary = still holding 6th at launch (2026)
+  const uiKeepPrimary = keepPrimary || sellYear > BASE.startYear;
+  const uiKeepDuplex  = _dDuplex.mode === 'keep' || (_dDuplex.year||2055) > BASE.startYear;
+  const uiKeepLaf     = _dLaf.mode    === 'keep' || (_dLaf.year||2055)    > BASE.startYear;
   const maintAnnual6   = uiKeepPrimary ? struct6*1000*maintStr/100 : 0;
-  const maintAnnual15  = struct15*1000*maintStr/100;
-  const maintAnnualLaf = structLaf*1000*maintStr/100;  // always -- owned regardless of rental status
+  const maintAnnual15  = uiKeepDuplex  ? struct15*1000*maintStr/100 : 0;
+  const maintAnnualLaf = uiKeepLaf     ? structLaf*1000*maintStr/100 : 0;
   const totalMaintAnnual = maintAnnual6+maintAnnual15+maintAnnualLaf;
-  const totalMarketVal = (uiKeepPrimary?BASE.primaryValue:0)+BASE.duplexValue+(lafRental?BASE.lafayetteValue:0);
+  const totalMarketVal = (uiKeepPrimary?BASE.primaryValue:0)+(uiKeepDuplex?BASE.duplexValue:0)+(uiKeepLaf?BASE.lafayetteValue:0);
   const maintRate = totalMarketVal>0 ? totalMaintAnnual/totalMarketVal : 0.005;
 
   const liveParams = useMemo(()=>makeParams({
@@ -195,7 +252,7 @@ export default function App(){
     investReturn:sc.investRet/100,
     lifestyleDraws:sc.lifestyleDraws.filter(d=>d.enabled),
     ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
-    famLoanRate:sc.famLoanRate/100, sixthCostOfSale:sc.sixthCostOfSale/100,
+    famLoanRate:sc.famLoanRate/100,
     strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
   }),[sc, diCap, maintRate]);
 
@@ -218,7 +275,8 @@ export default function App(){
         strSchedule:editedSc.strSchedule||[],
         mtrSchedule:editedSc.mtrSchedule||[],
       ccRate:editedSc.ccRate/100, sophiaRate:editedSc.sophiaRate/100, nolanRate:editedSc.nolanRate/100,
-      famLoanRate:editedSc.famLoanRate/100, sixthCostOfSale:editedSc.sixthCostOfSale/100,
+      famLoanRate:editedSc.famLoanRate/100,
+      strPlatformPct:(editedSc.strPlatformPct||3)/100, strCleanPct:(editedSc.strCleanPct||4)/100, mgrPct:(editedSc.mgrPct||0)/100,
       maintRate:(editedSc.struct6*1000*editedSc.maintStr/100+editedSc.struct15*1000*editedSc.maintStr/100+editedSc.structLaf*1000*editedSc.maintStr/100)/
                (BASE.primaryValue+BASE.duplexValue+BASE.lafayetteValue)||0.005,
     });
@@ -229,16 +287,44 @@ export default function App(){
 
   // -- Cash flow waterfall engine ----------------------------
   const wfData = useMemo(()=>{
-    // Per-property maintenance (monthly, from structure value)
-    const keepingFn    = (cy) => cy < (sellYear||2055);
-    const lafRentingFn = (cy) => lafRental && cy < (lafStopYear||2055);
-    const maint6Mo   = keepingFn(BASE.startYear) ? (struct6*1000*maintStr/100/12) : 0;
-    const maint15Mo  = struct15*1000*maintStr/100/12;
-    const maintLafMo = structLaf*1000*maintStr/100/12;  // always -- owned regardless of rental status
-    const maintCapTotal = (maint6Mo+maint15Mo+maintLafMo) * 12 * 5; // 5yr cap total
-    const maint6Cap  = maint6Mo*12*5;
-    const maint15Cap = maint15Mo*12*5;
-    const maintLafCap= maintLafMo*12*5;
+    // v3.1.0 dispositions -- pull from liveParams so we see the merged canonical form
+    const _dispo   = liveParams.dispositions || {};
+    const _sixthYr = _dispo.sixth?.mode    ==='keep' ? Infinity : (_dispo.sixth?.year    || 2055);
+    const _lafYr   = _dispo.barberry?.mode ==='keep' ? Infinity : (_dispo.barberry?.year || 2055);
+    const _dupYr   = _dispo.fifteenth?.mode==='keep' ? Infinity : (_dispo.fifteenth?.year|| 2055);
+
+    // Per-property "still owned in year cy" gates
+    const keepingFn      = (cy) => cy < _sixthYr;                             // 6th (primary)
+    const duplexKeepingFn= (cy) => cy < _dupYr;                               // 15th duplex
+    const lafKeepingFn   = (cy) => cy < _lafYr;                               // Lafayette
+    const lafRentingFn   = (cy) => lafRental && lafKeepingFn(cy) && cy < (lafStopYear||2055);
+
+    // Maint monthly amounts (structure-value-based); zeroed when property sold.
+    // These are re-checked per month inside the loop so post-sale years drop out.
+    const _maint6Base   = struct6 *1000*maintStr/100/12;
+    const _maint15Base  = struct15*1000*maintStr/100/12;
+    const _maintLafBase = structLaf*1000*maintStr/100/12;
+    const maint6Cap  = _maint6Base   * 12 * 5;
+    const maint15Cap = _maint15Base  * 12 * 5;
+    const maintLafCap= _maintLafBase * 12 * 5;
+
+    // Pre-compute per-year dispo proceeds & settlement outflow (for HI paydown timing)
+    const _yearCashAdd = {};
+    const _yearCashSub = {};
+    try {
+      // buildScenario already computed dispoRes; get via liveRows.dispoResults if present
+      const _dr = (liveRows && liveRows.dispoResults) || {};
+      for(const key of ['sixth','barberry','fifteenth']){
+        const d = _dr[key];
+        if(d && d.mode && d.mode !== 'keep' && (d.afterTaxNetProceeds||0) > 0){
+          _yearCashAdd[d.year] = (_yearCashAdd[d.year]||0) + d.afterTaxNetProceeds;
+        }
+      }
+      if((settlementNeed||0) > 0){
+        _yearCashSub[settlementYear||2026] = (_yearCashSub[settlementYear||2026]||0) + settlementNeed;
+      }
+    } catch(e) {}
+    const _paidYears = new Set();  // years where HI paydown has been applied
 
     // Family loan payment
     const flr = famLoanRate/100/12;
@@ -276,42 +362,84 @@ export default function App(){
       const rg     = Math.pow(1+liveParams.rentGrowth,  mo/12);
       const pinf   = Math.pow(1+(liveParams.propCpi||liveParams.propInflation), mo/12);
 
+      // -- v3.1.0 HI paydown (§4.5): applied once at start of dispo year --
+      const _nolanOnNow = mo>=5;
+      if(!payOffHI && (_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
+        const residual = Math.max(0, (_yearCashAdd[calYear] - (_yearCashSub[calYear]||0)));
+        const paydownPct = (liveParams.hiPaydownPct || 0) / 100;
+        const totalHI_ = ccBal+sophiaBal+nolanBal;
+        let paydownAmt = Math.min(residual * paydownPct, totalHI_);
+        if(paydownAmt > 0){
+          const pdQ = [
+            {g:()=>ccBal,     s:(v)=>{ccBal=v;},     r:ccRate_},
+            {g:()=>sophiaBal, s:(v)=>{sophiaBal=v;}, r:sophiaRate_},
+            ...(_nolanOnNow?[{g:()=>nolanBal, s:(v)=>{nolanBal=v;}, r:nolanRate_}]:[]),
+          ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
+          let payLeft = paydownAmt;
+          for(const loan of pdQ){
+            if(payLeft<=0) break;
+            const pay = Math.min(payLeft, loan.g());
+            loan.s(loan.g()-pay);
+            payLeft -= pay;
+          }
+        }
+        _paidYears.add(calYear);
+      }
+
       // -- INCOME --
       const pension  = BASE.pensionMonthly;
       const yourSsMo = (liveParams.ssStartYear && calYear>=liveParams.ssStartYear)
         ? liveParams.ssAmount : 0;
       const brendaSsMo = calYear>=BASE.brendaFraYear ? BASE.brendaSsFRA : 0;
-      const _bot = liveParams.duplexBottomLTR;
-      const _schedEntry = topUnit==="str" ? (strSchedule||[]).find(s=>{
+      // 15th duplex rental (gated by duplexKeepingFn)
+      const _dupOwned = duplexKeepingFn(calYear);
+      const _bot = _dupOwned ? liveParams.duplexBottomLTR : 0;
+      const _schedEntry = (_dupOwned && topUnit==="str") ? (strSchedule||[]).find(s=>{
         const f=s.yrFrom??s.yr; const t=s.yrTo??s.yr;
         return calYear>=f && calYear<=t;
       }) : null;
-      const _top = topUnit==="str"
-        ? (_schedEntry ? strScheduleIncome(_schedEntry.segments)/12 : liveParams.duplexTopSTR)
-        : topUnit==="ltr" ? liveParams.duplexTopLTR : liveParams.duplexTopMTR;
-      const rentalMo = _bot*rg
-        + _top*rg
-        + (lafRentingFn(calYear)?BASE.lafayetteRent*rg:0)
-        + (sixthMTR&&keepingFn(calYear) ? (()=>{
-            const _me=(mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
-            return _me ? mtrScheduleIncome(_me.segments)/12*rg : sixthRent*(sixthMonths/12)*rg;
-          })() : 0);
-      const wkInc     = workFromCurve(mo/12, workPts)*inf;
-      // -- RENTAL OPERATING COSTS (deducted from gross rental income) --
-      // 15th top unit costs
-      const _topGross = _top*rg;
-      const _strOpCost = topUnit==="str"
-        ? _topGross*((liveParams.strPlatformPct||0.03)+(liveParams.strCleanPct||0.04))
-        : _topGross*(liveParams.mgrPct||0);
-      // Lafayette LTR mgmt cost
-      const _lafGross = lafRentingFn(calYear)?BASE.lafayetteRent*rg:0;
-      const _lafOpCost = _lafGross*(liveParams.mgrPct||0);
-      // 6th St MTR mgmt cost
-      const _sixthGross = sixthMTR&&keepingFn(calYear) ? (()=>{
+      const _top = !_dupOwned ? 0
+        : topUnit==="str"
+          ? (_schedEntry ? strScheduleIncome(_schedEntry.segments)/12 : liveParams.duplexTopSTR)
+          : topUnit==="ltr" ? liveParams.duplexTopLTR : liveParams.duplexTopMTR;
+
+      // 6th St primary income (MTR legacy or STR new)
+      // Auto-stop STR the year AFTER debt clears (if stopOnDebtClear)
+      const _sixthMode = liveParams.sixthIncomeMode || 'none';
+      const _debtClearedCalYr = (debtClearedMo>=0)
+        ? (new Date(startDate.getFullYear(), startDate.getMonth()+debtClearedMo)).getFullYear()
+        : null;
+      const _strActiveMo = (_sixthMode==='str' && keepingFn(calYear)
+        && calYear >= (liveParams.sixthSTRStartYear || 2026)
+        && calYear <  (liveParams.sixthSTRStopYear  || 2055)
+        && (!liveParams.sixthSTRStopOnDebtClear || _debtClearedCalYr==null || calYear <= _debtClearedCalYr));
+      const _sixthMtrMo = (_sixthMode==='mtr' && keepingFn(calYear)) ? (()=>{
           const _me=(mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
           return _me ? mtrScheduleIncome(_me.segments)/12*rg : sixthRent*(sixthMonths/12)*rg;
         })() : 0;
-      const _sixthOpCost = _sixthGross*(liveParams.mgrPct||0);
+      const _sixthStrGrossMo = _strActiveMo ? (()=>{
+          const _se=(liveParams.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
+          const annualGross = _se ? strScheduleIncome(_se.segments) : (liveParams.sixthSTRMonthly||0)*12;
+          return annualGross/12 * rg;
+        })() : 0;
+
+      // rentalMo is GROSS across all units; op costs deducted below
+      const rentalMo = _bot*rg
+        + _top*rg
+        + (lafRentingFn(calYear)?BASE.lafayetteRent*rg:0)
+        + _sixthMtrMo
+        + _sixthStrGrossMo;
+      const wkInc     = workFromCurve(mo/12, workPts)*inf;
+
+      // -- RENTAL OPERATING COSTS (deducted from gross rental income) --
+      const _topGross = _top*rg;
+      const _strOpCost = _dupOwned && topUnit==="str"
+        ? _topGross*((liveParams.strPlatformPct||0.03)+(liveParams.strCleanPct||0.04))
+        : _dupOwned ? _topGross*(liveParams.mgrPct||0) : 0;
+      const _lafGross = lafRentingFn(calYear)?BASE.lafayetteRent*rg:0;
+      const _lafOpCost = _lafGross*(liveParams.mgrPct||0);
+      const _sixthOpCost = _sixthMtrMo*(liveParams.mgrPct||0)
+        + _sixthStrGrossMo*((liveParams.strPlatformPct||0)+(liveParams.strCleanPct||0)+(liveParams.mgrPct||0));
       const rentalOpCost = Math.round(_strOpCost+_lafOpCost+_sixthOpCost);
       const totalInc  = pension+yourSsMo+brendaSsMo+rentalMo+wkInc-rentalOpCost;
 
@@ -324,9 +452,10 @@ export default function App(){
       const kidsHlth  = (calYear<BASE.sophiaOff||calYear<BASE.nolanOff)?BASE.healthKids:0;
       const health    = hiMo+brendaHlth+kidsHlth;
       const hiDebtNow = ccBal+sophiaBal+nolanBal;
-      const duplxPmt  = (!payOffHI&&hiDebtNow>0)?BASE.duplxIO:BASE.duplxPnI;
-      const primPmt   = keepingFn(calYear)?((!payOffHI&&hiDebtNow>0)?BASE.primIO:BASE.primPnI):0;
-      const mtg       = duplxPmt+BASE.lafPnI+primPmt;
+      const duplxPmt  = duplexKeepingFn(calYear) ? ((!payOffHI&&hiDebtNow>0)?BASE.duplxIO:BASE.duplxPnI) : 0;
+      const primPmt   = keepingFn(calYear)      ? ((!payOffHI&&hiDebtNow>0)?BASE.primIO:BASE.primPnI)   : 0;
+      const lafPmt    = lafKeepingFn(calYear)   ? BASE.lafPnI : 0;
+      const mtg       = duplxPmt+lafPmt+primPmt;
       const core      = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf;
       const famLoan   = mo < BASE.famLoanMonths ? famPmt : 0;
       // HI minimums
@@ -335,23 +464,25 @@ export default function App(){
       const minSoph= sophiaBal>0?sophiaMin_:0;
       const minNol = nolanOn&&nolanBal>0?nolanMin_:0;
       const hiMins = payOffHI?0:minCC+minSoph+minNol;
-      // Property tax + insurance
+      // Property tax + insurance (gated per property)
       const propCost = Math.round(
-        (BASE.dplxTaxMo+BASE.dplxInsMo)*pinf
-        + (keepingFn(calYear)?(BASE.primTaxMo+BASE.primInsMo):(BASE.lafTaxMo+BASE.lafInsMo))*pinf
-        + (lafRentingFn(calYear)?(BASE.lafTaxMo+BASE.lafInsMo)*pinf:0)
+          (duplexKeepingFn(calYear) ? (BASE.dplxTaxMo+BASE.dplxInsMo)*pinf : 0)
+        + (keepingFn(calYear)       ? (BASE.primTaxMo+BASE.primInsMo)*pinf : 0)
+        + (lafKeepingFn(calYear)    ? (BASE.lafTaxMo+BASE.lafInsMo)*pinf  : 0)
       );
-      // Income tax estimate -- annualize this month's income and apply the same estimateTax()
-      // used by the annual engine. Mortgage interest deduction uses current balances.
+      // Income tax estimate -- annualize this month's income; mortgage interest deduction uses current balances
       const _yrsPaid = 5 + mo/12;
-      const _dplxBal = remainBal(BASE.duplexMortgage, BASE.duplexRate, 30, _yrsPaid);
-      const _lafBal  = remainBal(BASE.lafayetteMortgage, BASE.lafayetteRate, 30, _yrsPaid);
-      const _primBal = keepingFn(calYear) ? remainBal(BASE.primaryMortgage, BASE.primaryRate, 30, _yrsPaid) : 0;
+      const _dplxBal = duplexKeepingFn(calYear) ? remainBal(BASE.duplexMortgage, BASE.duplexRate, 30, _yrsPaid) : 0;
+      const _lafBal  = lafKeepingFn(calYear)    ? remainBal(BASE.lafayetteMortgage, BASE.lafayetteRate, 30, _yrsPaid) : 0;
+      const _primBal = keepingFn(calYear)       ? remainBal(BASE.primaryMortgage, BASE.primaryRate, 30, _yrsPaid) : 0;
       const _mtgInt  = _dplxBal*BASE.duplexRate + _lafBal*BASE.lafayetteRate + _primBal*BASE.primaryRate;
       const taxMo = Math.round(estimateTax(liveParams, BASE.pensionMonthly*12, wkInc*12, yourSsMo, brendaSsMo, rentalMo*12, _mtgInt) / 12);
       const tier1  = mtg+health+core+famLoan+hiMins+propCost+taxMo;
 
-      // -- MAINTENANCE RESERVES (cap-aware) --
+      // -- MAINTENANCE RESERVES (cap-aware, time-gated by ownership) --
+      const maint6Mo   = keepingFn(calYear)       ? _maint6Base   : 0;
+      const maint15Mo  = duplexKeepingFn(calYear) ? _maint15Base  : 0;
+      const maintLafMo = lafKeepingFn(calYear)    ? _maintLafBase : 0;
       const res6Add   = (res6  <maint6Cap  )?Math.min(maint6Mo,  maint6Cap  -res6  ):0;
       const res15Add  = (res15 <maint15Cap )?Math.min(maint15Mo, maint15Cap -res15 ):0;
       const resLafAdd = (resLaf<maintLafCap)?Math.min(maintLafMo,maintLafCap-resLaf):0;
@@ -467,10 +598,11 @@ export default function App(){
       });
     }
     return rows;
-  },[liveParams,sellYear,lafStopYear,lafRental,sixthMTR,topUnit,bottomRent,strRent,ltrRent,sixthRent,sixthMonths,
+  },[liveParams,liveRows,dispositions,settlementNeed,settlementYear,
+     lafStopYear,lafRental,sixthIncomeMode,topUnit,bottomRent,strRent,ltrRent,sixthRent,sixthMonths,
      workPts,ssAge,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
      struct6,struct15,structLaf,maintStr,bufferMode,famLoanAmt,famLoanRate,payOffHI,
-     strPlatformPct,strCleanPct,mgrPct]);  // wfMonths only affects table slice, not engine run
+     strPlatformPct,strCleanPct,mgrPct,strSchedule,mtrSchedule]);  // wfMonths only affects table slice, not engine run
 
   // -- Chart data ------------------------------------------
   // -- Chart data ------------------------------------------
@@ -505,7 +637,10 @@ export default function App(){
     const _CGRATE = BASE.fedCapGains + BASE.coCapGains; // 0.282
     const _SCOST  = BASE.sellingCosts;                  // 0.05
     const _liqReApp     = liveParams.reAppreciation;
-    const _liqSellYr    = liveParams.sellYear;
+    const _liqDispo = liveParams.dispositions || {};
+    const _liqSixthYr = _liqDispo.sixth?.mode    ==='keep' ? Infinity : (_liqDispo.sixth?.year    || 2055);
+    const _liqLafYr   = _liqDispo.barberry?.mode ==='keep' ? Infinity : (_liqDispo.barberry?.year || 2055);
+    const _liqDupYr   = _liqDispo.fifteenth?.mode==='keep' ? Infinity : (_liqDispo.fifteenth?.year|| 2055);
     const _liq15thBasis = liveSc.duplex15thBasis ?? 600_000;
     const _liqLafBasis  = liveSc.lafayetteBasis  ?? 300_000;
 
@@ -542,25 +677,34 @@ export default function App(){
         hiDebtK:r.hiDebtK, invested:r.invested, savingsAccK:savAccK};
 
       // Liquidation NW: what you'd net selling everything today at year i
+      // Gate each property on ownership at year (already-sold properties are gone from RE net)
       {
         const app=Math.pow(1+_liqReApp,i);
-        const keepPrim=r.cal<_liqSellYr;
+        const sixthOwned = r.cal<_liqSixthYr;
+        const dupOwned   = r.cal<_liqDupYr;
+        const lafOwned   = r.cal<_liqLafYr;
         let primNet=0;
-        if(keepPrim){
+        if(sixthOwned){
           const pv=BASE.primaryValue*app;
           const pb=remainBal(BASE.primaryMortgage,BASE.primaryRate,30,5+i);
           const sn=pv*(1-_SCOST);
           const taxable=Math.max(0,Math.max(0,sn-BASE.sixthBasis)-BASE.marriedExcl);
           primNet=sn-pb-taxable*_CGRATE;
         }
-        const dv=BASE.duplexValue*app;
-        const db=remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+i);
-        const dsn=dv*(1-_SCOST);
-        const dplxNet=dsn-db-Math.max(0,dsn-_liq15thBasis)*_CGRATE;
-        const lv=BASE.lafayetteValue*app;
-        const lb=remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
-        const lsn=lv*(1-_SCOST);
-        const lafNet=lsn-lb-Math.max(0,lsn-_liqLafBasis)*_CGRATE;
+        let dplxNet=0;
+        if(dupOwned){
+          const dv=BASE.duplexValue*app;
+          const db=remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+i);
+          const dsn=dv*(1-_SCOST);
+          dplxNet=dsn-db-Math.max(0,dsn-_liq15thBasis)*_CGRATE;
+        }
+        let lafNet=0;
+        if(lafOwned){
+          const lv=BASE.lafayetteValue*app;
+          const lb=remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
+          const lsn=lv*(1-_SCOST);
+          lafNet=lsn-lb-Math.max(0,lsn-_liqLafBasis)*_CGRATE;
+        }
         pt.liqNW=(primNet+dplxNet+lafNet+r.invested*1000+savAccRaw-r.hiDebtRaw)/1e6;
       }
 
@@ -582,26 +726,37 @@ export default function App(){
         {
           const pSnap=pin.paramSnapshot||{};
           const pApp=Math.pow(1+(pSnap.reApp??4)/100,i);
-          const pSellYr=pSnap.sellYear??2055;
+          const _pD = pSnap.dispositions || {};
+          const pSixthYr = _pD.sixth?.mode    ==='keep' ? Infinity : (_pD.sixth?.year    || 2055);
+          const pDupYr   = _pD.fifteenth?.mode==='keep' ? Infinity : (_pD.fifteenth?.year|| 2055);
+          const pLafYr   = _pD.barberry?.mode ==='keep' ? Infinity : (_pD.barberry?.year || 2055);
           const p15th=pSnap.duplex15thBasis??_liq15thBasis;
           const pLaf=pSnap.lafayetteBasis??_liqLafBasis;
-          const keepPrim=r.cal<pSellYr;
+          const pSixthOwned = r.cal<pSixthYr;
+          const pDupOwned   = r.cal<pDupYr;
+          const pLafOwned   = r.cal<pLafYr;
           let pPrimNet=0;
-          if(keepPrim){
+          if(pSixthOwned){
             const pv=BASE.primaryValue*pApp;
             const pb=remainBal(BASE.primaryMortgage,BASE.primaryRate,30,5+i);
             const sn=pv*(1-_SCOST);
             const taxable=Math.max(0,Math.max(0,sn-BASE.sixthBasis)-BASE.marriedExcl);
             pPrimNet=sn-pb-taxable*_CGRATE;
           }
-          const dv=BASE.duplexValue*pApp;
-          const db=remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+i);
-          const dsn=dv*(1-_SCOST);
-          const pDplxNet=dsn-db-Math.max(0,dsn-p15th)*_CGRATE;
-          const lv=BASE.lafayetteValue*pApp;
-          const lb=remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
-          const lsn=lv*(1-_SCOST);
-          const pLafNet=lsn-lb-Math.max(0,lsn-pLaf)*_CGRATE;
+          let pDplxNet=0;
+          if(pDupOwned){
+            const dv=BASE.duplexValue*pApp;
+            const db=remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+i);
+            const dsn=dv*(1-_SCOST);
+            pDplxNet=dsn-db-Math.max(0,dsn-p15th)*_CGRATE;
+          }
+          let pLafNet=0;
+          if(pLafOwned){
+            const lv=BASE.lafayetteValue*pApp;
+            const lb=remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
+            const lsn=lv*(1-_SCOST);
+            pLafNet=lsn-lb-Math.max(0,lsn-pLaf)*_CGRATE;
+          }
           const pInvested=(pin.rows[i]?.invested??0)*1000;
           const pHiDebtRaw=(pin.rows[i]?.hiDebtRaw??0);
           pt[`pin_${pin.id}_liqNW`]=(pPrimNet+pDplxNet+pLafNet+pInvested+pinSavAcc-pHiDebtRaw)/1e6;
@@ -681,71 +836,23 @@ export default function App(){
   const restorePin = useCallback((pin)=>{
     const s=pin.paramSnapshot||pin;
     if(!s) return;
-    // Map paramSnapshot (engine format) back to sc (UI format)
-    const next={...SC_DEFAULTS};
-    if(s.keepPrimary!==undefined) next.keepPrimary=s.keepPrimary;
-    if(s.topUnit!==undefined)     next.topUnit=s.topUnit;
-    if(s.lafRental!==undefined)   next.lafRental=s.lafRental;
-    if(s.sixthMTR!==undefined)    next.sixthMTR=s.sixthMTR;
-    if(s.payOffHI!==undefined)    next.payOffHI=s.payOffHI;
-    if(s.ssAge!==undefined)       next.ssAge=s.ssAge;
-    if(s.workPts!==undefined)     next.workPts=s.workPts;
-    if(s.lifestyleSplit!==undefined) next.lifestyleSplit=s.lifestyleSplit;
-    if(s.bottomRent!==undefined)  next.bottomRent=s.bottomRent;
-    if(s.strRent!==undefined)     next.strRent=s.strRent;
-    if(s.ltrRent!==undefined)     next.ltrRent=s.ltrRent;
-    if(s.sixthRent!==undefined)   next.sixthRent=s.sixthRent;
-    if(s.sixthMonths!==undefined) next.sixthMonths=s.sixthMonths;
-    if(s.reAppreciation!==undefined) next.reApp=Math.round(s.reAppreciation*1000)/10;
-    if(s.reApp!==undefined)       next.reApp=s.reApp;
-    if(s.rentGrowth!==undefined)  next.rentGr=Math.round(s.rentGrowth*1000)/10;
-    if(s.rentGr!==undefined)      next.rentGr=s.rentGr;
-    if(s.inflation!==undefined)   next.cpi=Math.round(s.inflation*1000)/10;
-    if(s.cpi!==undefined)         next.cpi=s.cpi;
-    if(s.healthCpi!==undefined)   next.healthCpi=typeof s.healthCpi==="number"&&s.healthCpi<1?Math.round(s.healthCpi*1000)/10:s.healthCpi;
-    if(s.propCpi!==undefined)     next.propCpi=typeof s.propCpi==="number"&&s.propCpi<1?Math.round(s.propCpi*1000)/10:s.propCpi;
-    if(s.taxEnabled!==undefined)  next.taxEnabled=s.taxEnabled;
-    if(s.investReturn!==undefined)next.investRet=Math.round(s.investReturn*1000)/10;
-    if(s.investRet!==undefined)   next.investRet=s.investRet;
-    if(s.famLoanAmt!==undefined)  next.famLoanAmt=s.famLoanAmt;
-    if(s.famLoanRate!==undefined) next.famLoanRate=typeof s.famLoanRate==="number"&&s.famLoanRate<1?Math.round(s.famLoanRate*1000)/10:s.famLoanRate;
-    if(s.lifestyleDraws!==undefined) next.lifestyleDraws=s.lifestyleDraws.map(d=>({...d,enabled:true}));
-    if(s.sixthSalePrice!==undefined) next.sixthSalePrice=s.sixthSalePrice;
-    if(s.sixthCostOfSale!==undefined) next.sixthCostOfSale=s.sixthCostOfSale<1?s.sixthCostOfSale*100:s.sixthCostOfSale;
-    // HI debt
-    for(const k of ['sellYear','lafStopYear','saleDrawFrac','keepPrimary','strSchedule','mtrSchedule'])
-      if(s[k]!==undefined) next[k]=s[k];
-    for(const k of ['ccBal','ccRate','ccMin','sophiaBal','sophiaRate','sophiaMin','nolanBal','nolanRate','nolanMin'])
-      if(s[k]!==undefined) next[k]=s[k];
-    // CF buckets
-    for(const k of ['rdTopUp','rdCap','obTopUp','obCap','discFloor','struct6','struct15','structLaf','maintStr','bufferMode'])
-      if(s[k]!==undefined) next[k]=s[k];
+    // v3.1.0: paramSnapshot is sc format (same as SC_DEFAULTS keys).
+    // Merge with SC_DEFAULTS so missing fields fall back to defaults.
+    const next={...SC_DEFAULTS,...s};
+    if(next.lifestyleDraws) next.lifestyleDraws=next.lifestyleDraws.map(d=>({...d,enabled:d.enabled!==false}));
     if(activeSc==="live") setLiveSc(next);
     else setPinScs(ps=>({...ps,[activeSc]:next}));
   },[activeSc]);
 
   const switchToPin = useCallback((pin)=>{
-    // If pin has no sc yet, seed it from its paramSnapshot
+    // If pin has no sc yet, seed it from its paramSnapshot (v3.1.0 sc-format only)
     setPinScs(ps=>{
       if(ps[pin.id]) return ps;
-      const next={...SC_DEFAULTS};
-      const s=pin.paramSnapshot||{};
-      // Quick copy of all sc-format keys
-      Object.keys(SC_DEFAULTS).forEach(k=>{ if(s[k]!==undefined) next[k]=s[k]; });
-      // Also handle engine-format keys
-      if(s.reAppreciation!==undefined) next.reApp=Math.round(s.reAppreciation*1000)/10;
-      if(s.rentGrowth!==undefined)     next.rentGr=Math.round(s.rentGrowth*1000)/10;
-      if(s.inflation!==undefined)      next.cpi=Math.round(s.inflation*1000)/10;
-      if(s.investReturn!==undefined)   next.investRet=Math.round(s.investReturn*1000)/10;
-      if(s.healthCpi!==undefined&&s.healthCpi<1) next.healthCpi=Math.round(s.healthCpi*1000)/10;
-      if(s.propCpi!==undefined&&s.propCpi<1)     next.propCpi=Math.round(s.propCpi*1000)/10;
-      if(s.famLoanRate!==undefined&&s.famLoanRate<1) next.famLoanRate=Math.round(s.famLoanRate*1000)/10;
-      if(s.sixthCostOfSale!==undefined&&s.sixthCostOfSale<1) next.sixthCostOfSale=s.sixthCostOfSale*100;
+      const next={...SC_DEFAULTS,...(pin.paramSnapshot||{})};
       return {...ps,[pin.id]:next};
     });
     setActiveSc(pin.id);
-    // Store entry snapshot so we can detect changes on exit
-    entryScRef.current = null; // will be set after pinScs state settles via useEffect
+    entryScRef.current = null;
   },[]);
 
   // Unsaved changes check
@@ -780,7 +887,8 @@ export default function App(){
         reAppreciation:updatedSc.reApp/100, rentGrowth:updatedSc.rentGr/100, inflation:updatedSc.cpi/100,
         coreCpi:updatedSc.cpi/100, healthCpi:updatedSc.healthCpi/100, propCpi:updatedSc.propCpi/100,
         propInflation:(updatedSc.cpi/100)+0.007, investReturn:updatedSc.investRet/100,
-        famLoanRate:updatedSc.famLoanRate/100, sixthCostOfSale:updatedSc.sixthCostOfSale/100,
+        famLoanRate:updatedSc.famLoanRate/100,
+        strPlatformPct:(updatedSc.strPlatformPct||3)/100, strCleanPct:(updatedSc.strCleanPct||4)/100, mgrPct:(updatedSc.mgrPct||0)/100,
         lifestyleDraws:updatedSc.lifestyleDraws.filter(d=>d.enabled),
         strSchedule:updatedSc.strSchedule||[],
         mtrSchedule:updatedSc.mtrSchedule||[],
@@ -1262,7 +1370,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v2.10.7</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.1.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1426,6 +1534,157 @@ export default function App(){
               {toggle(lafRental,setLafRental,[{v:true,l:"Rented LTR",c:green},{v:false,l:"Your home / vacant"}])}
             </div>
 
+            {/* v3.1.0 Dispositions & Settlement panel */}
+            {sect("Dispositions & Settlement (v3.1.0)")}
+            <div style={{fontSize:9,color:dim,marginBottom:10,lineHeight:1.5}}>
+              Per-property sale / 1031 exchange decisions. Settlement funding pulls from sale proceeds.
+              Residual after settlement can pay down HI debt (avalanche order) or stay invested.
+              Values sourced from accountant liquidation worksheet.
+            </div>
+
+            {/* Per-property disposition cards */}
+            {['sixth','fifteenth','barberry'].map(key => {
+              const d = dispositions?.[key] || {};
+              const liq = LIQUIDATION_DEFAULTS[key];
+              const engineRes = liveRows.dispoResults?.[key];
+              return (
+                <div key={key} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <span style={{fontSize:11,color:bright,fontWeight:"bold"}}>{liq.label}</span>
+                    {d.mode!=='keep' && (
+                      <span style={{fontSize:9,color:amber,fontFamily:mono}}>
+                        {d.mode} · {d.year}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{marginBottom:8}}>
+                    {toggle(d.mode||'keep', v=>setDispo(key,{mode:v}), [
+                      {v:'keep',l:'Keep',c:dim},
+                      {v:'sell_taxable',l:'Sell',c:red},
+                      {v:'full_1031',l:'Full 1031',c:blue},
+                      {v:'partial_1031',l:'Partial 1031',c:blue},
+                    ])}
+                  </div>
+                  {d.mode!=='keep' && (<>
+                    {slider("Year",d.year||2026,v=>setDispo(key,{year:v}),2026,2046,1,v=>v+"")}
+                    {slider("Sale price",d.salesPrice||0,v=>setDispo(key,{salesPrice:v}),
+                      Math.round(liq.salesPrice*0.5),Math.round(liq.salesPrice*1.5),5000,
+                      v=>"$"+Math.round(v/1000)+"K")}
+                    {slider("Adjusted basis",d.adjustedBasis||0,v=>setDispo(key,{adjustedBasis:v}),
+                      Math.round(liq.adjustedBasis*0.5),Math.round(liq.adjustedBasis*1.5),5000,
+                      v=>"$"+Math.round(v/1000)+"K")}
+                    {key!=='sixth' && slider("CA-source deferred gain",d.caSourceDeferredGain||0,
+                      v=>setDispo(key,{caSourceDeferredGain:v}),0,Math.round((liq.caSourceDeferredGain||1)*1.5),5000,
+                      v=>"$"+Math.round(v/1000)+"K")}
+                    {key!=='sixth' && slider("Depreciation recapture $",d.depreciationRecapture||0,
+                      v=>setDispo(key,{depreciationRecapture:v}),0,Math.max(60000,Math.round((liq.depreciationRecapture||0)*1.5)),1000,
+                      v=>"$"+Math.round(v/1000)+"K")}
+                    {d.mode==='partial_1031' && slider("Cash boot",d.cashBoot||0,
+                      v=>setDispo(key,{cashBoot:v}),0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+                    <div style={{marginTop:6,marginBottom:6}}>
+                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale mode</div>
+                      {toggle(d.saleMode||'market', v=>setDispo(key,{saleMode:v}), [
+                        {v:'market',l:'Market'},{v:'forced',l:'Forced (-15%)',c:red}
+                      ])}
+                    </div>
+                    {engineRes && engineRes.mode && engineRes.mode!=='keep' && (
+                      <div style={{marginTop:8,padding:8,background:bg1,borderRadius:4,fontSize:9}}>
+                        <div style={{color:dim,marginBottom:3}}>Reconciliation vs CPA sheet:</div>
+                        {(()=>{
+                          const eTax = Math.round(engineRes.totalTax||0);
+                          const eNet = Math.round(engineRes.afterTaxNetProceeds||0);
+                          const taxDelta = liq.cpaEstTax > 0 ? (eTax-liq.cpaEstTax)/liq.cpaEstTax : 0;
+                          const netDelta = liq.cpaNetProceedsAfterTax > 0 ? (eNet-liq.cpaNetProceedsAfterTax)/liq.cpaNetProceedsAfterTax : 0;
+                          const warn = Math.abs(taxDelta) > 0.10 || Math.abs(netDelta) > 0.10;
+                          return (<>
+                            <div style={{color:muted}}>Tax: <span style={{color:bright,fontFamily:mono}}>${Math.round(eTax/1000)}K</span> vs CPA ${Math.round(liq.cpaEstTax/1000)}K <span style={{color:Math.abs(taxDelta)>0.1?amber:dim}}>(Δ {(taxDelta*100).toFixed(0)}%)</span></div>
+                            <div style={{color:muted}}>Net: <span style={{color:bright,fontFamily:mono}}>${Math.round(eNet/1000)}K</span> vs CPA ${Math.round(liq.cpaNetProceedsAfterTax/1000)}K <span style={{color:Math.abs(netDelta)>0.1?amber:dim}}>(Δ {(netDelta*100).toFixed(0)}%)</span></div>
+                            {warn && <div style={{color:amber,marginTop:3}}>Δ over 10% — recalibrate rates</div>}
+                          </>);
+                        })()}
+                      </div>
+                    )}
+                  </>)}
+                </div>
+              );
+            })}
+
+            {/* Global settlement panel */}
+            <div style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
+              <div style={{fontSize:11,color:bright,fontWeight:"bold",marginBottom:8}}>Settlement</div>
+              {slider("Settlement need",settlementNeed,setSettlementNeed,262500,787500,5000,
+                v=>"$"+Math.round(v/1000)+"K")}
+              {slider("Settlement year",settlementYear,setSettlementYear,2026,2046,1,v=>v+"")}
+              {slider("Gain offset % (UNCONFIRMED)",gainOffsetPct,setGainOffsetPct,0,100,5,
+                v=>v+"%  ($"+Math.round(settlementNeed*v/100/1000)+"K)")}
+              <div style={{fontSize:9,color:dim,marginBottom:8,fontStyle:"italic",marginTop:-4}}>
+                Kimbell/Arrowsmith position — CPA to validate. Default OFF.
+              </div>
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:9,color:muted,marginBottom:3}}>Same-year 3-sale tax bump</div>
+                {toggle(sameYearSaleTaxBumpOn, setSameYearSaleTaxBumpOn, [
+                  {v:true,l:'On (+$'+Math.round((sameYearSaleTaxBump||0)/1000)+'K)',c:amber},
+                  {v:false,l:'Off',c:dim}
+                ])}
+              </div>
+              {slider("HI paydown % of residual",hiPaydownPct,setHiPaydownPct,0,100,5,
+                v=>v+"%")}
+              {(()=>{
+                const dr = liveRows.dispoResults || {};
+                let totalProceeds = 0;
+                for(const k of ['sixth','fifteenth','barberry']){
+                  const _d = dr[k];
+                  if(_d && _d.mode && _d.mode!=='keep' && _d.year===settlementYear){
+                    totalProceeds += _d.afterTaxNetProceeds || 0;
+                  }
+                }
+                const residual = Math.max(0, totalProceeds - settlementNeed);
+                const totalHI = (liveParams.ccBal||0)+(liveParams.sophiaBal||0)+(liveParams.nolanBal||0);
+                const paydown  = Math.min(residual * hiPaydownPct/100, totalHI);
+                const invested = residual - paydown;
+                return (
+                  <div style={{fontSize:9,color:muted,padding:8,background:bg1,borderRadius:4,marginTop:4}}>
+                    <div>Sale proceeds in {settlementYear}: <span style={{color:bright,fontFamily:mono}}>${Math.round(totalProceeds/1000)}K</span></div>
+                    <div>Minus settlement need: <span style={{color:red,fontFamily:mono}}>-${Math.round(settlementNeed/1000)}K</span></div>
+                    <div>Residual: <span style={{color:bright,fontFamily:mono}}>${Math.round(residual/1000)}K</span></div>
+                    <div style={{marginTop:4,paddingTop:4,borderTop:`1px dashed ${bdr}`}}>
+                      HI paydown: <span style={{color:green,fontFamily:mono}}>${Math.round(paydown/1000)}K</span> then <span style={{color:blue,fontFamily:mono}}>${Math.round(invested/1000)}K</span> to invested
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* 6th St STR / MTR mode selector */}
+            <div style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:12}}>
+              <div style={{fontSize:11,color:bright,fontWeight:"bold",marginBottom:8}}>6th St Income Mode</div>
+              <div style={{marginBottom:8}}>
+                {toggle(sixthIncomeMode,setSixthIncomeMode,[
+                  {v:'none',l:'None'},{v:'mtr',l:'MTR',c:blue},{v:'str',l:'STR',c:amber}
+                ])}
+              </div>
+              {sixthIncomeMode==='str' && (<>
+                {slider("STR gross $/mo",sixthSTRMonthly,setSixthSTRMonthly,4500,13500,250,
+                  v=>"$"+v.toLocaleString()+"/mo")}
+                {slider("Start year",sixthSTRStartYear,setSixthSTRStartYear,2026,2046,1,v=>v+"")}
+                {slider("Stop year",sixthSTRStopYear,setSixthSTRStopYear,2026,2055,1,v=>v+"")}
+                <div style={{marginTop:6}}>
+                  <div style={{fontSize:9,color:muted,marginBottom:3}}>Auto-stop after HI debt clears</div>
+                  {toggle(sixthSTRStopOnDebtClear,setSixthSTRStopOnDebtClear,[
+                    {v:true,l:'Auto-stop',c:green},{v:false,l:'Continue'}
+                  ])}
+                </div>
+                <div style={{fontSize:8,color:dim,marginTop:6,fontStyle:"italic"}}>
+                  Uses the same platform/cleaning/mgr % as duplex-top STR (see Rental Operating Costs).
+                </div>
+              </>)}
+              {sixthIncomeMode==='mtr' && (
+                <div style={{fontSize:8,color:dim,marginTop:6}}>
+                  Configure rate and months in "Income &amp; Cost Knobs" below.
+                </div>
+              )}
+            </div>
+
             {/* Rental operating cost sliders */}
             {sect("Rental Operating Costs")}
             <div style={{fontSize:8,color:dim,marginBottom:8}}>Deducted from gross rental income. Set to 0 if self-managing.</div>
@@ -1433,7 +1692,7 @@ export default function App(){
               {slider("Platform fee (Airbnb/VRBO)",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
               {slider("Cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
             </>)}
-            {(topUnit==="ltr"||topUnit==="mtr"||sc.lafRental||sc.sixthMTR)&&
+            {(topUnit==="ltr"||topUnit==="mtr"||sc.lafRental||sc.sixthIncomeMode==='mtr'||sc.sixthIncomeMode==='str')&&
               slider("Mgmt fee (LTR/MTR/Laf)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross")
             }
             <div style={{fontSize:8,color:dim,marginBottom:10,marginTop:-4}}>
