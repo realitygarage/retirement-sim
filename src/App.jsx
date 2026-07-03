@@ -1,12 +1,12 @@
-// v3.2.0 -- unified HI paydown, residual 3-way split, generalized loan segments, fixed-cost breakdown, timeline event alignment
+// v3.3.0 -- 6th St income segments-only: mode selector removed, overlaps allowed and summed, auto-stop removed
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments, planHiPaydown, splitResidual, loanMonthlyPmt } from "./engine.js";
-import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS, DEFAULT_LOANS_SC, migrateScLoans } from "./defaults.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments, sixthSegmentOverlaps, planHiPaydown, splitResidual, loanMonthlyPmt } from "./engine.js";
+import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS, DEFAULT_LOANS_SC, migrateScLoans, migrateSixthIncomeSegments } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
@@ -14,7 +14,7 @@ if (typeof window !== 'undefined') {
     BASE, buildScenario, keyStats, disposeAsset, taxRecognized,
     DISPO_DEFAULTS, makeParams, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS,
     strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax,
-    sixthSegmentGross, validateSixthSegments,
+    sixthSegmentGross, validateSixthSegments, sixthSegmentOverlaps, migrateSixthIncomeSegments,
     planHiPaydown, splitResidual, loanMonthlyPmt,
   };
 }
@@ -65,8 +65,6 @@ export default function App(){
     settlementNeed=525_000, settlementYear=2026, gainOffsetPct=0,
     sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true, requireSameYearForOffset=true,
     hiPaydownPct=100, caGainCap=1_200_000, settleLifestyleDraw=0,
-    sixthIncomeMode='none', sixthSTRMonthly=9_000, sixthSTRSchedule=[],
-    sixthSTRStartYear=2026, sixthSTRStopYear=2055, sixthSTRStopOnDebtClear=true,
     sixthIncomeSegments=[],
   } = sc;
 
@@ -78,7 +76,7 @@ export default function App(){
   const sellYear        = _dSixth.mode==='keep' ? 2055 : (_dSixth.year || 2055);
   const sixthSalePrice  = _dSixth.salesPrice ?? 1_675_000;
   const sixthCostOfSale = (DISPO_DEFAULTS.sellingCostsPct * 100);  // constant now (6%)
-  const sixthMTR        = sixthIncomeMode === 'mtr';
+  const sixthMTR        = sixthIncomeSegments.some(s=>s.kind!=='str');  // any MTR/LTR segment (legacy display shim)
   const keepPrimary     = _dSixth.mode === 'keep';                 // UI-facing "hold indefinitely" flag
   const saleDrawFrac    = 0;                                        // gone in v3.1.0 (residual → HI paydown)
 
@@ -101,15 +99,8 @@ export default function App(){
   const setSixthCostOfSale= _v=>{};   // no-op; sellingCostsPct is now a DISPO_DEFAULTS constant
   const setTopUnit        = v=>setSc(s=>({...s,topUnit:v}));
   const setLafRental      = v=>setSc(s=>({...s,lafRental:v}));
-  const setSixthMTR       = v=>setSc(s=>({...s,sixthIncomeMode: v ? 'mtr' : 'none'}));
   const setPayOffHI       = v=>setSc(s=>({...s,payOffHI:v}));
   // v3.1.0 setters for new fields
-  const setSixthIncomeMode = v=>setSc(s=>({...s,sixthIncomeMode:v}));
-  const setSixthSTRMonthly = v=>setSc(s=>({...s,sixthSTRMonthly:v}));
-  const setSixthSTRSchedule= v=>setSc(s=>({...s,sixthSTRSchedule:typeof v==="function"?v(s.sixthSTRSchedule||[]):v}));
-  const setSixthSTRStartYear = v=>setSc(s=>({...s,sixthSTRStartYear:v}));
-  const setSixthSTRStopYear  = v=>setSc(s=>({...s,sixthSTRStopYear:v}));
-  const setSixthSTRStopOnDebtClear = v=>setSc(s=>({...s,sixthSTRStopOnDebtClear:v}));
   const setSixthIncomeSegments = v=>setSc(s=>({...s,sixthIncomeSegments:typeof v==="function"?v(s.sixthIncomeSegments||[]):v}));
   const setSettlementNeed  = v=>setSc(s=>({...s,settlementNeed:v}));
   const setSettlementYear  = v=>setSc(s=>({...s,settlementYear:v}));
@@ -477,36 +468,19 @@ export default function App(){
           ? (_schedEntry ? strScheduleIncome(_schedEntry.segments)/12 : liveParams.duplexTopSTR)
           : topUnit==="ltr" ? liveParams.duplexTopLTR : liveParams.duplexTopMTR;
 
-      // 6th St primary income -- v3.1.1: segments override the simple mode.
-      // Auto-stop the year AFTER debt clears (if stopOnDebtClear); with segments
-      // present the auto-stop applies to ALL kinds, not just STR.
-      const _sixthMode = liveParams.sixthIncomeMode || 'none';
+      // 6th St primary income -- v3.3.0 segments-only: sum ALL segments covering
+      // this year (concurrent segments add, e.g. room STR + whole-house MTR).
+      // MTR/LTR-kind gross nets mgr % below; STR-kind nets platform+clean+mgr below.
       const _sixthSegs = liveParams.sixthIncomeSegments || [];
-      const _debtClearedCalYr = (debtClearedMo>=0)
-        ? (new Date(startDate.getFullYear(), startDate.getMonth()+debtClearedMo)).getFullYear()
-        : null;
-      const _sixthDebtOk = !liveParams.sixthSTRStopOnDebtClear || _debtClearedCalYr==null || calYear <= _debtClearedCalYr;
-      const _seg = (_sixthSegs.length>0 && keepingFn(calYear) && _sixthDebtOk)
-        ? _sixthSegs.find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;})
-        : null;
-      const _strActiveMo = (_sixthSegs.length===0 && _sixthMode==='str' && keepingFn(calYear)
-        && calYear >= (liveParams.sixthSTRStartYear || 2026)
-        && calYear <  (liveParams.sixthSTRStopYear  || 2055)
-        && _sixthDebtOk);
-      // MTR/LTR-kind gross (mgr % netted below); STR-kind gross (platform+clean+mgr netted below)
-      const _sixthMtrMo = _sixthSegs.length>0
-        ? ((_seg && _seg.kind!=='str') ? sixthSegmentGross(_seg)/12*rg : 0)
-        : ((_sixthMode==='mtr' && keepingFn(calYear)) ? (()=>{
-            const _me=(mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
-            return _me ? mtrScheduleIncome(_me.segments)/12*rg : sixthRent*(sixthMonths/12)*rg;
-          })() : 0);
-      const _sixthStrGrossMo = _sixthSegs.length>0
-        ? ((_seg && _seg.kind==='str') ? sixthSegmentGross(_seg)/12*rg : 0)
-        : (_strActiveMo ? (()=>{
-            const _se=(liveParams.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return calYear>=f&&calYear<=t;});
-            const annualGross = _se ? strScheduleIncome(_se.segments) : (liveParams.sixthSTRMonthly||0)*12;
-            return annualGross/12 * rg;
-          })() : 0);
+      let _sixthMtrMo = 0, _sixthStrGrossMo = 0;
+      if(keepingFn(calYear)){
+        for(const s of _sixthSegs){
+          const f=s.yrFrom??s.yr; const t=s.yrTo??s.yr;
+          if(calYear<f || calYear>t) continue;
+          const g = sixthSegmentGross(s)/12*rg;
+          if(s.kind==='str') _sixthStrGrossMo += g; else _sixthMtrMo += g;
+        }
+      }
 
       // rentalMo is GROSS across all units; op costs deducted below
       const rentalMo = _bot*rg
@@ -714,7 +688,7 @@ export default function App(){
     }
     return rows;
   },[liveParams,liveRows,dispositions,settlementNeed,settlementYear,
-     lafStopYear,lafRental,sixthIncomeMode,topUnit,bottomRent,strRent,ltrRent,sixthRent,sixthMonths,
+     lafStopYear,lafRental,topUnit,bottomRent,strRent,ltrRent,sixthRent,sixthMonths,
      workPts,ssAge,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
      struct6,struct15,structLaf,maintStr,bufferMode,payOffHI,
      strPlatformPct,strCleanPct,mgrPct,strSchedule,mtrSchedule]);  // wfMonths only affects table slice, not engine run
@@ -960,6 +934,7 @@ export default function App(){
     // Merge with SC_DEFAULTS so missing fields fall back to defaults.
     const next={...SC_DEFAULTS,...s};
     next.loans = migrateScLoans(s);   // legacy famLoan pins auto-convert (famLoanAmt 0 -> no loans)
+    next.sixthIncomeSegments = migrateSixthIncomeSegments(s);   // v3.3.0: legacy 6th mode -> segments
     if(next.lifestyleDraws) next.lifestyleDraws=next.lifestyleDraws.map(d=>({...d,enabled:d.enabled!==false}));
     if(activeSc==="live") setLiveSc(next);
     else setPinScs(ps=>({...ps,[activeSc]:next}));
@@ -971,6 +946,7 @@ export default function App(){
       if(ps[pin.id]) return ps;
       const next={...SC_DEFAULTS,...(pin.paramSnapshot||{})};
       next.loans = migrateScLoans(pin.paramSnapshot||{});
+      next.sixthIncomeSegments = migrateSixthIncomeSegments(pin.paramSnapshot||{});
       return {...ps,[pin.id]:next};
     });
     setActiveSc(pin.id);
@@ -1508,7 +1484,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.2.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.3.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1918,49 +1894,22 @@ export default function App(){
               })()}
             </div>
 
-            {/* 6th St income mode + segmented editor (v3.1.1) */}
+            {/* 6th St income -- v3.3.0 segments-only (mode selector removed) */}
             {(()=>{
               const segErrors = validateSixthSegments(sixthIncomeSegments);
-              const segsActive = sixthIncomeSegments.length>0;
+              const segOverlaps = sixthSegmentOverlaps(sixthIncomeSegments);
               const updSeg = (ei,patch)=>setSixthIncomeSegments(list=>list.map((x,j)=>j===ei?{...x,...patch}:x));
               return (
             <div style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:12}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <div style={{fontSize:11,color:bright,fontWeight:"bold"}}>6th St Income Mode</div>
+                <div style={{fontSize:11,color:bright,fontWeight:"bold"}}>6th St Income (Segments)</div>
                 {soldBadge(_dSixth,'sixth')}
               </div>
               {soldCaption(_dSixth)}
               <div data-testid="sixth-income-controls" data-disabled={soldFirstYear(_dSixth)?"true":"false"}
                 style={soldFirstYear(_dSixth)?disabledStyle:undefined}>
-              {segsActive&&(
-                <div style={{fontSize:8,color:amber,marginBottom:6,fontStyle:"italic"}}>
-                  Income segments below override this mode selector.
-                </div>
-              )}
-              <div style={segsActive?disabledStyle:undefined}>
-              <div style={{marginBottom:8}}>
-                {toggle(sixthIncomeMode,setSixthIncomeMode,[
-                  {v:'none',l:'None'},{v:'mtr',l:'MTR',c:blue},{v:'str',l:'STR',c:amber}
-                ])}
-              </div>
-              {sixthIncomeMode==='str' && (<>
-                {slider("STR gross $/mo",sixthSTRMonthly,setSixthSTRMonthly,4500,13500,250,
-                  v=>"$"+v.toLocaleString()+"/mo")}
-                {slider("Start year",sixthSTRStartYear,setSixthSTRStartYear,2026,2046,1,v=>v+"")}
-                {slider("Stop year",sixthSTRStopYear,setSixthSTRStopYear,2026,2055,1,v=>v+"")}
-                <div style={{fontSize:8,color:dim,marginTop:6,fontStyle:"italic"}}>
-                  Uses the same platform/cleaning/mgr % as duplex-top STR (see Rental Operating Costs).
-                </div>
-              </>)}
-              {sixthIncomeMode==='mtr' && (
-                <div style={{fontSize:8,color:dim,marginTop:6}}>
-                  Configure rate and months in "Income &amp; Cost Knobs" below.
-                </div>
-              )}
-              </div>
-
-              {/* Segmented income editor -- overrides simple mode when non-empty */}
-              <div style={{marginTop:10,borderTop:`1px dashed ${bdr}`,paddingTop:8}}>
+              {/* Segmented income editor -- the sole driving input */}
+              <div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                   <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Income Segments</span>
                   <button data-testid="sixth-seg-add"
@@ -1979,10 +1928,10 @@ export default function App(){
                 </div>
                 <div style={{fontSize:8,color:dim,marginBottom:8}}>
                   Year-range segments, each STR (days &times; rate, &le;365d/yr), MTR (months &times; rate, &le;12mo/yr) or LTR (flat rent).
-                  Non-empty list overrides the simple mode above. Debt-clear auto-stop applies to all kinds.
+                  Overlapping segments are allowed and their incomes SUM (e.g. room STR + whole-house MTR). Empty list = no 6th St income.
                 </div>
                 {sixthIncomeSegments.length===0&&(
-                  <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>No segments -- using simple mode above</div>
+                  <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>No segments -- no 6th St income</div>
                 )}
                 {sixthIncomeSegments.map((seg,ei)=>{
                   const kColor = seg.kind==='str'?amber:seg.kind==='mtr'?blue:green;
@@ -2138,6 +2087,15 @@ export default function App(){
                     </div>
                   );
                 })}
+                {/* v3.3.0: overlaps are valid -- neutral informational line, never blocking */}
+                {segOverlaps.length>0&&(
+                  <div data-testid="sixth-seg-overlap-info" style={{fontSize:9,color:blue,background:blue+"11",
+                    border:`1px solid ${blue}33`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
+                    {segOverlaps.map((o,i)=>(
+                      <div key={i}>ⓘ {o.yrFrom===o.yrTo?o.yrFrom:`${o.yrFrom}–${o.yrTo}`}: concurrent segments — combined gross ${Math.round(o.combinedGross/1000)}K/yr (${Math.round(o.combinedGross/12).toLocaleString()}/mo)</div>
+                    ))}
+                  </div>
+                )}
                 {segErrors.length>0&&(
                   <div data-testid="sixth-seg-errors" style={{fontSize:9,color:red,background:red+"11",
                     border:`1px solid ${red}44`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
@@ -2145,16 +2103,6 @@ export default function App(){
                   </div>
                 )}
               </div>
-
-              {/* Debt-clear auto-stop applies to simple STR mode AND all segment kinds */}
-              {(segsActive||sixthIncomeMode==='str')&&(
-                <div style={{marginTop:8}}>
-                  <div style={{fontSize:9,color:muted,marginBottom:3}}>Auto-stop after HI debt clears</div>
-                  {toggle(sixthSTRStopOnDebtClear,setSixthSTRStopOnDebtClear,[
-                    {v:true,l:'Auto-stop',c:green},{v:false,l:'Continue'}
-                  ])}
-                </div>
-              )}
               </div>
             </div>
               );
@@ -2167,7 +2115,7 @@ export default function App(){
               {slider("Platform fee (Airbnb/VRBO)",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
               {slider("Cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
             </>)}
-            {(topUnit==="ltr"||topUnit==="mtr"||sc.lafRental||sc.sixthIncomeMode==='mtr'||sc.sixthIncomeMode==='str'||(sc.sixthIncomeSegments||[]).length>0)&&
+            {(topUnit==="ltr"||topUnit==="mtr"||sc.lafRental||(sc.sixthIncomeSegments||[]).length>0)&&
               slider("Mgmt fee (LTR/MTR/Laf)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross")
             }
             <div style={{fontSize:8,color:dim,marginBottom:10,marginTop:-4}}>
@@ -2175,27 +2123,8 @@ export default function App(){
                 :`~$${Math.round((ltrRent||3100)*mgrPct/100)}/mo mgmt on 15th ${topUnit.toUpperCase()}`}
             </div>
 
-            {/* 6th St rental mode -- only relevant while keeping (before sell year) */}
-            {sellYear>2046&&(
-              <div style={{marginBottom:10}}>
-                <div style={{fontSize:10,color:muted,marginBottom:5}}>6th St (while keeping)</div>
-                {toggle(sixthMTR,setSixthMTR,[
-                  {v:false,l:"Live in / no rent",c:dim},
-                  {v:true, l:"Rent as MTR",c:blue}
-                ])}
-                {sixthMTR&&<div style={{fontSize:8,color:dim,marginTop:3}}>Configure rates in Income &amp; Cost Knobs below</div>}
-              </div>
-            )}
-            {sellYear<=2046&&(
-              <div style={{marginBottom:10}}>
-                <div style={{fontSize:10,color:muted,marginBottom:5}}>6th St (before sell in {sellYear})</div>
-                {toggle(sixthMTR,setSixthMTR,[
-                  {v:false,l:"Live in / no rent",c:dim},
-                  {v:true, l:"Rent as MTR",c:blue}
-                ])}
-                {sixthMTR&&<div style={{fontSize:8,color:dim,marginTop:3}}>Configure rates in Income &amp; Cost Knobs below</div>}
-              </div>
-            )}
+            {/* v3.3.0: 6th St rental mode toggles removed -- the Income Segments
+                editor in "Dispositions & Settlement" is the sole 6th St control */}
 
             <div style={{marginBottom:10}}>
               <div style={{fontSize:10,color:muted,marginBottom:5}}>Your SS Start Age</div>
@@ -2463,121 +2392,6 @@ export default function App(){
                       ))}
                       <div style={{fontSize:8,color:green,textAlign:"right",marginTop:2}}>
                         Total: {totalDays}d booked -> ${annualGross.toLocaleString()}/yr gross (${Math.round(annualGross/12).toLocaleString()}/mo avg)
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {sixthMTR&&slider("6th St MTR -- fallback rate",sixthRent,setSixthRent,3000,9000,250,v=>`$${v.toLocaleString()}/mo -- used for years with no schedule`)}
-            {sixthMTR&&slider("6th St MTR -- fallback months/yr",sixthMonths,setSixthMonths,1,12,1,v=>`${v} mo/yr  ($${Math.round(sixthRent*v/12).toLocaleString()}/mo avg)`)}
-
-            {/* -- MTR Schedule (6th St) -- */}
-            {sixthMTR&&(
-              <div style={{marginTop:12,marginBottom:4}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                  <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>6th St MTR Schedule</span>
-                  <button
-                    onClick={()=>{
-                      const prev = mtrSchedule[mtrSchedule.length-1];
-                      const defaultSegs = prev ? prev.segments.map(s=>({...s})) : [{months:8,rate:6500},{months:2,rate:4500}];
-                      const newYrFrom = prev ? Math.min(2046,(prev.yrTo||prev.yr||2026)+1) : 2026;
-                      const newYrTo   = Math.min(2046, newYrFrom+1);
-                      setMtrSchedule(s=>[...s,{yrFrom:newYrFrom,yrTo:newYrTo,segments:defaultSegs}]);
-                    }}
-                    style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
-                      background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
-                    + add year
-                  </button>
-                </div>
-                <div style={{fontSize:8,color:dim,marginBottom:8}}>
-                  Per-year rental mix for 6th St. Each segment = months at a given rate (peak, off-peak, festival premium). Unscheduled months = vacancy. Years without an entry use the fallback rate above.
-                </div>
-                {mtrSchedule.length===0&&(
-                  <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>Using flat rate for all years</div>
-                )}
-                {mtrSchedule.map((entry,ei)=>{
-                  const annualGross = mtrScheduleIncome(entry.segments);
-                  const totalMonths = entry.segments.reduce((s,g)=>s+(g.months||0),0);
-                  const vacancyMo   = Math.max(0, 12-totalMonths);
-                  const yrFrom = entry.yrFrom ?? entry.yr ?? 2026;
-                  const yrTo   = entry.yrTo   ?? entry.yr ?? 2026;
-                  const yearLabel = yrFrom===yrTo ? String(yrFrom) : `${yrFrom}–${yrTo}`;
-                  const afterSell  = sellYear<=2046 && yrFrom>=sellYear;
-                  return (
-                    <div key={ei} style={{background:bg2,border:`1px solid ${afterSell?dim:blue}55`,borderRadius:7,padding:"8px 10px",marginBottom:8}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                        <span style={{fontSize:9,color:afterSell?dim:blue,fontWeight:"bold"}}>
-                          {yearLabel}
-                          {afterSell?" (after sell year — no effect)":""}
-                          {" — "}{totalMonths}mo rented{vacancyMo>0?`, ${vacancyMo}mo vacant`:""} — ${Math.round(annualGross/12).toLocaleString()}/mo avg
-                        </span>
-                        <div style={{display:"flex",gap:4}}>
-                          <button
-                            onClick={()=>setMtrSchedule(s=>s.map((x,j)=>j===ei?{...x,segments:[...x.segments,{months:1,rate:5000}]}:x))}
-                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>+ seg</button>
-                          <button
-                            onClick={()=>setMtrSchedule(s=>s.filter((_,j)=>j!==ei))}
-                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
-                        </div>
-                      </div>
-                      {/* Year range selector */}
-                      <div style={{display:"flex",gap:8,marginBottom:8}}>
-                        <div style={{flex:1}}>
-                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                            <span style={{fontSize:9,color:muted}}>From</span>
-                            <span style={{fontSize:9,color:blue,fontFamily:mono}}>{yrFrom}</span>
-                          </div>
-                          <input type="range" min={2026} max={2046} step={1} value={yrFrom}
-                            onChange={e=>{const v=parseInt(e.target.value);setMtrSchedule(s=>s.map((x,j)=>j===ei?{...x,yrFrom:v,yrTo:Math.max(v,yrTo)}:x));}}
-                            style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
-                        </div>
-                        <div style={{flex:1}}>
-                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                            <span style={{fontSize:9,color:muted}}>To</span>
-                            <span style={{fontSize:9,color:blue,fontFamily:mono}}>{yrTo}</span>
-                          </div>
-                          <input type="range" min={2026} max={2046} step={1} value={yrTo}
-                            onChange={e=>{const v=parseInt(e.target.value);setMtrSchedule(s=>s.map((x,j)=>j===ei?{...x,yrTo:v,yrFrom:Math.min(yrFrom,v)}:x));}}
-                            style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
-                        </div>
-                      </div>
-                      {/* Segments */}
-                      {entry.segments.map((seg,si)=>(
-                        <div key={si} style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:5,padding:"6px 8px",marginBottom:6}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                            <span style={{fontSize:8,color:dim}}>Segment {si+1}</span>
-                            {entry.segments.length>1&&(
-                              <button onClick={()=>setMtrSchedule(s=>s.map((x,j)=>j!==ei?x:{...x,segments:x.segments.filter((_,k)=>k!==si)}))}
-                                style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                                  background:"transparent",border:`1px solid ${bdr}`,color:dim}}>x</button>
-                            )}
-                          </div>
-                          <div style={{marginBottom:5}}>
-                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                              <span style={{fontSize:9,color:muted}}>Months rented</span>
-                              <span style={{fontSize:9,color:amber,fontFamily:mono}}>{seg.months}mo</span>
-                            </div>
-                            <input type="range" min={1} max={12} step={1} value={seg.months}
-                              onChange={e=>setMtrSchedule(s=>s.map((x,j)=>j!==ei?x:{...x,segments:x.segments.map((g,k)=>k===si?{...g,months:parseInt(e.target.value)}:g)}))}
-                              style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-                          </div>
-                          <div>
-                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                              <span style={{fontSize:9,color:muted}}>Rate/mo</span>
-                              <span style={{fontSize:9,color:amber,fontFamily:mono}}>${seg.rate.toLocaleString()} -> ${(seg.months*seg.rate).toLocaleString()}/yr this seg</span>
-                            </div>
-                            <input type="range" min={2000} max={12000} step={250} value={seg.rate}
-                              onChange={e=>setMtrSchedule(s=>s.map((x,j)=>j!==ei?x:{...x,segments:x.segments.map((g,k)=>k===si?{...g,rate:parseInt(e.target.value)}:g)}))}
-                              style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-                          </div>
-                        </div>
-                      ))}
-                      <div style={{fontSize:8,color:blue,textAlign:"right",marginTop:2}}>
-                        Total: {totalMonths}mo booked -> ${annualGross.toLocaleString()}/yr (${Math.round(annualGross/12).toLocaleString()}/mo avg)
-                        {vacancyMo>0&&<span style={{color:dim}}> + {vacancyMo}mo vacant</span>}
                       </div>
                     </div>
                   );

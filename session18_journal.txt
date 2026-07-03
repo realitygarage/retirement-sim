@@ -1,0 +1,120 @@
+=== SESSION 18 JOURNAL — v3.3.0 ===
+Date: 2026-07-03
+Session goal: 6th St income segments-only model (mode selector removed,
+overlaps allowed and summed, auto-stop removed).
+
+--- WHAT SHIPPED ---
+
+v3.3.0 -- 6th St income segments-only: mode selector removed, overlaps
+allowed and summed, auto-stop removed.
+
+--- 1. MODE SELECTOR REMOVED ---
+
+Deleted: the None/MTR/STR toggle, the flat "STR gross $/mo" +
+start/stop-year sliders, and the params sixthIncomeMode / sixthSTRMonthly /
+sixthSTRSchedule / sixthSTRStartYear / sixthSTRStopYear from
+DEFAULTS/SC_DEFAULTS and the UI. sixthIncomeSegments is the SOLE driving
+input; empty list = no 6th St income. Also removed as dead UI driven by the
+old mode: the "6th St (while keeping / before sell)" Live-in/MTR toggles,
+the "6th St MTR fallback rate/months" sliders, and the whole "6th St MTR
+Schedule" editor (mtrSchedule no longer feeds the engine anywhere; the
+field itself remains in saved scenarios, ignored). The card is renamed
+"6th St Income (Segments)".
+
+Back-compat -- migrateSixthIncomeSegments(snap) in defaults.js, applied in
+makeParams (engine-level) and on pin load (restorePin / switchToPin;
+buildRowsFromSnapshot gets it via makeParams):
+  - explicit non-empty sixthIncomeSegments always wins;
+  - mode 'mtr' (or the older sixthMTR:true shim) -> one flat MTR segment
+    2026-2046 from the pin's rate x months (sixthMTRRent/sixthRent,
+    sixthMTRMonths/sixthMonths);
+  - mode 'str' -> one STR segment over [startYear, stopYear-1] with inner
+    [{days:360, rate:monthly, type:'monthly'}] -- (360/30) x rate == 12 x
+    monthly, so income is IDENTICAL to the old flat path (Q2: $8,370/mo net
+    at 7% costs; MTR $5,000/mo -- exact).
+  - An empty segments array does NOT suppress conversion (v3.1.1+ pins all
+    carry an empty array next to their mode).
+  - NOT converted: mtrSchedule / sixthSTRSchedule detail entries -- the
+    conversion uses the flat values only, per spec. A legacy pin that relied
+    on those schedule entries will get flat income instead (edge case;
+    rebuild as segments by hand).
+
+--- 2. OVERLAPPING SEGMENTS SUM ---
+
+Engine (both annual buildScenario and monthly wfData): each year sums
+income across ALL segments covering that year -- room STR + whole-house MTR
+concurrently is valid. Cost treatment per kind unchanged (STR nets
+platform+cleaning+mgr; MTR/LTR gross in annual, mgr netted in wfData).
+validateSixthSegments no longer emits overlap errors -- only the
+per-segment inner caps (Σ days <= 365, Σ months <= 12, clamped in
+sixthSegmentGross as before). New engine helper sixthSegmentOverlaps(segs)
+returns contiguous ranges covered by 2+ segments with the combined nominal
+gross $/yr; the UI shows it as a neutral blue info line
+(data-testid="sixth-seg-overlap-info"), never blocking.
+
+--- 3. AUTO-STOP REMOVED ---
+
+sixthSTRStopOnDebtClear param, the Auto-stop/Continue toggle, and the
+debt-clear gating in both engines are gone. Segment year ranges are the
+sole start/stop control. The field is ignored silently on old pin load
+(Q2 asserts a run with the field === without). Test M8 (which asserted the
+auto-stop behavior) deleted with the feature.
+
+--- FILES CHANGED ---
+
+src/defaults.js   SIXTH_STR_DEFAULTS -> {sixthIncomeSegments:[]};
+                  migrateSixthIncomeSegments export; makeParams hook.
+src/engine.js     buildScenario 6th block: segments-only summing loop;
+                  validateSixthSegments: overlap errors removed;
+                  sixthSegmentOverlaps helper added.
+src/App.jsx       v3.3.0 header/badge; destructure/setters pruned;
+                  sixthMTR shim redefined (any non-STR segment; still gates
+                  the legacy "6th St Sale Details" panel); wfData summing
+                  loop; card rebuilt (selector gone, overlap info line);
+                  dead UI removed; mgmt-fee slider condition segments-only;
+                  pin-load conversion; __engine += sixthSegmentOverlaps,
+                  migrateSixthIncomeSegments.
+retirement-simulator.spec.js
+                  E5/L1/M11 -> v3.3.0. M8 deleted (feature removed).
+                  M7 kept -- now exercises the STR conversion window.
+                  N3 retitled (explicit segments beat conversion).
+                  N4 rewritten (conversion fires despite empty list; empty
+                  segments = zero income; LTR segment adds exactly rent).
+                  N5 rewritten (overlaps allowed; caps still error; overlap
+                  helper reports 2029-2030 range with $120K combined).
+                  N7 rewritten (costs netted; income CONTINUES past debt
+                  clear; stops after yrTo).
+                  New Group Q: Q1 two overlapping segments sum, annual net
+                  ($5,208/mo) and monthly gross ($5,600/mo) paths agree,
+                  info line appears and errors don't; Q2 legacy conversions
+                  exact (mtr/str/sixthMTR shim/auto-stop field ignored).
+
+--- FINAL TEST RESULTS ---
+
+  100 passed (full run, 8.6m). No regressions in Groups A-P.
+
+--- SEMANTIC NOTES ---
+
+- The Q1 numbers document the intended asymmetry: annual rows carry
+  NET STR income ($33.6K x 93% /12 = $2,604/mo per default segment);
+  wfData rows carry GROSS in `rental` ($2,800/mo) with costs netted in
+  rentalOpCost. Same net effect, different display columns.
+- The "6th St Sale Details" legacy panel now hides when any MTR/LTR
+  segment exists (was: when mode==='mtr').
+- sixthRent/sixthMonths SC fields remain (conversion inputs + transforms);
+  they no longer drive the engine directly.
+
+--- OPEN BACKLOG (carried) ---
+
+[P1] Unify annual sweep model with wfData (buckets/floors) -- chart vs
+     table debt trajectories still drift in non-paydown scenarios.
+[P1] Phase 2 liquidation-NW disposeAsset; CPA rate calibration.
+[P2] Pin Comparison Table NW mode toggle; Glossary (segments model, loans,
+     residual split).
+[P3] E3 scroll-into-view.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Read this journal (+17/16) and v3_phase1_consolidated_spec.md.
+2. Standard cycle per change pass: bump version (App.jsx header + badge +
+   spec version tests), run_tests.ps1, commit, journal.

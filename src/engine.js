@@ -169,18 +169,14 @@ export function sixthSegmentGross(seg){
 }
 
 // Returns [] when valid; list of human-readable errors otherwise.
+// v3.3.0: overlapping outer year ranges are ALLOWED (concurrent segments sum,
+// e.g. a room STR alongside a whole-house MTR) -- only per-segment inner caps
+// are validated here. Overlaps get an informational note in the UI instead.
 export function validateSixthSegments(segs){
   const errors=[];
   const list=segs||[];
   for(let i=0;i<list.length;i++){
     const a=list[i];
-    const aF=a.yrFrom??a.yr??2026, aT=a.yrTo??a.yr??2026;
-    for(let j=i+1;j<list.length;j++){
-      const b=list[j];
-      const bF=b.yrFrom??b.yr??2026, bT=b.yrTo??b.yr??2026;
-      if(aF<=bT && bF<=aT)
-        errors.push(`Segments ${i+1} and ${j+1} overlap (${aF}–${aT} vs ${bF}–${bT})`);
-    }
     if(a.kind==='str'){
       const d=(a.str||[]).reduce((s,g)=>s+(g.days||0),0);
       if(d>365) errors.push(`Segment ${i+1}: ${d} STR days exceeds 365/yr cap`);
@@ -191,6 +187,22 @@ export function validateSixthSegments(segs){
     }
   }
   return errors;
+}
+
+// v3.3.0: contiguous year ranges covered by 2+ segments, with the combined
+// nominal gross $/yr (no rent growth) at each range start -- informational only.
+export function sixthSegmentOverlaps(segs){
+  const list=segs||[];
+  const cover = yr=>list.filter(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return yr>=f&&yr<=t;});
+  const out=[];
+  let run=null;
+  for(let yr=2026;yr<=2047;yr++){
+    const c = yr<=2046 ? cover(yr) : [];
+    if(c.length>=2 && !run){ run={yrFrom:yr, yrTo:yr, combinedGross:c.reduce((s,x)=>s+sixthSegmentGross(x),0)}; }
+    else if(c.length>=2 && run){ run.yrTo=yr; }
+    else if(run){ out.push(run); run=null; }
+  }
+  return out;
 }
 
 // =============================================================================
@@ -602,33 +614,21 @@ export function buildScenario(p) {
     }
     if(lafRenting) rental += BASE.lafayetteRent*12*rg;
 
-    // 6th St primary income -- v3.1.1: segmented editor overrides the simple mode
-    // selector when non-empty. Debt-clear auto-stop (spec §4.3) applies to STR in
-    // simple mode and to ALL segment kinds in segment mode.
-    const sixthMode = p.sixthIncomeMode || 'none';
+    // 6th St primary income -- v3.3.0 segments-only model: sixthIncomeSegments is
+    // the sole input (empty = no income), concurrent segments SUM, each netted by
+    // its kind's cost knobs (STR: platform+cleaning+mgr; MTR/LTR: gross here, mgr
+    // netted in the monthly cash-flow engine). Segment year ranges are the sole
+    // start/stop control (debt-clear auto-stop removed).
     const sixthSegs = p.sixthIncomeSegments || [];
-    const sixthDebtOk = !p.sixthSTRStopOnDebtClear || debtClearedYr==null || cal <= debtClearedYr;
     const strCostPct = (p.strPlatformPct||0) + (p.strCleanPct||0) + (p.mgrPct||0);
-    let sixthIncome = 0;   // annual $, net of STR op costs (MTR/LTR costs handled as before)
-    if(sixthSegs.length > 0){
-      if(keepPrimary && sixthDebtOk){
-        const seg = sixthSegs.find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
-        if(seg){
-          const gross = sixthSegmentGross(seg)*rg;
-          sixthIncome = seg.kind==='str' ? gross*(1-strCostPct) : gross;
-        }
+    let sixthIncome = 0;   // annual $, summed across ALL segments covering this year
+    if(keepPrimary){
+      for(const seg of sixthSegs){
+        const f=seg.yrFrom??seg.yr; const t=seg.yrTo??seg.yr;
+        if(cal<f || cal>t) continue;
+        const gross = sixthSegmentGross(seg)*rg;
+        sixthIncome += seg.kind==='str' ? gross*(1-strCostPct) : gross;
       }
-    } else if(sixthMode==='mtr' && keepPrimary){
-      const mtrEntry=(p.mtrSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
-      const mtrAnnual=mtrEntry ? mtrScheduleIncome(mtrEntry.segments) : p.sixthMTRRent*p.sixthMTRMonths;
-      sixthIncome = mtrAnnual*rg;
-    } else if(sixthMode==='str' && keepPrimary
-      && cal >= (p.sixthSTRStartYear || 2026)
-      && cal <  (p.sixthSTRStopYear  || 2055)
-      && sixthDebtOk){
-      const strEntry=(p.sixthSTRSchedule||[]).find(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return cal>=f&&cal<=t;});
-      const strAnnualGross = strEntry ? strScheduleIncome(strEntry.segments) : (p.sixthSTRMonthly||0)*12;
-      sixthIncome = strAnnualGross * (1 - strCostPct) * rg;
     }
     rental += sixthIncome;
 

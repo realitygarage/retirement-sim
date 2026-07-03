@@ -522,10 +522,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v3.2.0"', async ({ page }) => {
+  test('E5 — Version header shows "v3.3.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.2.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v3.2.0');
+    await expect(page.locator('text=v3.3.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v3.3.0');
   });
 
 });
@@ -975,10 +975,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v3.2.0', async ({ page }) => {
+  test('L1 — Version header shows v3.3.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.2.0').first()).toBeVisible();
-    console.log('  L1 — Version v3.2.0 confirmed');
+    await expect(page.locator('text=v3.3.0').first()).toBeVisible();
+    console.log('  L1 — Version v3.3.0 confirmed');
   });
 
   test('L2 — payOffHI toggle hidden when sellYear is 2055 (never sell)', async ({ page }) => {
@@ -1210,26 +1210,9 @@ test.describe('Group M — v3.1.1 Dispositions', () => {
     expect(result.r31_str).toBeCloseTo(result.r31_none, -1);
   });
 
-  test('M8 — STR stopOnDebtClear stops STR the year after debt clears', async ({ page }) => {
-    await loadApp(page);
-    const result = await page.evaluate(() => {
-      const {buildScenario, makeParams} = window.__engine;
-      const p = makeParams({
-        sixthIncomeMode:'str', sixthSTRMonthly:9000,
-        sixthSTRStartYear:2026, sixthSTRStopYear:2050,
-        sixthSTRStopOnDebtClear:true,
-        strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0,
-      });
-      const rows = buildScenario(p);
-      const debtClearYr = rows.find(r=>r.hiDebt===0)?.cal;
-      const rentalAtClear    = rows.find(r=>r.cal===debtClearYr)?.rental;
-      const rentalAfterClear = rows.find(r=>r.cal===debtClearYr+1)?.rental;
-      return {debtClearYr, rentalAtClear, rentalAfterClear};
-    });
-    console.log('  Debt clear: '+result.debtClearYr+', rental at clear: $'+result.rentalAtClear+', after: $'+result.rentalAfterClear);
-    expect(result.debtClearYr).toBeTruthy();
-    expect(result.rentalAfterClear).toBeLessThan(result.rentalAtClear);
-  });
+  // M8 removed in v3.3.0: sixthSTRStopOnDebtClear (debt-clear auto-stop) no longer
+  // exists -- segment year ranges are the sole start/stop control. The field is
+  // silently ignored on legacy pins (covered by Q2/Q3).
 
   test('M9 — Gain offset 0% == no-offset; nonzero reduces tax', async ({ page }) => {
     await loadApp(page);
@@ -1274,9 +1257,9 @@ test.describe('Group M — v3.1.1 Dispositions', () => {
     expect(result.ccBal).toBe(0);
   });
 
-  test('M11 — Version badge shows v3.2.0', async ({ page }) => {
+  test('M11 — Version badge shows v3.3.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.2.0').first()).toBeVisible();
+    await expect(page.locator('text=v3.3.0').first()).toBeVisible();
   });
 
   test('M12 — window.__engine exposed with disposeAsset/taxRecognized', async ({ page }) => {
@@ -1334,7 +1317,7 @@ test.describe('Group N — v3.1.1 Sold-state UI + 6th St segments', () => {
     console.log('  N2 — Later sale keeps controls active with caption');
   });
 
-  test('N3 — segments override the flat/simple mode selector', async ({ page }) => {
+  test('N3 — explicit segments win over legacy-mode conversion; nothing outside ranges', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
       const {buildScenario, makeParams} = window.__engine;
@@ -1361,45 +1344,66 @@ test.describe('Group N — v3.1.1 Sold-state UI + 6th St segments', () => {
     expect(result.seg28).toBe(result.none28);
   });
 
-  test('N4 — empty segments list falls back to flat mode IDENTICALLY', async ({ page }) => {
+  test('N4 — v3.3.0: legacy modes convert regardless of empty list; empty segments = ZERO 6th income', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
       const {buildScenario, makeParams} = window.__engine;
+      const key = rows => JSON.stringify(rows.map(r=>r.rental));
       const mk = extra => buildScenario(makeParams(Object.assign({
-        sixthIncomeMode:'str', sixthSTRMonthly:9000, sixthSTRStopOnDebtClear:false,
+        sixthIncomeMode:'str', sixthSTRMonthly:9000,
         strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0,
-      }, extra))).map(r=>({rental:r.rental, nw:r.nw, surplus:r.surplus}));
+      }, extra)));
+      // Legacy pins carry an empty segments list -- conversion must fire either way
       const a = mk({});
       const b = mk({sixthIncomeSegments: []});
-      const mtrA = buildScenario(makeParams({sixthIncomeMode:'mtr'})).map(r=>r.rental);
-      const mtrB = buildScenario(makeParams({sixthIncomeMode:'mtr', sixthIncomeSegments:[]})).map(r=>r.rental);
+      const mtrA = buildScenario(makeParams({sixthIncomeMode:'mtr'}));
+      const mtrB = buildScenario(makeParams({sixthIncomeMode:'mtr', sixthIncomeSegments:[]}));
+      // No mode + no segments -> the 6th St contributes nothing
+      const bare      = buildScenario(makeParams({}));
+      const bareEmpty = buildScenario(makeParams({sixthIncomeSegments:[]}));
+      const withSeg   = buildScenario(makeParams({sixthIncomeSegments:[
+        {yrFrom:2026, yrTo:2046, kind:'ltr', ltr:{monthlyRent:4000}}]}));
       return {
-        strIdentical: JSON.stringify(a)===JSON.stringify(b),
-        mtrIdentical: JSON.stringify(mtrA)===JSON.stringify(mtrB),
+        strIdentical: key(a)===key(b),
+        mtrIdentical: key(mtrA)===key(mtrB),
+        bareIdentical: key(bare)===key(bareEmpty),
+        bare26: bare[0].rental, withSeg26: withSeg[0].rental,
       };
     });
     expect(result.strIdentical).toBe(true);
     expect(result.mtrIdentical).toBe(true);
-    console.log('  N4 — empty segments identical to flat mode (STR + MTR back-compat)');
+    expect(result.bareIdentical).toBe(true);
+    expect(result.withSeg26 - result.bare26).toBe(4000);   // LTR segment adds exactly its rent
+    console.log('  N4 — conversions fire with empty list; empty segments = zero 6th income');
   });
 
-  test('N5 — overlapping outer segment year ranges rejected by validator', async ({ page }) => {
+  test('N5 — v3.3.0: overlapping segments ALLOWED (no validator error); info helper reports ranges', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const {validateSixthSegments} = window.__engine;
-      const overlapping = validateSixthSegments([
+      const {validateSixthSegments, sixthSegmentOverlaps} = window.__engine;
+      const overlapping = [
         {yrFrom:2026, yrTo:2030, kind:'ltr', ltr:{monthlyRent:5000}},
         {yrFrom:2029, yrTo:2032, kind:'mtr', mtr:[{months:10, rate:6000}]},
-      ]);
-      const clean = validateSixthSegments([
+      ];
+      const disjoint = [
         {yrFrom:2026, yrTo:2028, kind:'ltr', ltr:{monthlyRent:5000}},
         {yrFrom:2029, yrTo:2032, kind:'mtr', mtr:[{months:10, rate:6000}]},
-      ]);
-      return {overlapErrs: overlapping.length, cleanErrs: clean.length, msg: overlapping[0]||''};
+      ];
+      return {
+        overlapErrs: validateSixthSegments(overlapping).length,   // overlaps no longer error
+        capErrs: validateSixthSegments([{yrFrom:2026,yrTo:2026,kind:'str',str:[{days:400,rate:100}]}]).length,
+        overlapInfo: sixthSegmentOverlaps(overlapping),
+        disjointInfo: sixthSegmentOverlaps(disjoint).length,
+      };
     });
-    console.log('  N5 — validator: '+result.msg);
-    expect(result.overlapErrs).toBeGreaterThan(0);
-    expect(result.cleanErrs).toBe(0);
+    console.log('  N5 — overlap info: '+JSON.stringify(result.overlapInfo));
+    expect(result.overlapErrs).toBe(0);                       // overlaps are valid now
+    expect(result.capErrs).toBeGreaterThan(0);                // inner caps still enforced
+    expect(result.overlapInfo.length).toBe(1);                // one overlapping range reported
+    expect(result.overlapInfo[0].yrFrom).toBe(2029);
+    expect(result.overlapInfo[0].yrTo).toBe(2030);
+    expect(result.overlapInfo[0].combinedGross).toBe(5000*12 + 10*6000);
+    expect(result.disjointInfo).toBe(0);                      // info only when ranges intersect
   });
 
   test('N6 — inner caps enforced: STR days clamp to 365, MTR months to 12', async ({ page }) => {
@@ -1420,37 +1424,36 @@ test.describe('Group N — v3.1.1 Sold-state UI + 6th St segments', () => {
     console.log('  N6 — caps: STR $'+result.strClamped+'/yr, MTR $'+result.mtrClamped+'/yr');
   });
 
-  test('N7 — segment income nets costs and respects debt-clear auto-stop (all kinds)', async ({ page }) => {
+  test('N7 — segment income nets costs; segment year range is the SOLE stop control (v3.3.0)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
       const {buildScenario, makeParams} = window.__engine;
-      const none = buildScenario(makeParams({sixthIncomeMode:'none'}));
+      const none = buildScenario(makeParams({}));
       // STR-kind segment: 100d x $300 = $30K/yr gross, 7% op cost -> $27.9K/yr net
       const str = buildScenario(makeParams({
-        sixthIncomeMode:'none', sixthSTRStopOnDebtClear:false,
         strPlatformPct:0.03, strCleanPct:0.04, mgrPct:0,
         sixthIncomeSegments: [{yrFrom:2026, yrTo:2046, kind:'str', str:[{days:100, rate:300, type:'nightly'}]}],
       }));
       const strDelta26 = (str.find(r=>r.cal===2026).rental - none.find(r=>r.cal===2026).rental) * 12;
-      // MTR-kind segment + auto-stop on debt clear
-      const mtrStop = buildScenario(makeParams({
-        sixthIncomeMode:'none', sixthSTRStopOnDebtClear:true,
-        sixthIncomeSegments: [{yrFrom:2026, yrTo:2046, kind:'mtr', mtr:[{months:10, rate:6000}]}],
+      // MTR-kind segment ending 2035: income continues PAST debt clear, stops after yrTo
+      const mtr = buildScenario(makeParams({
+        sixthIncomeSegments: [{yrFrom:2026, yrTo:2035, kind:'mtr', mtr:[{months:10, rate:6000}]}],
       }));
-      const clearYr = mtrStop.find(r=>r.hiDebt===0)?.cal;
+      const clearYr = mtr.find(r=>r.hiDebt===0)?.cal;
       return {
-        strDelta26,
-        clearYr,
-        rentalAtClear:    mtrStop.find(r=>r.cal===clearYr)?.rental,
-        rentalAfterClear: mtrStop.find(r=>r.cal===clearYr+1)?.rental,
+        strDelta26, clearYr,
+        rentalAfterClear: mtr.find(r=>r.cal===clearYr+1)?.rental,   // still earning (auto-stop gone)
         noneAfterClear:   none.find(r=>r.cal===clearYr+1)?.rental,
+        rental2036:       mtr.find(r=>r.cal===2036)?.rental,        // past yrTo -> stopped
+        none2036:         none.find(r=>r.cal===2036)?.rental,
       };
     });
-    console.log('  N7 — STR seg net delta 2026: $'+Math.round(result.strDelta26)+'/yr (expect ~$27.9K); MTR stops after '+result.clearYr);
+    console.log('  N7 — STR net delta 2026: $'+Math.round(result.strDelta26)+'/yr; debt clears '+result.clearYr+', MTR income continues after');
     expect(Math.abs(result.strDelta26 - 30000*0.93)).toBeLessThan(60);   // monthly rounding tolerance
     expect(result.clearYr).toBeTruthy();
-    expect(result.rentalAfterClear).toBeLessThan(result.rentalAtClear);
-    expect(result.rentalAfterClear).toBe(result.noneAfterClear);         // MTR-kind fully stopped
+    expect(result.clearYr+1).toBeLessThanOrEqual(2035);                  // scenario sanity
+    expect(result.rentalAfterClear).toBeGreaterThan(result.noneAfterClear);  // no debt-clear auto-stop
+    expect(result.rental2036).toBe(result.none2036);                     // year range alone stops it
   });
 
   test('N8 — REGRESSION: offset=0 -> residual === afterTaxNetProceeds - settlementNeed', async ({ page }) => {
@@ -1818,6 +1821,103 @@ test.describe('Group P — v3.2.0 Paydown parity + split + loans', () => {
     await expect(page.getByText('Family loan starts').first()).toBeVisible();
     await expect(page.getByText('Family loan paid off').first()).toBeVisible();
     console.log('  P9 — timeline includes Medicare/off-plan/loan events');
+  });
+
+});
+
+// ─── Group Q: v3.3.0 6th St segments-only model ─────────────────────────────
+
+test.describe('Group Q — v3.3.0 Segments-only 6th St income', () => {
+
+  async function setRange(locator, value) {
+    await locator.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(value));
+  }
+
+  test('Q1 — overlapping segments SUM, annual and monthly paths agree; info line appears', async ({ page }) => {
+    await loadApp(page);
+    // Baselines before any segments exist
+    const base = await page.evaluate(() => ({
+      ann26: window.__liveRows.find(r=>r.cal===2026).rental,
+      wf0:   window.__wfData[0].rental,
+    }));
+    await expect(page.locator('[data-testid="sixth-seg-overlap-info"]')).toHaveCount(0);
+    // Add two segments; make the second overlap the first (default add is sequential)
+    const addBtn = page.locator('[data-testid="sixth-seg-add"]');
+    await addBtn.scrollIntoViewIfNeeded();
+    await addBtn.click();
+    await addBtn.click();
+    await page.waitForTimeout(200);
+    // Locate segment 2's From slider by its default value (prev.yrTo + 1 = 2028)
+    const fromSliders = await page.locator('[data-testid="sixth-income-controls"] input[type="range"]').all();
+    // Find the slider whose value is 2028 (segment 2 From, default = prev.yrTo+1)
+    let seg2From = null;
+    for (const s of fromSliders) {
+      if (await s.evaluate(el => el.value) === '2028') { seg2From = s; break; }
+    }
+    expect(seg2From).not.toBeNull();
+    await setRange(seg2From, 2026);
+    await page.waitForTimeout(300);
+    const r = await page.evaluate(() => ({
+      ann26: window.__liveRows.find(x=>x.cal===2026).rental,
+      wf0:   window.__wfData[0].rental,
+    }));
+    const annDelta = r.ann26 - base.ann26;
+    const wfDelta  = r.wf0  - base.wf0;
+    // Both default segments are STR 120d x $280 nightly = $33.6K/yr gross, 7% costs
+    // -> net $31,248/yr = $2,604/mo each. Annual path nets costs; monthly wfData adds
+    // GROSS to rental (costs net separately via rentalOpCost) -> $2,800/mo each.
+    console.log('  Q1 — annual delta $' + annDelta + '/mo (expect ~2x$2,604), monthly gross delta $' + wfDelta + '/mo (expect ~2x$2,800)');
+    expect(Math.abs(annDelta - 2*Math.round(33600*0.93/12))).toBeLessThanOrEqual(4);
+    expect(Math.abs(wfDelta  - 2*Math.round(33600/12))).toBeLessThanOrEqual(4);
+    // Overlap info line now visible (neutral, not an error)
+    await expect(page.locator('[data-testid="sixth-seg-overlap-info"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="sixth-seg-errors"]')).toHaveCount(0);
+  });
+
+  test('Q2 — converted legacy-mode pins match their pre-conversion income exactly', async ({ page }) => {
+    await loadApp(page);
+    const r = await page.evaluate(() => {
+      const {buildScenario, makeParams, migrateSixthIncomeSegments} = window.__engine;
+      const key = rows => JSON.stringify(rows.map(x=>x.rental));
+      const none = buildScenario(makeParams({}));
+      // MTR mode -> one flat MTR segment (rate x months); old flat path added rate*months*rg gross
+      const mtrConv = buildScenario(makeParams({sixthIncomeMode:'mtr', sixthMTRRent:6000, sixthMTRMonths:10}));
+      const mtrExpl = buildScenario(makeParams({sixthIncomeSegments:[
+        {yrFrom:2026, yrTo:2046, kind:'mtr', mtr:[{months:10, rate:6000}]}]}));
+      // Old v2 sixthMTR:true shim converts the same way
+      const mtrShim = buildScenario(makeParams({sixthMTR:true, sixthRent:6000, sixthMonths:10}));
+      // STR mode -> STR segment over [start, stop-1]; 360d x $/mo monthly-type == 12 x monthly
+      const strConv = buildScenario(makeParams({sixthIncomeMode:'str', sixthSTRMonthly:9000,
+        sixthSTRStartYear:2026, sixthSTRStopYear:2030, strPlatformPct:0.03, strCleanPct:0.04}));
+      // Removed auto-stop field is ignored silently
+      const strIgn = buildScenario(makeParams({sixthIncomeMode:'str', sixthSTRMonthly:9000,
+        sixthSTRStartYear:2026, sixthSTRStopYear:2030, sixthSTRStopOnDebtClear:true,
+        strPlatformPct:0.03, strCleanPct:0.04}));
+      const seg = migrateSixthIncomeSegments({sixthIncomeMode:'str', sixthSTRMonthly:9000,
+        sixthSTRStartYear:2026, sixthSTRStopYear:2030});
+      return {
+        mtrIdentical: key(mtrConv)===key(mtrExpl),
+        shimIdentical: key(mtrShim)===key(mtrConv),
+        mtrDelta26: mtrConv[0].rental - none[0].rental,
+        strDelta26: strConv[0].rental - none[0].rental,
+        strStops2030: strConv.find(x=>x.cal===2030).rental - none.find(x=>x.cal===2030).rental,
+        autoStopIgnored: key(strIgn)===key(strConv),
+        segRange: seg.length===1 ? [seg[0].yrFrom, seg[0].yrTo] : null,
+      };
+    });
+    console.log('  Q2 — mtr delta $'+r.mtrDelta26+'/mo, str delta $'+r.strDelta26+'/mo, seg range '+JSON.stringify(r.segRange));
+    expect(r.mtrIdentical).toBe(true);
+    expect(r.shimIdentical).toBe(true);
+    expect(r.mtrDelta26).toBe(5000);            // 10mo x $6000 / 12 -- identical to old flat MTR
+    expect(r.strDelta26).toBe(8370);            // $9K/mo x 93% -- identical to old flat STR
+    expect(r.strStops2030).toBe(0);             // stopYear 2030 -> last earning year 2029
+    expect(r.autoStopIgnored).toBe(true);       // removed field ignored on old pins
+    expect(r.segRange).toEqual([2026, 2029]);
   });
 
 });

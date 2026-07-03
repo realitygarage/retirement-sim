@@ -84,18 +84,45 @@ export function migrateScLoans(snap){
 // -----------------------------------------------------------------------------
 // SIXTH_STR_DEFAULTS -- 6th St short-term rental (mirrors duplex-top STR pattern)
 // -----------------------------------------------------------------------------
+// v3.3.0: segments-only 6th St income. The mode selector (none/mtr/str), the
+// flat STR params, and the debt-clear auto-stop are GONE -- sixthIncomeSegments
+// is the sole driving input; empty list = no 6th St income. Concurrent
+// (overlapping) segments SUM.
+// [{ yrFrom, yrTo, kind:'str'|'mtr'|'ltr',
+//    str:[{days,rate,type}], mtr:[{months,rate}], ltr:{monthlyRent} }]
 export const SIXTH_STR_DEFAULTS = {
-  sixthIncomeMode:         'none',   // 'none' | 'mtr' | 'str'
-  sixthSTRMonthly:          9_000,   // $/mo gross when STR-active; slider +/-50%
-  sixthSTRSchedule:            [],   // same shape as strSchedule
-  sixthSTRStartYear:         2026,
-  sixthSTRStopYear:          2055,
-  sixthSTRStopOnDebtClear:   true,   // auto-stop STR the year HI debt hits 0
-  // v3.1.1 segmented income editor -- overrides the simple mode selector when non-empty.
-  // [{ yrFrom, yrTo, kind:'str'|'mtr'|'ltr',
-  //    str:[{days,rate,type}], mtr:[{months,rate}], ltr:{monthlyRent} }]
-  sixthIncomeSegments:         [],
+  sixthIncomeSegments: [],
 };
+
+// Legacy 6th St income back-compat (v3.3.0): pins saved with the old mode
+// selector convert to equivalent segments. Explicit non-empty segments win;
+// mode 'mtr' (or the older sixthMTR:true) becomes one flat MTR segment from
+// the pin's rate x months; mode 'str' becomes one STR segment over
+// [startYear, stopYear-1] whose 360d x ($/mo, monthly-type) inner grosses
+// exactly 12 x monthly -- identical income to the old flat path. The removed
+// sixthSTRStopOnDebtClear field is ignored silently. (Schedule-detail fields
+// mtrSchedule / sixthSTRSchedule are NOT converted -- flat values only.)
+export function migrateSixthIncomeSegments(o={}){
+  const segs = Array.isArray(o.sixthIncomeSegments) ? o.sixthIncomeSegments : [];
+  if(segs.length) return segs;
+  const mode = o.sixthIncomeMode || (o.sixthMTR ? 'mtr' : 'none');
+  if(mode==='mtr'){
+    const rate   = o.sixthMTRRent   ?? o.sixthRent   ?? 6000;
+    const months = o.sixthMTRMonths ?? o.sixthMonths ?? 10;
+    if(rate>0 && months>0)
+      return [{ yrFrom:2026, yrTo:2046, kind:'mtr',
+        mtr:[{months, rate}], str:[{days:120,rate:280,type:'nightly'}], ltr:{monthlyRent:rate} }];
+  }
+  if(mode==='str'){
+    const monthly = o.sixthSTRMonthly ?? 9000;
+    const from = o.sixthSTRStartYear ?? 2026;
+    const to   = Math.min(2046, (o.sixthSTRStopYear ?? 2055) - 1);
+    if(monthly>0 && to>=from)
+      return [{ yrFrom:from, yrTo:to, kind:'str',
+        str:[{days:360, rate:monthly, type:'monthly'}], mtr:[{months:10,rate:6000}], ltr:{monthlyRent:6000} }];
+  }
+  return [];
+}
 
 // -----------------------------------------------------------------------------
 // Helper: build one disposition entry from LIQUIDATION_DEFAULTS
@@ -186,6 +213,8 @@ export function makeParams(overrides={}){
       : [];
   }
   p.loans = (p.loans||[]).filter(l=>l && (l.amount||0)>0 && (l.months||0)>0);
+  // v3.3.0: legacy 6th St mode params convert to segments (segments-only model)
+  p.sixthIncomeSegments = migrateSixthIncomeSegments(overrides);
   return p;
 }
 
