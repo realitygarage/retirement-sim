@@ -522,10 +522,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v3.1.1"', async ({ page }) => {
+  test('E5 — Version header shows "v3.1.2"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.1').first()).toBeVisible();
-    console.log('  Version badge confirmed: v3.1.1');
+    await expect(page.locator('text=v3.1.2').first()).toBeVisible();
+    console.log('  Version badge confirmed: v3.1.2');
   });
 
 });
@@ -975,10 +975,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v3.1.1', async ({ page }) => {
+  test('L1 — Version header shows v3.1.2', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.1').first()).toBeVisible();
-    console.log('  L1 — Version v3.1.1 confirmed');
+    await expect(page.locator('text=v3.1.2').first()).toBeVisible();
+    console.log('  L1 — Version v3.1.2 confirmed');
   });
 
   test('L2 — payOffHI toggle hidden when sellYear is 2055 (never sell)', async ({ page }) => {
@@ -1274,9 +1274,9 @@ test.describe('Group M — v3.1.1 Dispositions', () => {
     expect(result.ccBal).toBe(0);
   });
 
-  test('M11 — Version badge shows v3.1.1', async ({ page }) => {
+  test('M11 — Version badge shows v3.1.2', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.1').first()).toBeVisible();
+    await expect(page.locator('text=v3.1.2').first()).toBeVisible();
   });
 
   test('M12 — window.__engine exposed with disposeAsset/taxRecognized', async ({ page }) => {
@@ -1497,6 +1497,104 @@ test.describe('Group N — v3.1.1 Sold-state UI + 6th St segments', () => {
     expect(result.noOff50).toBe(result.noOff0);          // reconciliation rows immune to slider
     expect(result.noOff0).toBe(result.live0);            // and equal to live results at offset 0
     expect(result.live50).toBeLessThan(result.live0);    // while live results still respond
+  });
+
+});
+
+// ─── Group O: v3.1.2 Settlement card reorder + itemized proceeds breakdown ──
+
+test.describe('Group O — v3.1.2 Settlement breakdown', () => {
+
+  // Set a range slider through React's value tracker
+  async function setRange(locator, value) {
+    await locator.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(value));
+  }
+
+  // Put the 6th St disposition on sell_taxable in 2026 via the UI
+  async function sellSixth2026(page) {
+    const card = page.locator('[data-testid="dispo-sixth-card"]');
+    await card.scrollIntoViewIfNeeded();
+    await card.getByRole('button', { name: 'Sell', exact: true }).click();
+    await page.waitForTimeout(200);
+    await setRange(card.locator('input[type="range"]').first(), 2026);  // Year slider
+    await page.waitForTimeout(250);
+  }
+
+  test('O1 — breakdown lines sum correctly (disposeAsset invariants)', async ({ page }) => {
+    await loadApp(page);
+    const r = await page.evaluate(() => {
+      const {disposeAsset} = window.__engine;
+      const prop = {fmv:1375000, basis:424309, mortgageBalance:348000, isPrimary:false,
+        caSourceDeferredGain:801441, depreciationTaken:176000};
+      return {
+        sell: disposeAsset(prop, 'sell_taxable', {}),
+        part: disposeAsset(prop, 'partial_1031', {cashBoot:200000}),
+      };
+    });
+    // netSale = gross - selling costs
+    expect(Math.abs(r.sell.netSale - (r.sell.grossPrice - r.sell.sellingCosts))).toBeLessThan(1);
+    // afterTax = preTax - totalTax
+    expect(Math.abs(r.sell.afterTaxNetProceeds - (r.sell.netSale - r.sell.mortgagePayoff - r.sell.totalTax))).toBeLessThan(1);
+    // totalTax = component sum
+    expect(Math.abs(r.sell.totalTax - (r.sell.recaptureTax + r.sell.fedCapGainsTax + r.sell.caClawbackTax + r.sell.coTax))).toBeLessThan(1);
+    // partial 1031: afterTax = boot - totalTax
+    expect(Math.abs(r.part.afterTaxNetProceeds - (r.part.cashBoot - r.part.totalTax))).toBeLessThan(1);
+    console.log('  O1 — sell afterTax $'+Math.round(r.sell.afterTaxNetProceeds/1000)+'K, partial $'+Math.round(r.part.afterTaxNetProceeds/1000)+'K');
+  });
+
+  test('O2 — UI breakdown matches engine: after-tax, Σ proceeds, residual formula', async ({ page }) => {
+    await loadApp(page);
+    await sellSixth2026(page);
+    const box = page.locator('[data-testid="settle-breakdown"]');
+    await box.scrollIntoViewIfNeeded();
+    const afterTax = Number(await page.locator('[data-testid="settle-aftertax-sixth"]').getAttribute('data-val'));
+    const total    = Number(await page.locator('[data-testid="settle-total"]').getAttribute('data-val'));
+    const residual = Number(await page.locator('[data-testid="settle-residual"]').getAttribute('data-val'));
+    const engineAfterTax = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const rows = buildScenario(makeParams({dispositions: {sixth: {mode:'sell_taxable', year:2026}}}));
+      return rows.dispoResults.sixth.afterTaxNetProceeds;
+    });
+    console.log('  O2 — shown $'+Math.round(afterTax/1000)+'K vs engine $'+Math.round(engineAfterTax/1000)+'K, residual $'+Math.round(residual/1000)+'K');
+    expect(Math.abs(afterTax - engineAfterTax)).toBeLessThanOrEqual(2);   // displayed == disposeAsset output
+    expect(total).toBe(afterTax);                                          // single seller: Σ == its proceeds
+    expect(residual).toBe(Math.max(0, total - 525000));                    // residual = Σ - settlementNeed
+  });
+
+  test('O3 — offset line hidden at 0%; "without offset" equals offset-0 engine run', async ({ page }) => {
+    await loadApp(page);
+    await sellSixth2026(page);
+    await expect(page.locator('[data-testid="settle-offset-line-sixth"]')).toHaveCount(0);
+    await setRange(page.locator('[data-testid="settle-offset-slider"] input[type="range"]'), 50);
+    await page.waitForTimeout(250);
+    await expect(page.locator('[data-testid="settle-offset-line-sixth"]')).toHaveCount(1);
+    const withoutOffset = Number(await page.locator('[data-testid="settle-notax-sixth"]').getAttribute('data-val'));
+    const engineTax0 = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const rows = buildScenario(makeParams({
+        dispositions: {sixth: {mode:'sell_taxable', year:2026}},
+        settlementNeed: 525000, settlementYear: 2026, gainOffsetPct: 0,
+      }));
+      return rows.dispoResults.sixth.totalTax;
+    });
+    console.log('  O3 — "without offset" $'+Math.round(withoutOffset/1000)+'K vs offset-0 engine $'+Math.round(engineTax0/1000)+'K');
+    expect(Math.abs(withoutOffset - engineTax0)).toBeLessThanOrEqual(1);
+  });
+
+  test('O4 — paydown slider renders AFTER the residual breakdown in DOM order', async ({ page }) => {
+    await loadApp(page);
+    const ok = await page.evaluate(() => {
+      const a = document.querySelector('[data-testid="settle-breakdown"]');
+      const b = document.querySelector('[data-testid="settle-paydown-slider"]');
+      return !!(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+    });
+    expect(ok).toBe(true);
+    console.log('  O4 — breakdown box precedes HI paydown slider');
   });
 
 });

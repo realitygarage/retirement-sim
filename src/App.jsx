@@ -1,4 +1,4 @@
-// v3.1.1 -- sold-state UI linkage, 6th St segmented income editor, settlement residual + reconciliation fixes
+// v3.1.2 -- settlement card reorder, itemized proceeds breakdown with offset audit trail
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -215,6 +215,7 @@ export default function App(){
   const [showLive, setShowLive] = useState(true);       // show live scenario on charts
   const [expandedChart, setExpandedChart] = useState(null); // which chart is drilled into
   const [nwMode,        setNwMode]        = useState('book'); // 'book' | 'liq'
+  const [settleOpen,    setSettleOpen]    = useState({});     // v3.1.2 per-property disclosure in settlement breakdown
   // CF waterfall state now in sc object (see setSc setters above)
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
   const [nextId,  setNextId]  = useState(()=>{
@@ -287,6 +288,36 @@ export default function App(){
     return {...pin, rows, stats:keyStats(rows)};
   }),[pins, pinScs]);
   const liveStats = useMemo(()=>keyStats(liveRows),[liveRows]);
+
+  // v3.1.2 settlement breakdown -- everything the Settlement card displays comes
+  // from here, pulled straight off the disposeAsset return objects (no UI recompute).
+  const settleData = useMemo(()=>{
+    const dr   = liveRows.dispoResults || {};
+    const drNo = liveRows.dispoResultsNoOffset || {};
+    const sellers = ['sixth','fifteenth','barberry']
+      .map(k=>({k, d:dr[k], dn:drNo[k]||dr[k]}))
+      .filter(({d})=>d && d.mode && d.mode!=='keep' && d.year===settlementYear);
+    const totalProceeds = sellers.reduce((s,{d})=>s+(d.afterTaxNetProceeds||0),0);
+    const residual = Math.max(0, totalProceeds - settlementNeed);
+    return {sellers, totalProceeds, residual};
+  },[liveRows,settlementYear,settlementNeed]);
+
+  // v3.1.2 dev-mode consistency guard: warn if the displayed breakdown drifts from
+  // the engine's disposeAsset outputs or the residual formula. Guards against the
+  // UI diverging from the engine again (the v3.1.1 $919K bug class).
+  useEffect(()=>{
+    if(!(import.meta.env && import.meta.env.DEV)) return;
+    for(const {k,d} of settleData.sellers){
+      if(d.mode==='full_1031') continue;
+      const preTax = d.mode==='partial_1031' ? (d.cashBoot||0) : d.netSale - d.mortgagePayoff;
+      if(Math.abs((d.grossPrice - d.sellingCosts) - d.netSale) > 1)
+        console.warn(`[settlement audit] ${k}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts ($${Math.round(d.grossPrice - d.sellingCosts)})`);
+      if(Math.abs((preTax - d.totalTax) - d.afterTaxNetProceeds) > 1)
+        console.warn(`[settlement audit] ${k}: displayed after-tax ($${Math.round(d.afterTaxNetProceeds)}) != pre-tax - totalTax ($${Math.round(preTax - d.totalTax)}) -- UI drifting from disposeAsset`);
+    }
+    if(Math.abs(settleData.residual - Math.max(0, settleData.totalProceeds - settlementNeed)) > 1)
+      console.warn(`[settlement audit] residual ($${Math.round(settleData.residual)}) != max(0, Σ afterTaxNetProceeds - settlementNeed)`);
+  },[settleData,settlementNeed]);
 
   // -- Cash flow waterfall engine ----------------------------
   const wfData = useMemo(()=>{
@@ -1400,7 +1431,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.1.1</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.1.2</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1668,14 +1699,16 @@ export default function App(){
               );
             })}
 
-            {/* Global settlement panel */}
-            <div style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
+            {/* Global settlement panel -- v3.1.2 order: knobs -> proceeds breakdown -> paydown */}
+            <div data-testid="settlement-card" style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
               <div style={{fontSize:11,color:bright,fontWeight:"bold",marginBottom:8}}>Settlement</div>
               {slider("Settlement need",settlementNeed,setSettlementNeed,262500,787500,5000,
                 v=>"$"+Math.round(v/1000)+"K")}
               {slider("Settlement year",settlementYear,setSettlementYear,2026,2046,1,v=>v+"")}
-              {slider("Gain offset % (UNCONFIRMED)",gainOffsetPct,setGainOffsetPct,0,100,5,
-                v=>v+"%  ($"+Math.round(settlementNeed*v/100/1000)+"K)")}
+              <div data-testid="settle-offset-slider">
+                {slider("Gain offset % (UNCONFIRMED)",gainOffsetPct,setGainOffsetPct,0,100,5,
+                  v=>v+"%  ($"+Math.round(settlementNeed*v/100/1000)+"K)")}
+              </div>
               <div style={{fontSize:9,color:dim,marginBottom:8,fontStyle:"italic",marginTop:-4}}>
                 Kimbell/Arrowsmith position — CPA to validate. Default OFF.
               </div>
@@ -1686,31 +1719,112 @@ export default function App(){
                   {v:false,l:'Off',c:dim}
                 ])}
               </div>
-              {slider("HI paydown % of residual",hiPaydownPct,setHiPaydownPct,0,100,5,
-                v=>v+"%")}
               {(()=>{
-                const dr = liveRows.dispoResults || {};
-                let totalProceeds = 0;
-                for(const k of ['sixth','fifteenth','barberry']){
-                  const _d = dr[k];
-                  if(_d && _d.mode && _d.mode!=='keep' && _d.year===settlementYear){
-                    totalProceeds += _d.afterTaxNetProceeds || 0;
-                  }
-                }
-                const residual = Math.max(0, totalProceeds - settlementNeed);
+                const {sellers, totalProceeds, residual} = settleData;
+                const shortfall = totalProceeds - settlementNeed < -0.5;
                 const totalHI = (liveParams.ccBal||0)+(liveParams.sophiaBal||0)+(liveParams.nolanBal||0);
                 const paydown  = Math.min(residual * hiPaydownPct/100, totalHI);
                 const invested = residual - paydown;
-                return (
-                  <div style={{fontSize:9,color:muted,padding:8,background:bg1,borderRadius:4,marginTop:4}}>
-                    <div>Sale proceeds in {settlementYear}: <span style={{color:bright,fontFamily:mono}}>${Math.round(totalProceeds/1000)}K</span></div>
-                    <div>Minus settlement need: <span style={{color:red,fontFamily:mono}}>-${Math.round(settlementNeed/1000)}K</span></div>
-                    <div>Residual: <span style={{color:bright,fontFamily:mono}}>${Math.round(residual/1000)}K</span></div>
-                    <div style={{marginTop:4,paddingTop:4,borderTop:`1px dashed ${bdr}`}}>
-                      HI paydown: <span style={{color:green,fontFamily:mono}}>${Math.round(paydown/1000)}K</span> then <span style={{color:blue,fontFamily:mono}}>${Math.round(invested/1000)}K</span> to invested
-                    </div>
+                const fmtK = v=>"$"+Math.abs(Math.round(v/1000))+"K";
+                const modeLabel = m=>m==='sell_taxable'?'sell':m==='full_1031'?'full 1031':m==='partial_1031'?'partial 1031':m;
+                const line = (label,val,{neg,eq,bold}={}) => (
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{color:bold?bright:muted,fontWeight:bold?"bold":"normal"}}>{(neg?"− ":eq?"= ":"  ")+label}</span>
+                    <span style={{fontFamily:mono,color:bold?green:neg?red:muted,fontWeight:bold?"bold":"normal"}}>{(neg?"−":"")+fmtK(val)}</span>
                   </div>
                 );
+                return (<>
+                  {/* Proceeds & residual breakdown -- itemized from disposeAsset outputs */}
+                  <div data-testid="settle-breakdown" style={{fontSize:9,color:muted,padding:8,background:bg1,borderRadius:4,marginTop:4,marginBottom:10}}>
+                    <div style={{color:dim,marginBottom:5,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Proceeds &amp; Residual — {settlementYear}</div>
+                    {sellers.length===0&&(
+                      <div style={{color:dim,fontStyle:"italic",marginBottom:4}}>No dispositions in {settlementYear} — settlement pulls from savings/cash.</div>
+                    )}
+                    {sellers.map(({k,d,dn})=>{
+                      const liq = LIQUIDATION_DEFAULTS[k];
+                      const open = settleOpen[k] ?? (sellers.length===1);
+                      const preTax = d.mode==='partial_1031' ? (d.cashBoot||0) : d.netSale - d.mortgagePayoff;
+                      const offsetAmt = Math.max(0,(dn.recognizedGain||0)-(d.recognizedGain||0));
+                      const compSum = (d.recaptureTax||0)+(d.fedCapGainsTax||0)+(d.caClawbackTax||0)+(d.coTax||0);
+                      const bumpShare = Math.max(0,(d.totalTax||0)-compSum);
+                      const costPct = d.grossPrice>0 ? Math.round(d.sellingCosts/d.grossPrice*100) : 0;
+                      return (
+                        <div key={k} data-testid={`settle-prop-${k}`} style={{marginBottom:6,paddingBottom:6,borderBottom:`1px dashed ${bdr}`}}>
+                          <div onClick={()=>setSettleOpen(o=>({...o,[k]:!open}))}
+                            style={{cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <span style={{color:bright,fontWeight:"bold"}}>{open?"▾":"▸"} {liq.label} — {modeLabel(d.mode)} ({d.saleMode||'market'}), {d.year}</span>
+                            <span data-testid={`settle-aftertax-${k}`} data-val={Math.round(d.afterTaxNetProceeds||0)}
+                              style={{fontFamily:mono,color:green}}>{fmtK(d.afterTaxNetProceeds||0)}</span>
+                          </div>
+                          {open&&(d.mode==='full_1031'
+                            ? <div style={{color:dim,fontStyle:"italic",marginTop:3,paddingLeft:12}}>
+                                Full 1031 — no cash proceeds; {fmtK(d.deferredGain||0)} gain deferred into replacement asset.
+                              </div>
+                            : <div style={{marginTop:4,paddingLeft:12}}>
+                                {line("Gross sale price", d.grossPrice)}
+                                {line(`Selling costs (${costPct}%)`, d.sellingCosts, {neg:true})}
+                                {line("Net sale", d.netSale, {eq:true})}
+                                {line("Mortgage payoff", d.mortgagePayoff, {neg:true})}
+                                {d.mode==='partial_1031'
+                                  ? line("Cash boot (taxable slice)", d.cashBoot, {eq:true})
+                                  : line("Pre-tax proceeds", preTax, {eq:true})}
+                                <div style={{marginTop:4}}/>
+                                {line("Recognized gain", dn.recognizedGain||0)}
+                                {offsetAmt>0.5&&(
+                                  <div data-testid={`settle-offset-line-${k}`} style={{display:"flex",justifyContent:"space-between"}}>
+                                    <span style={{color:muted}}>− Settlement gain offset</span>
+                                    <span style={{fontFamily:mono,color:amber}}>−{fmtK(offsetAmt)}</span>
+                                  </div>
+                                )}
+                                {offsetAmt>0.5&&line("Taxable gain", d.recognizedGain||0, {eq:true})}
+                                <div style={{color:dim,marginTop:2}}>
+                                  Tax: recapture {fmtK(d.recaptureTax||0)} · fed {fmtK(d.fedCapGainsTax||0)} · CA {fmtK(d.caClawbackTax||0)} · CO {fmtK(d.coTax||0)}
+                                  {(d.otherStateCredit||0)>0.5?` (credit −${fmtK(d.otherStateCredit)})`:""}
+                                  {bumpShare>500?` · same-yr bump ${fmtK(bumpShare)}`:""}
+                                </div>
+                                {line("Total tax", d.totalTax||0, {neg:true})}
+                                {offsetAmt>0.5&&(
+                                  <div data-testid={`settle-notax-${k}`} data-val={Math.round(dn.totalTax||0)}
+                                    style={{color:dim,fontStyle:"italic",textAlign:"right"}}>
+                                    (would be {fmtK(dn.totalTax||0)} without offset)
+                                  </div>
+                                )}
+                                {line("After-tax proceeds", d.afterTaxNetProceeds||0, {eq:true,bold:true})}
+                              </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{color:muted}}>Σ after-tax proceeds</span>
+                      <span data-testid="settle-total" data-val={Math.round(totalProceeds)}
+                        style={{fontFamily:mono,color:bright}}>{fmtK(totalProceeds)}</span>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{color:muted}}>− Settlement need</span>
+                      <span style={{fontFamily:mono,color:red}}>−{fmtK(settlementNeed)}</span>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:2}}>
+                      <span style={{color:bright,fontWeight:"bold"}}>= Residual</span>
+                      <span data-testid="settle-residual" data-val={Math.round(residual)}
+                        style={{fontFamily:mono,color:residual>0?green:amber,fontWeight:"bold"}}>{fmtK(residual)}</span>
+                    </div>
+                    {shortfall&&(
+                      <div style={{color:amber,fontStyle:"italic",marginTop:2}}>
+                        Proceeds don't cover the need — shortfall funded outside the sim (cash floors at 0).
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Decide how to use the residual (shown above) */}
+                  <div data-testid="settle-paydown-slider">
+                    {slider("HI paydown % of residual",hiPaydownPct,setHiPaydownPct,0,100,5,
+                      v=>v+"%")}
+                  </div>
+                  <div style={{fontSize:9,color:muted,marginTop:-4}}>
+                    <span style={{color:green,fontFamily:mono}}>{fmtK(paydown)}</span> to HI debt (avalanche), <span style={{color:blue,fontFamily:mono}}>{fmtK(invested)}</span> to invested
+                  </div>
+                </>);
               })()}
             </div>
 

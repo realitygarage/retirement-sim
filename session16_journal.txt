@@ -1,0 +1,113 @@
+=== SESSION 16 JOURNAL — v3.1.2 ===
+Date: 2026-07-02
+Session goal: Settlement card reorder + itemized proceeds breakdown with
+offset audit trail.
+
+--- WHAT SHIPPED ---
+
+v3.1.2 -- settlement card reorder, itemized proceeds breakdown with offset
+audit trail.
+
+--- 1. SETTLEMENT CARD REORDER ---
+
+New top-to-bottom flow ("show the number first, then decide how to use it"):
+  1. Settlement need / year / gain-offset sliders + Kimbell note +
+     same-year bump toggle (unchanged)
+  2. Proceeds & Residual breakdown box (new, itemized -- see below)
+  3. HI paydown % of residual slider
+  4. Paydown-result line: "$X to HI debt (avalanche), $Y to invested"
+The old three-line summary box (proceeds/need/residual + paydown line) is
+replaced by items 2 and 4.
+
+--- 2. ITEMIZED PROCEEDS BREAKDOWN ---
+
+One collapsible section per disposition landing in the settlement year, all
+values pulled directly from the disposeAsset return objects via a new
+settleData useMemo (liveRows.dispoResults + dispoResultsNoOffset). NOTHING
+is recomputed in the UI.
+
+Per-property derivation (sell_taxable / home):
+  Gross sale price -> − Selling costs (n%) -> = Net sale -> − Mortgage
+  payoff -> = Pre-tax proceeds; then Recognized gain (offset-free figure)
+  -> − Settlement gain offset (only when offset actually reduced this
+  property's gain) -> = Taxable gain -> tax component line (recapture /
+  fed / CA / CO, credit, same-yr bump share when present) -> − Total tax
+  with "(would be $X without offset)" comparison from dispoResultsNoOffset
+  -> = After-tax proceeds.
+Partial 1031: mortgage payoff -> Cash boot (taxable slice) -> tax -> after-
+tax = boot − tax. Full 1031: single line "no cash proceeds; $X gain
+deferred".
+
+Totals: Σ after-tax proceeds -> − Settlement need -> = Residual, plus a
+shortfall note when proceeds don't cover the need (cash floors at 0).
+
+Disclosure: each property header row toggles open/closed (▾/▸). Default:
+expanded when exactly one property sells that year, collapsed otherwise
+(settleOpen state).
+
+The bump share shown in the tax line is derived as totalTax − (recapture +
+fed + CA + CO) so the component line always sums to Total tax.
+
+--- 3. DEV-MODE CONSISTENCY GUARD ---
+
+useEffect (DEV only, via import.meta.env.DEV) console.warns when:
+  - netSale != grossPrice − sellingCosts (per property)
+  - after-tax proceeds != pre-tax − totalTax (boot − tax for partial 1031)
+  - residual != max(0, Σ afterTaxNetProceeds − settlementNeed)
+Guards against the UI drifting from the engine again (the v3.1.1 $919K bug
+class). Silent in production builds.
+
+--- FILES CHANGED ---
+
+src/App.jsx        v3.1.2 header + badge; settleOpen state; settleData
+                   useMemo; dev audit useEffect; settlement card rebuilt
+                   (order + breakdown). data-testids: settlement-card,
+                   settle-offset-slider, settle-breakdown, settle-prop-{k},
+                   settle-aftertax-{k} (data-val), settle-offset-line-{k},
+                   settle-notax-{k} (data-val), settle-total, settle-residual
+                   (both data-val), settle-paydown-slider.
+retirement-simulator.spec.js
+                   E5/L1/M11 -> v3.1.2. New Group O (4 tests):
+                   O1 disposeAsset invariants (netSale = gross − costs;
+                      afterTax = preTax − tax; totalTax = component sum;
+                      partial: boot − tax)
+                   O2 UI data-vals match engine afterTaxNetProceeds; Σ and
+                      residual formula exact
+                   O3 offset line hidden at 0%; visible at 50%; "without
+                      offset" data-val == offset-0 engine run tax
+                   O4 paydown slider AFTER breakdown box in DOM order
+                      (compareDocumentPosition)
+
+--- FINAL TEST RESULTS ---
+
+  90 passing. Full run was 89/90: A1 failed with "browser has been closed"
+  during page load (headed-run infrastructure flake, untouched by this
+  change); passed cleanly on immediate re-run. Group O passed first try;
+  O2 confirmed UI $787K == engine $787K for the default 6th-St-sell-2026
+  scenario, residual $262K; O3 offset audit trail $49K.
+
+--- SEMANTIC NOTES ---
+
+- The per-property offset line shows the actual gain reduction applied to
+  THAT property (noOffset.recognizedGain − live.recognizedGain), which can
+  be less than settlementNeed x offsetPct when the gains pool is smaller
+  (e.g. 6th-only sale: pool $175K < $262K at 50% -> tax goes to $0 and the
+  line shows −$175K).
+- data-val attributes carry exact rounded dollars for tests; the visible
+  text stays in $K.
+- Breakdown box renders even with no sellers in the settlement year, with
+  a "settlement pulls from savings/cash" note.
+
+--- OPEN BACKLOG (carried) ---
+
+[P1] Phase 2: per-property disposeAsset in liquidation-NW chart math.
+[P1] CPA rate calibration: engine 6th-sale tax $49K vs CPA sheet $62K.
+[P2] Pin Comparison Table book/liq NW mode toggle.
+[P2] Glossary: dispositions, settlement, segments, paydown, cashAst floor.
+[P3] E3 scroll-into-view.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Read this journal (+ session15) and v3_phase1_consolidated_spec.md.
+2. Version bump on every change (App.jsx header comment + UI badge div).
+   This session: v3.1.1 -> v3.1.2.
