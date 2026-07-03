@@ -53,9 +53,33 @@ export const SETTLEMENT_DEFAULTS = {
   sameYearSaleTaxBump:   50_000,    // +tax if all 3 sold same calendar year
   sameYearSaleTaxBumpOn:  true,
   requireSameYearForOffset: true,
-  hiPaydownPct:             100,    // 0-100% of residual, default 100 (avalanche)
+  settleLifestyleDraw:        0,    // v3.2.0: (a) one-time lifestyle draw from residual, $
+  hiPaydownPct:             100,    // v3.2.0: (b) % of (residual - draw) to HI debt avalanche
   caGainCap:          1_200_000,    // CA $1.2M prior-1031 gain cap (§4.6)
 };
+
+// -----------------------------------------------------------------------------
+// LOANS (v3.2.0) -- generalized loan segments, replaces famLoanAmt/famLoanRate.
+// SC-facing shape (rate as %); engine-facing copies use rate as decimal.
+// startMonth is a calendar month number (1-12); model launch is Jun 2026.
+// -----------------------------------------------------------------------------
+export const DEFAULT_LOANS_SC = [
+  { label:'Family loan', amount:25_000, startYear:2026, startMonth:6, months:8, rate:7.5, includeInSweep:false },
+];
+
+// Resolve a saved scenario's loans with legacy famLoan back-compat:
+// explicit loans array wins; else famLoanAmt>0 converts to a "Family loan" row,
+// famLoanAmt===0 means NO loans; else fall back to defaults. Rates stay in %.
+export function migrateScLoans(snap){
+  if(Array.isArray(snap?.loans)) return snap.loans;
+  if(snap && snap.famLoanAmt !== undefined){
+    return snap.famLoanAmt>0
+      ? [{ label:'Family loan', amount:snap.famLoanAmt, startYear:2026, startMonth:6,
+           months:8, rate:snap.famLoanRate ?? 7.5, includeInSweep:false }]
+      : [];
+  }
+  return DEFAULT_LOANS_SC;
+}
 
 // -----------------------------------------------------------------------------
 // SIXTH_STR_DEFAULTS -- 6th St short-term rental (mirrors duplex-top STR pattern)
@@ -125,8 +149,7 @@ export const DEFAULTS = {
   ccBal:         60_000,   ccRate:    0.14,  ccMin:   1200,
   sophiaBal:     58_057,   sophiaRate:0.0814,sophiaMin: 737,
   nolanBal:     141_117,   nolanRate: 0.084, nolanMin: 1787,
-  famLoanAmt:    25_000,
-  famLoanRate:   0.075,
+  loans:         DEFAULT_LOANS_SC.map(l=>({...l, rate:l.rate/100})),  // engine-facing decimals
   investedCash:  0,
   lifestyleDraws: [],
   strSchedule:   [],
@@ -154,6 +177,15 @@ export function makeParams(overrides={}){
     barberry:  { ...DEFAULTS.dispositions.barberry,  ...(overrides.dispositions?.barberry  || {}) },
     fifteenth: { ...DEFAULTS.dispositions.fifteenth, ...(overrides.dispositions?.fifteenth || {}) },
   };
+  // v3.2.0 legacy famLoan back-compat (engine-facing: rate as decimal).
+  // Explicit loans array wins; famLoanAmt===0 means no loans.
+  if(!Array.isArray(overrides.loans) && overrides.famLoanAmt !== undefined){
+    p.loans = overrides.famLoanAmt>0
+      ? [{ label:'Family loan', amount:overrides.famLoanAmt, startYear:2026, startMonth:6,
+           months:8, rate:overrides.famLoanRate ?? 0.075, includeInSweep:false }]
+      : [];
+  }
+  p.loans = (p.loans||[]).filter(l=>l && (l.amount||0)>0 && (l.months||0)>0);
   return p;
 }
 
@@ -189,7 +221,7 @@ export const SC_DEFAULTS = {
   ccBal:         60000,  ccRate:14.0,  ccMin:1200,
   sophiaBal:     58057,  sophiaRate:8.14, sophiaMin:737,
   nolanBal:      141117, nolanRate:8.40,  nolanMin:1787,
-  famLoanAmt:    25000,  famLoanRate:7.5,
+  loans:         DEFAULT_LOANS_SC,   // rate as %
   rdTopUp:400, rdCap:10000, obTopUp:500, obCap:35000,
   discFloor:800, fcfSchedule:[], sweepDelay:0, struct6:600, struct15:500, structLaf:250,
   maintStr:0.75, bufferMode:"seq",

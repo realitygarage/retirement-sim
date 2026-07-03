@@ -1,0 +1,194 @@
+=== SESSION 17 JOURNAL — v3.2.0 ===
+Date: 2026-07-03
+Session goal: paydown consistency fix, residual 3-way split, generalized
+loans, cash-flow transparency, timeline event alignment.
+
+--- WHAT SHIPPED ---
+
+v3.2.0 -- unified HI paydown, residual 3-way split, generalized loan
+segments, fixed-cost breakdown, timeline event alignment.
+
+NOTE: the pin file retirement-scenarios-2026-07-03.json was NOT found on
+disk (checked repo root, Downloads, Desktop, Documents). The bug was
+reproduced synthetically instead: 15th St sell_taxable 2026 + settlement
+525K + paydown 100% gives residual $141,105 -- matching the reported
+"$141K persisting" exactly.
+
+--- 1. BUG FIX: HI paydown diverged between engines ---
+
+Root cause (two defects in the monthly wfData paydown block):
+  (a) Nolan was excluded from the paydown queue during his 5-month payment
+      grace window (`_nolanOnNow ? [...nolan] : []`). A 2026 sale paydown
+      therefore never touched his $141,117 balance.
+  (b) Unspent `payLeft` was silently discarded instead of continuing the
+      avalanche.
+The annual engine had neither defect, so the HI Debt chart showed the debt
+cleared while the Month-by-Month table kept Nolan's balance.
+
+Fix: new SHARED helpers in engine.js, applied identically in both engines
+at the sale-year boundary:
+  - planHiPaydown(amount, debts) -> {perDebt, total, order}: avalanche by
+    rate (CC 14% -> Nolan 8.4% -> Sophia 8.14%), capped per balance.
+    Nolan's grace delays MINIMUM payments, not lump-sum payoff.
+  - splitResidual(residual, {lifestyleDraw, paydownPct, totalDebt}).
+Both engines expose the applied plan (annual: r.hiPaydownDetail; monthly:
+row.paydownDetail) so tests verify per-debt equality against the helper.
+Debugging used console.table of {debt, before, paydown, after} via a node
+harness (not committed).
+
+KNOWN PRE-EXISTING GAP (measured, not caused by this change): in the
+default no-sale scenario the two engines' debt trajectories diverge over
+time (annual clears 2036, monthly 2034; up to ~$25K apart mid-window)
+because the annual engine approximates the bucket/floor model (no rd/ob
+buckets, no fcfSchedule floors, no maintRedirect). The v3.2.0 guarantee is:
+identical lump-sum paydown plans (P1) and identical trajectories when the
+paydown clears the debt (P2, every year, ±$1K). Full sweep-model
+unification is backlog [P1].
+
+--- 2. RESIDUAL 3-WAY SPLIT ---
+
+Settlement card, below the proceeds breakdown, in order:
+  (a) Lifestyle draw -- $ slider (settleLifestyleDraw, default 0, capped at
+      residual). One-time; lands in that month's Free Cash (disc) and is
+      labeled in monthly Events + timeline ("Settlement lifestyle draw").
+  (b) HI paydown -- existing % slider, now applied to (residual - draw) via
+      planHiPaydown.
+  (c) Remainder -> waterfall -- one-time inflow at the sale month: fills
+      maint reserves / rainy day / op buffer TO CAPS (not monthly top-up
+      limited), then joins the debt sweep if HI debt remains, else goes to
+      sweep savings (savingsAcc). Direct-to-invested shortcut REMOVED.
+Result line: "$X lifestyle, $Y to HI debt, $Z into waterfall" (data-vals
+settle-draw-val / settle-paydown-val / settle-wf-val), values read from
+ENGINE rows (settleDraw / hiPaydown / wfDebtPaid+wfToSavings), and the dev
+audit warns if draw+paydown+waterfall != residual.
+
+Annual-engine mirror of (c): buckets aren't modeled there, so the remainder
+goes straight to the debt avalanche; the survivor is added to the year's
+sweepToSavings (so pin NW via chartData compounds it, same as live NW uses
+wfData savingsAcc). Consequence: rows.invested / cashAst no longer receives
+sale proceeds at all -- the "Invested cash" NW line goes ~0 and "Sweep
+savings" carries the money. SEMANTIC BREAK: legacy Lifestyle Draws (which
+pull from invested cash) no longer reach sale proceeds; use the settlement
+lifestyle draw instead.
+
+--- 3. GENERALIZED LOAN SEGMENTS ---
+
+defaults.js: loans: [{label, amount, startYear, startMonth(1-12), months,
+rate, includeInSweep}], default = the old family loan ($25K @7.5% x 8mo
+from Jun 2026). SC-facing rate in %, engine-facing decimal.
+famLoanAmt/famLoanRate REMOVED from DEFAULTS/SC_DEFAULTS and the UI.
+
+Back-compat, two layers:
+  - makeParams: overrides.famLoanAmt defined + no loans array -> converts
+    (>0 => Family loan row; ===0 => NO loans). Engine tests keep working.
+  - migrateScLoans(snap) in defaults.js: same conversion for saved pins;
+    applied in buildRowsFromSnapshot / restorePin / switchToPin / all
+    makeParams transform call-sites (% -> decimal there).
+
+Engine (both): amortized pmt via loanMonthlyPmt; balance stepped monthly
+(accrue -> pay); payment lands in the Fixed/debt-payments slot (row keys
+famLoan / famLoanBal / fc_famLoan kept for chart compat -- semantics now
+"all loans"; labels updated to "Loans"/"Loan payments"; hiDebt breakdown
+label is dynamic "Loans: {labels}" so G5's 'Family loan' filter still
+matches). includeInSweep loans join the avalanche queue by rate (monthly
+sweeps AND the item-1/2 paydown + waterfall remainder). Start/payoff
+events emitted from loan STATE (flag-based, so sweep/paydown early payoffs
+are caught): annual rows r.loanStarts/r.loanPayoffs; monthly Events.
+
+UI: "Loans" add/remove editor (Income & Cost Knobs section) with label
+input, amount/rate/term/start-year/start-month sliders and a
+Scheduled-only/Sweepable toggle. Fixed Costs Breakdown panel row is now
+"Loans" with per-loan sub-text.
+
+--- 4. MONTH-BY-MONTH FIXED BREAKDOWN ---
+
+"fixed breakdown" toggle (default off) on the Month-by-Month table expands
+Fixed into its TRUE constituents as summed in wfData tier1:
+  Mtg, Prop T/I, Health, Core, Loans, HI Mins, Tax
+(fc_mtg, fc_propCost, fc_health, fc_core, fc_famLoan, fc_hiMins, fc_tax).
+Note: rental op costs are NOT in Fixed (they net against income); struct
+maintenance and living floor are separate tiers -- the user's expected list
+was adjusted to the actual code composition per instruction. P8 asserts the
+columns sum to tier1 every month (max drift $4 from per-component rounding;
+measured $1).
+
+--- 5. TIMELINE EVENT ALIGNMENT ---
+
+Financial Events Timeline (Simulator tab) now emits, from the SAME sources
+the monthly model uses (BASE constants / engine state, no hardcoded dates):
+  - "You → Medicare" (BASE.startYear / healthYouEricsson->Medicare)
+  - "Sophia → off health insurance" (BASE.sophiaOff -- previously missing
+    because the kids' premium doesn't drop until Nolan is also off)
+  - "Nolan → off health insurance" (BASE.nolanOff) and "Brenda → Medicare"
+    (BASE.brendaMedYear) -- added explicitly, deduped against the existing
+    health-cost-drop events that may already name them
+  - loan starts/payoffs from r.loanStarts/r.loanPayoffs (engine state)
+  - "Settlement lifestyle draw" and "Sale-proceeds HI paydown" from the
+    v3.2.0 row fields
+IO->P&I and debt-cleared events already existed and are unchanged.
+
+--- FILES CHANGED ---
+
+src/engine.js     planHiPaydown / splitResidual / loanMonthlyPmt exports;
+                  buildScenario: boundary residual routing via helpers,
+                  loans replace famLoan (monthly stepping incl. payOffHI
+                  path), sweep-loan avalanche, new row fields (settleDraw,
+                  wfDebtPaid, wfToSavings, hiPaydownDetail, loanStarts,
+                  loanPayoffs), cashAst no longer receives proceeds.
+src/defaults.js   loans + DEFAULT_LOANS_SC + migrateScLoans +
+                  settleLifestyleDraw; famLoan fields removed; makeParams
+                  legacy conversion + loans normalization.
+src/App.jsx       v3.2.0 header/badge; wfData: shared-helper paydown
+                  (Nolan fix), 3-way split with bucket fills, loans state
+                  + events, new row fields; window.__wfData/__liveRows
+                  exposed; settlement card (a)/(b) sliders + split result
+                  line; loans editor; Month-by-Month breakdown toggle;
+                  timeline events; labels (Loans); transforms/pins use
+                  migrateScLoans; audit effect conservation check.
+retirement-simulator.spec.js
+                  E5/L1/M11 -> v3.2.0. New Group P (9 tests): P1 per-debt
+                  paydown parity vs helper in BOTH engines; P2 debt-clear
+                  trajectory equality every year; P3 conservation + draw
+                  event; P4 bucket fills to caps + debt drops beyond 0%
+                  slider; P5 remainder reaches savings when debt clear;
+                  P6 famLoan back-compat identity; P7 includeInSweep
+                  avalanche early payoff; P8 fixed columns sum to tier1 +
+                  toggle; P9 timeline events.
+
+--- FINAL TEST RESULTS ---
+
+  99 passed (full run, 8.8m). No regressions in Groups A-O. P7 needed an
+  aggressive-sweep scenario (lifestyleSplit 0, diCap 0) -- with the default
+  lifestyle split the sweep is too small before 2031 to differentiate
+  swept vs scheduled loan balances.
+
+--- SEMANTIC NOTES ---
+
+- Sale proceeds no longer sit in "invested cash": settlement -> draw ->
+  paydown -> waterfall consumes everything; survivor = sweep savings.
+- hasDebt (sweep trigger / IO->P&I) still counts HI debt only; a remaining
+  sweepable loan does not by itself keep the IO mortgage mode on.
+- Annual engine (c)-mirror skips bucket fills (no bucket model), so in
+  partial-paydown scenarios annual debt can run slightly below monthly by
+  up to the bucket headroom at the sale month (~$95K worst case at launch,
+  usually far less). wfData is authoritative.
+- startMonth is calendar month 1-12; months before the Jun-2026 launch
+  clamp to launch.
+
+--- OPEN BACKLOG ---
+
+[P1] Unify the annual engine's sweep model with wfData (buckets, floors,
+     maintRedirect) so chart and table agree every year in ALL scenarios,
+     not just paydown-clearing ones. (Divergence measured: up to ~$25K /
+     2-year debt-clear gap in the default scenario -- pre-existing.)
+[P1] Phase 2 liquidation-NW disposeAsset. CPA rate calibration ($49K vs
+     $62K on 6th sale).
+[P2] Pin Comparison Table book/liq NW toggle. Glossary updates (residual
+     split, loans, sweep savings).
+[P3] E3 scroll-into-view.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Read this journal (+16/15) and v3_phase1_consolidated_spec.md.
+2. Standard cycle per change pass: bump version (App.jsx header + badge +
+   spec version tests), run_tests.ps1, commit, journal.

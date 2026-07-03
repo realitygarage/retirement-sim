@@ -194,6 +194,45 @@ export function validateSixthSegments(segs){
 }
 
 // =============================================================================
+// SHARED DEBT HELPERS (v3.2.0)
+// =============================================================================
+// Standard amortized monthly payment (rate is annual decimal).
+export function loanMonthlyPmt(amount, rate, months){
+  if(!(amount>0) || !(months>0)) return 0;
+  const rm = rate/12;
+  if(rm<=0) return amount/months;
+  return amount*(rm*Math.pow(1+rm,months))/(Math.pow(1+rm,months)-1);
+}
+
+// Plan a lump-sum debt paydown in avalanche order (highest rate first, capped
+// at each balance). debts: [{key, balance, rate}]. Single source of truth --
+// the annual engine and the monthly wfData block both apply exactly this plan,
+// so the HI Debt chart and the Month-by-Month table cannot diverge again.
+export function planHiPaydown(amount, debts){
+  const q=(debts||[]).filter(d=>(d.balance||0)>0).sort((a,b)=>b.rate-a.rate);
+  let left=Math.max(0, amount||0);
+  const perDebt={};
+  for(const d of q){
+    if(left<=0) break;
+    const pay=Math.min(left, d.balance);
+    if(pay>0) perDebt[d.key]=pay;
+    left-=pay;
+  }
+  return {perDebt, total:Math.max(0,amount||0)-left, order:q.map(d=>d.key)};
+}
+
+// v3.2.0 residual 3-way split: (a) lifestyle draw, (b) HI paydown budget,
+// (c) remainder -> waterfall. Conservation: draw+paydownBudget+remainder === residual.
+export function splitResidual(residual, opts={}){
+  const res  = Math.max(0, residual||0);
+  const draw = Math.min(Math.max(0, opts.lifestyleDraw||0), res);
+  const debtCap = opts.totalDebt==null ? Infinity : Math.max(0, opts.totalDebt);
+  const paydownBudget = Math.min((res-draw)*(Math.max(0, opts.paydownPct||0)/100), debtCap);
+  const remainder = res - draw - paydownBudget;
+  return {draw, paydownBudget, remainder};
+}
+
+// =============================================================================
 // DISPOSITION MODEL (v3.1.0)  --  per-property sale / 1031 tax math
 // =============================================================================
 export const DISPO_DEFAULTS = {
@@ -322,10 +361,18 @@ export function buildScenario(p) {
   let debtCleared = p.payOffHI ? true : false;
   let debtClearedYr = p.payOffHI ? BASE.startYear-1 : null;
 
-  const flr=p.famLoanRate/12;
-  const famLoanMoPmt=p.famLoanAmt>0
-    ?p.famLoanAmt*(flr*Math.pow(1+flr,BASE.famLoanMonths))/(Math.pow(1+flr,BASE.famLoanMonths)-1)
-    :0;
+  // v3.2.0 generalized loan segments (replaces famLoanAmt/famLoanRate)
+  const loans = (p.loans||[]).map(l=>({
+    label:  l.label||'Loan',
+    rate:   l.rate||0,
+    amount: l.amount||0,
+    includeInSweep: !!l.includeInSweep,
+    pmt:    loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
+    startAbs: Math.max(0, ((l.startYear||BASE.startYear)-BASE.startYear)*12 + ((l.startMonth||6)-6)),
+    bal: 0, started:false,
+  }));
+  const sweepLoanQ = ()=>loans.filter(L=>L.includeInSweep && L.bal>0)
+    .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
 
   // -----------------------------------------------------------------
   // v3.1.0 dispositions (per-property sale / 1031)
@@ -461,7 +508,8 @@ export function buildScenario(p) {
   if(settleNeed > 0){
     yearCashSub[settleYr] = (yearCashSub[settleYr] || 0) + settleNeed;
   }
-  const paydownByYear = {};
+  const paydownByYear = {}, drawByYear = {}, wfDebtByYear = {}, wfSavByYear = {};
+  const paydownDetailByYear = {}, loanStartsByYear = {}, loanPayoffsByYear = {};
 
   // IRMAA fires 2 yrs after any taxable dispo (mode != 'full_1031', recognized gain > 0)
   const irmaaYears = new Set();
@@ -478,27 +526,49 @@ export function buildScenario(p) {
     const keepDuplex   = cal < duplexYr;
     const lafRenting   = p.lafRental && keepLafOwned && cal < lafStopYr;
 
-    // -- HI paydown (§4.5): apply BEFORE this year's monthly debt loop --
-    if(!p.payOffHI && yearCashAdd[cal] != null){
+    // -- v3.2.0 residual routing at the sale-year boundary, via the SHARED
+    //    helpers (splitResidual + planHiPaydown) so the monthly wfData block
+    //    applies the identical plan: (a) lifestyle draw, (b) HI paydown
+    //    avalanche (Nolan included -- his 5-month payment grace delays
+    //    minimums, not lump-sum payoff), (c) remainder -> waterfall.
+    //    Annual approximation of (c): reserve buckets aren't modeled here, so
+    //    the one-time inflow goes straight to the debt sweep; what debt
+    //    doesn't absorb becomes sweep savings (chartData compounds it). --
+    if(yearCashAdd[cal] != null){
       const residual = Math.max(0, (yearCashAdd[cal] - (yearCashSub[cal]||0)));
-      const paydownPct = (p.hiPaydownPct || 0) / 100;
-      const totalHI = ccBal + sophiaBal + nolanBal;
-      let paydownAmt = Math.min(residual * paydownPct, totalHI);
-      if(paydownAmt > 0){
-        const paydownQ = [
-          {g:()=>ccBal,     s:(v)=>{ccBal=v;},     r:ccRate},
-          {g:()=>sophiaBal, s:(v)=>{sophiaBal=v;}, r:sophiaRate},
-          {g:()=>nolanBal,  s:(v)=>{nolanBal=v;},  r:nolanRate},
-        ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
-        let payLeft = paydownAmt;
-        for(const loan of paydownQ){
-          if(payLeft<=0) break;
-          const pay = Math.min(payLeft, loan.g());
-          loan.s(loan.g()-pay);
-          payLeft -= pay;
+      const hiBal = p.payOffHI ? 0 : ccBal + sophiaBal + nolanBal;
+      const totalDebt = hiBal + loans.reduce((s,L)=>s+(L.includeInSweep?L.bal:0),0);
+      const split = splitResidual(residual, {
+        lifestyleDraw: cal===settleYr ? (p.settleLifestyleDraw||0) : 0,
+        paydownPct: p.hiPaydownPct||0,
+        totalDebt,
+      });
+      const mkDebts = ()=>[
+        ...(!p.payOffHI ? [
+          {key:'cc',     balance:ccBal,     rate:ccRate},
+          {key:'sophia', balance:sophiaBal, rate:sophiaRate},
+          {key:'nolan',  balance:nolanBal,  rate:nolanRate},
+        ]:[]),
+        ...loans.filter(L=>L.includeInSweep && L.bal>0)
+          .map(L=>({key:'loan:'+L.label, balance:L.bal, rate:L.rate})),
+      ];
+      const applyPlan = (plan)=>{
+        for(const [key,pay] of Object.entries(plan.perDebt)){
+          if(key==='cc')          ccBal     = Math.max(0, ccBal-pay);
+          else if(key==='sophia') sophiaBal = Math.max(0, sophiaBal-pay);
+          else if(key==='nolan')  nolanBal  = Math.max(0, nolanBal-pay);
+          else { const L=loans.find(l=>'loan:'+l.label===key); if(L) L.bal=Math.max(0,L.bal-pay); }
         }
-        paydownByYear[cal] = paydownAmt - payLeft;
-      }
+      };
+      const plan = planHiPaydown(split.paydownBudget, mkDebts());
+      applyPlan(plan);
+      const plan2 = planHiPaydown(split.remainder, mkDebts());
+      applyPlan(plan2);
+      drawByYear[cal]          = split.draw;
+      paydownByYear[cal]       = plan.total;
+      wfDebtByYear[cal]        = plan2.total;
+      wfSavByYear[cal]         = split.remainder - plan2.total;
+      paydownDetailByYear[cal] = plan.perDebt;
     }
 
     const inf    =Math.pow(1+p.inflation,yr);
@@ -562,14 +632,16 @@ export function buildScenario(p) {
     }
     rental += sixthIncome;
 
-    // -- cashAst: rerun from y=0..yr with dispositions, settlement, paydown, draws --
+    // -- cashAst: rerun from y=0..yr. v3.2.0: sale proceeds no longer land in
+    //    invested cash (direct-to-invested shortcut removed) -- they route
+    //    through settlement -> draw -> paydown -> waterfall, and the waterfall
+    //    survivor shows up as sweep savings. Only a settlement year WITHOUT
+    //    covering proceeds still pulls from invested cash (shortfall). --
     let cashAst = 0;
     for(let y=0; y<=yr; y++){
       const yCal = BASE.startYear + y;
-      cashAst += (yearCashAdd[yCal] || 0);
-      cashAst -= (yearCashSub[yCal] || 0);
-      cashAst -= (paydownByYear[yCal] || 0);
-      // Floor at 0: if settlement/paydown exceeds available cash, the shortfall
+      cashAst -= Math.max(0, (yearCashSub[yCal]||0) - (yearCashAdd[yCal]||0));
+      // Floor at 0: if the settlement exceeds available cash, the shortfall
       // is funded outside the model (loan / retirement acct / deferral). Not modeled explicitly.
       if(cashAst < 0) cashAst = 0;
       if(y>0) cashAst *= (1+p.investReturn);
@@ -578,7 +650,7 @@ export function buildScenario(p) {
       }
     }
 
-    // Lifestyle draws as income (no more sale-year draw under v3.1.0)
+    // Lifestyle draws as income + v3.2.0 settlement lifestyle draw (from residual)
     let drawInc = 0;
     for(const d of (p.lifestyleDraws||[])){
       if(d && yr===d.yr && d.amount>0){
@@ -586,6 +658,7 @@ export function buildScenario(p) {
         drawInc += Math.min(d.amount, preDraw);
       }
     }
+    drawInc += (drawByYear[cal] || 0);
     const totalIncome=pension+workInc+(yourSs+brendaSs)*12+rental+drawInc;
 
     // -- NW pieces (per-property, gated) --
@@ -628,29 +701,54 @@ export function buildScenario(p) {
     const _fixedMo= _mtg0 + _hlth0 + _propC0 + _core0 + _maint0 + taxAnnual/12;
     const _baseDI = _incMo - _fixedMo;
 
-    if(!p.payOffHI){
-      for(let mo=0;mo<12;mo++){
-        const absMo=yr*12+mo;
-        if(absMo<5){ nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)); }
-        else{ nolanActive=true; }
-        const _minCC0  = ccBal>0?ccMin:0;
-        const _minSoph0= sophiaBal>0?sophiaMin:0;
-        const _minNol0 = nolanActive&&nolanBal>0?nolanMin:0;
-        const _minsMo  = _minCC0+_minSoph0+_minNol0;
-        if(ccBal>0){    ccBal    =Math.max(0,ccBal   *(1+ccRate/12)   -_minCC0); }
-        if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate/12)-_minSoph0);}
-        if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
-        const _famMo = absMo<BASE.famLoanMonths ? famLoanMoPmt : 0;
-        const loopDebt=ccBal+sophiaBal+nolanBal;
-        const _avail = _baseDI - _minsMo - _famMo;
-        const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
-        let xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
-        const q=[
-          {g:()=>ccBal,    s:(v)=>{ccBal=v;},    r:ccRate},
-          {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;}, r:sophiaRate},
-          ...(nolanActive?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate}]:[]),
-        ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
-        for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
+    // Start-of-year loan balance (loans starting this year count at full amount)
+    const loansBalPre = loans.reduce((s,L)=>s + (L.started ? L.bal : (L.startAbs < (yr+1)*12 ? L.amount : 0)), 0);
+    let loanPmtYrTotal = 0;
+    for(let mo=0;mo<12;mo++){
+      const absMo=yr*12+mo;
+      // -- v3.2.0 loans: step monthly regardless of HI debt state --
+      let _loanMo = 0;
+      for(const L of loans){
+        if(!L.started && absMo>=L.startAbs && L.amount>0){
+          L.bal=L.amount; L.started=true;
+          (loanStartsByYear[cal]=loanStartsByYear[cal]||[]).push(L.label);
+        }
+        if(L.bal>0){
+          L.bal *= (1+L.rate/12);
+          const pay = Math.min(L.pmt, L.bal);
+          L.bal -= pay;
+          _loanMo += pay;
+          if(L.bal < 0.5) L.bal = 0;
+        }
+      }
+      loanPmtYrTotal += _loanMo;
+      if(p.payOffHI) continue;
+      if(absMo<5){ nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)); }
+      else{ nolanActive=true; }
+      const _minCC0  = ccBal>0?ccMin:0;
+      const _minSoph0= sophiaBal>0?sophiaMin:0;
+      const _minNol0 = nolanActive&&nolanBal>0?nolanMin:0;
+      const _minsMo  = _minCC0+_minSoph0+_minNol0;
+      if(ccBal>0){    ccBal    =Math.max(0,ccBal   *(1+ccRate/12)   -_minCC0); }
+      if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate/12)-_minSoph0);}
+      if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
+      const loopDebt=ccBal+sophiaBal+nolanBal;
+      const _avail = _baseDI - _minsMo - _loanMo;
+      const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
+      let xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
+      const q=[
+        {g:()=>ccBal,    s:(v)=>{ccBal=v;},    r:ccRate},
+        {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;}, r:sophiaRate},
+        ...(nolanActive?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate}]:[]),
+        ...sweepLoanQ(),
+      ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
+      for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
+    }
+    // Loan payoff events from state (catches scheduled, sweep, and boundary-paydown payoffs)
+    for(const L of loans){
+      if(L.started && L.bal<=0.5 && !L.payoffAnnounced){
+        L.bal=0; L.payoffAnnounced=true;
+        (loanPayoffsByYear[cal]=loanPayoffsByYear[cal]||[]).push(L.label);
       }
     }
     const hiDebt=p.payOffHI?0:ccBal+sophiaBal+nolanBal;
@@ -674,8 +772,7 @@ export function buildScenario(p) {
     if(keepDuplex)   maint += BASE.duplexValue*p.maintRate*pinf;
     if(keepLafOwned) maint += BASE.lafayetteValue*p.maintRate*pinf;
     if(keepPrimary)  maint += BASE.primaryValue*p.maintRate*pinf;
-    const famLoanAnnual=yr===0?famLoanMoPmt*Math.min(12,BASE.famLoanMonths)
-                       :yr===1?famLoanMoPmt*Math.max(0,BASE.famLoanMonths-12):0;
+    const famLoanAnnual=loanPmtYrTotal;   // v3.2.0: all loan payments this year
     const minDebt=p.payOffHI?0:(
       (ccBal>0?ccMin:0)+(sophiaBal>0?sophiaMin:0)+
       (nolanActive&&nolanBal>0?nolanMin:0)
@@ -686,20 +783,15 @@ export function buildScenario(p) {
     const splitProtect = Math.max(p.diCap*12, baseDI*(p.lifestyleSplit/100));
     const accel  =(!p.payOffHI&&hiDebt>0)?Math.max(0,baseDI-splitProtect):0;
     const surplusAboveProtect = Math.max(0, baseDI - splitProtect);
-    const annualSweepToSav = debtCleared ? surplusAboveProtect : 0;
+    // v3.2.0: waterfall survivor of the sale-year remainder counts as sweep savings
+    const annualSweepToSav = (debtCleared ? surplusAboveProtect : 0) + (wfSavByYear[cal]||0);
     const totalOut=baseOut+accel;
     const surplus =totalIncome-totalOut;
     const passive =pension+(yourSs+brendaSs)*12+rental;
     const reqWork =Math.max(0,totalOut-passive);
     const nw      =Math.round((dplxVal+lafVal+primVal+cashAst-dplxBal-lafBal-primBal-hiDebt)/1000);
 
-    const _flMos = Math.min(yr*12, BASE.famLoanMonths);
-    const famLoanBal = (p.famLoanAmt>0 && famLoanMoPmt>0 && _flMos<BASE.famLoanMonths)
-      ? Math.max(0, Math.round(
-          (p.famLoanAmt*Math.pow(1+flr,_flMos)
-           - (flr>0 ? famLoanMoPmt*(Math.pow(1+flr,_flMos)-1)/flr : famLoanMoPmt*_flMos)
-          ) / 1000))
-      : 0;
+    const famLoanBal = Math.round(loansBalPre/1000);   // v3.2.0: all loans, start-of-year
 
     // Per-year disposition summary (nonzero only when a sale happens this year)
     const dispoTaxYr = (dispoRes.sixth.year===cal    ? dispoRes.sixth.totalTax    : 0)
@@ -749,6 +841,13 @@ export function buildScenario(p) {
       dispoNet: Math.round(yearCashAdd[cal] || 0),
       settlementOut: Math.round(yearCashSub[cal] || 0),
       hiPaydown: Math.round(paydownByYear[cal] || 0),
+      // v3.2.0 residual 3-way split + loan event fields
+      settleDraw:   Math.round(drawByYear[cal] || 0),
+      wfDebtPaid:   Math.round(wfDebtByYear[cal] || 0),
+      wfToSavings:  Math.round(wfSavByYear[cal] || 0),
+      hiPaydownDetail: paydownDetailByYear[cal] || null,
+      loanStarts:   loanStartsByYear[cal] || [],
+      loanPayoffs:  loanPayoffsByYear[cal] || [],
     });
   }
   // Expose disposition details for reconciliation card / UI

@@ -522,10 +522,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v3.1.2"', async ({ page }) => {
+  test('E5 — Version header shows "v3.2.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.2').first()).toBeVisible();
-    console.log('  Version badge confirmed: v3.1.2');
+    await expect(page.locator('text=v3.2.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v3.2.0');
   });
 
 });
@@ -975,10 +975,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v3.1.2', async ({ page }) => {
+  test('L1 — Version header shows v3.2.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.2').first()).toBeVisible();
-    console.log('  L1 — Version v3.1.2 confirmed');
+    await expect(page.locator('text=v3.2.0').first()).toBeVisible();
+    console.log('  L1 — Version v3.2.0 confirmed');
   });
 
   test('L2 — payOffHI toggle hidden when sellYear is 2055 (never sell)', async ({ page }) => {
@@ -1274,9 +1274,9 @@ test.describe('Group M — v3.1.1 Dispositions', () => {
     expect(result.ccBal).toBe(0);
   });
 
-  test('M11 — Version badge shows v3.1.2', async ({ page }) => {
+  test('M11 — Version badge shows v3.2.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.1.2').first()).toBeVisible();
+    await expect(page.locator('text=v3.2.0').first()).toBeVisible();
   });
 
   test('M12 — window.__engine exposed with disposeAsset/taxRecognized', async ({ page }) => {
@@ -1595,6 +1595,229 @@ test.describe('Group O — v3.1.2 Settlement breakdown', () => {
     });
     expect(ok).toBe(true);
     console.log('  O4 — breakdown box precedes HI paydown slider');
+  });
+
+});
+
+// ─── Group P: v3.2.0 unified paydown, 3-way split, loans, transparency ──────
+
+test.describe('Group P — v3.2.0 Paydown parity + split + loans', () => {
+
+  async function setRange(locator, value) {
+    await locator.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(value));
+  }
+
+  // Reproduce the "sell15th" pin: 15th St sold in 2026, settlement 2026
+  async function sellFifteenth2026(page) {
+    const card = page.locator('[data-testid="dispo-fifteenth-card"]');
+    await card.scrollIntoViewIfNeeded();
+    await card.getByRole('button', { name: 'Sell', exact: true }).click();
+    await page.waitForTimeout(200);
+    await setRange(card.locator('input[type="range"]').first(), 2026);
+    await page.waitForTimeout(300);
+  }
+
+  test('P1 — BUG FIX: both engines apply the identical per-debt paydown plan (Nolan included)', async ({ page }) => {
+    await loadApp(page);
+    await sellFifteenth2026(page);
+    const r = await page.evaluate(() => {
+      const {planHiPaydown, splitResidual} = window.__engine;
+      const ann = window.__liveRows, wf = window.__wfData;
+      const d = ann.dispoResults.fifteenth;
+      const residual = Math.max(0, d.afterTaxNetProceeds - 525000);
+      const split = splitResidual(residual, {lifestyleDraw:0, paydownPct:100,
+        totalDebt: 60000+58057+141117});
+      const expected = planHiPaydown(split.paydownBudget, [
+        {key:'cc', balance:60000, rate:0.14},
+        {key:'sophia', balance:58057, rate:0.0814},
+        {key:'nolan', balance:141117, rate:0.084},
+      ]).perDebt;
+      const annDetail = ann.find(x=>x.cal===2026)?.hiPaydownDetail || {};
+      const wfDetail  = (wf.find(x=>x.paydownDetail) || {}).paydownDetail || {};
+      return {expected, annDetail, wfDetail, residual};
+    });
+    console.log('  P1 — residual $'+Math.round(r.residual/1000)+'K, plan: '+JSON.stringify(
+      Object.fromEntries(Object.entries(r.expected).map(([k,v])=>[k,Math.round(v)]))));
+    // The old monthly bug: Nolan excluded from the queue -> $141K persisted.
+    expect(r.expected.nolan||0).toBeGreaterThan(0);
+    for(const k of ['cc','sophia','nolan']){
+      expect(Math.abs((r.annDetail[k]||0) - (r.expected[k]||0))).toBeLessThan(1);
+      expect(Math.abs((r.wfDetail[k]||0)  - (r.expected[k]||0))).toBeLessThan(1);
+    }
+  });
+
+  test('P2 — REGRESSION: debt-clearing paydown -> annual year-end === monthly December, every year', async ({ page }) => {
+    await loadApp(page);
+    await sellFifteenth2026(page);
+    // Drop settlement need to the slider minimum so the residual clears ALL HI debt
+    const needSlider = page.locator('[data-testid="settlement-card"] input[type="range"]').first();
+    await needSlider.scrollIntoViewIfNeeded();
+    await setRange(needSlider, 262500);
+    await page.waitForTimeout(300);
+    const r = await page.evaluate(() => {
+      const ann = window.__liveRows, wf = window.__wfData;
+      const rows = [];
+      for(const a of ann){
+        const dec = wf.filter(w=>w.cal.endsWith(String(a.cal).slice(2))).pop();
+        if(dec) rows.push({yr:a.cal, annual:a.hiDebt, monthly:dec.hiDebt});
+      }
+      return rows;
+    });
+    console.log('  P2 — trajectories: '+r.slice(0,5).map(x=>x.yr+':'+x.annual+'/'+x.monthly).join(' '));
+    expect(r.length).toBeGreaterThan(10);
+    for(const row of r){
+      expect(Math.abs(row.annual - row.monthly)).toBeLessThanOrEqual(1);  // $K rounding
+      expect(row.annual).toBe(0);   // paydown clears everything at the 2026 boundary
+    }
+  });
+
+  test('P3 — CONSERVATION: lifestyle draw + paydown + waterfall === residual', async ({ page }) => {
+    await loadApp(page);
+    await sellFifteenth2026(page);
+    // Set the lifestyle draw to $50K
+    const drawSlider = page.locator('[data-testid="settle-draw-slider"] input[type="range"]');
+    await drawSlider.scrollIntoViewIfNeeded();
+    await setRange(drawSlider, 50000);
+    await page.waitForTimeout(300);
+    const vals = {
+      draw:    Number(await page.locator('[data-testid="settle-draw-val"]').getAttribute('data-val')),
+      paydown: Number(await page.locator('[data-testid="settle-paydown-val"]').getAttribute('data-val')),
+      wf:      Number(await page.locator('[data-testid="settle-wf-val"]').getAttribute('data-val')),
+      residual:Number(await page.locator('[data-testid="settle-residual"]').getAttribute('data-val')),
+    };
+    console.log('  P3 — '+JSON.stringify(vals));
+    expect(vals.draw).toBe(50000);
+    expect(Math.abs((vals.draw + vals.paydown + vals.wf) - vals.residual)).toBeLessThanOrEqual(3);
+    // Draw shows up in the monthly Events column
+    const drawEvt = await page.evaluate(() =>
+      window.__wfData.some(r => r.events.some(e => /Settlement lifestyle draw/.test(e))));
+    expect(drawEvt).toBe(true);
+  });
+
+  test('P4 — WATERFALL: remainder fills buckets to caps; sweep reduces debt beyond the slider', async ({ page }) => {
+    await loadApp(page);
+    const baselineDec26 = await page.evaluate(() =>
+      window.__wfData.filter(w=>w.cal.indexOf("'26")>=0).pop().hiDebt);
+    await sellFifteenth2026(page);
+    // Paydown slider to 0% -- debt should STILL drop via the waterfall remainder
+    const pdSlider = page.locator('[data-testid="settle-paydown-slider"] input[type="range"]');
+    await pdSlider.scrollIntoViewIfNeeded();
+    await setRange(pdSlider, 0);
+    await page.waitForTimeout(300);
+    const r = await page.evaluate(() => {
+      const wf = window.__wfData;
+      const saleRow = wf.find(x=>x.paydownDetail);
+      const dec26 = wf.filter(w=>w.cal.indexOf("'26")>=0).pop();
+      return {
+        rdBal: saleRow.rdBal, obBal: saleRow.obBal, oneTime: saleRow.oneTimeSweep,
+        dec26: dec26.hiDebt,
+      };
+    });
+    console.log('  P4 — sale month rd=$'+r.rdBal+' ob=$'+r.obBal+', oneTimeSweep=$'+Math.round(r.oneTime/1000)+'K, Dec26 debt $'+r.dec26+'K vs baseline $'+baselineDec26+'K');
+    expect(r.rdBal).toBe(10000);            // rainy day filled to cap
+    expect(r.obBal).toBe(35000);            // op buffer filled to cap
+    expect(r.oneTime).toBeGreaterThan(0);   // survivor joined the sweep
+    expect(r.dec26).toBeLessThan(baselineDec26 - 20);  // direction: debt reduced beyond 0% slider
+  });
+
+  test('P5 — WATERFALL: with debt cleared, remainder reaches savings', async ({ page }) => {
+    await loadApp(page);
+    await sellFifteenth2026(page);
+    const needSlider = page.locator('[data-testid="settlement-card"] input[type="range"]').first();
+    await needSlider.scrollIntoViewIfNeeded();
+    await setRange(needSlider, 262500);   // residual clears all debt, remainder survives
+    await page.waitForTimeout(300);
+    const r = await page.evaluate(() => {
+      const wf = window.__wfData;
+      const saleRow = wf.find(x=>x.paydownDetail);
+      return {savingsAcc: saleRow.savingsAcc, sweepToSavings: saleRow.sweepToSavings,
+              rdBal: saleRow.rdBal, obBal: saleRow.obBal, hiDebt: saleRow.hiDebt};
+    });
+    console.log('  P5 — sale month: debt $'+r.hiDebt+'K, savings +$'+Math.round(r.sweepToSavings/1000)+'K');
+    expect(r.hiDebt).toBe(0);
+    expect(r.sweepToSavings).toBeGreaterThan(10000);   // remainder (post-buckets) reached savings
+  });
+
+  test('P6 — LOANS back-compat: famLoanAmt pins convert; famLoanAmt 0 -> no loans, identical output', async ({ page }) => {
+    await loadApp(page);
+    const r = await page.evaluate(() => {
+      const {buildScenario, makeParams} = window.__engine;
+      const key = rows => JSON.stringify(rows.map(x=>[x.famLoan,x.famLoanBal,x.surplus,x.nw]));
+      const legacy0   = buildScenario(makeParams({famLoanAmt:0}));
+      const explicit0 = buildScenario(makeParams({loans:[]}));
+      const legacy25  = buildScenario(makeParams({famLoanAmt:25000, famLoanRate:0.075}));
+      const defRun    = buildScenario(makeParams({}));
+      return {
+        zeroIdentical: key(legacy0)===key(explicit0),
+        zeroHasNoLoans: legacy0.every(x=>x.famLoan===0 && x.famLoanBal===0),
+        legacyMatchesDefault: key(legacy25)===key(defRun),
+        defaultHasLoan: defRun[0].famLoanBal>0,
+      };
+    });
+    console.log('  P6 — '+JSON.stringify(r));
+    expect(r.zeroIdentical).toBe(true);
+    expect(r.zeroHasNoLoans).toBe(true);
+    expect(r.legacyMatchesDefault).toBe(true);
+    expect(r.defaultHasLoan).toBe(true);
+  });
+
+  test('P7 — LOANS: includeInSweep joins the avalanche and pays off early', async ({ page }) => {
+    await loadApp(page);
+    const r = await page.evaluate(() => {
+      const {buildScenario, makeParams, planHiPaydown} = window.__engine;
+      const loan = {label:'HELOC', amount:50000, startYear:2026, startMonth:6, months:120, rate:0.20};
+      // lifestyleSplit 0 + diCap 0 -> all surplus sweeps, avalanche effect visible early
+      const swept = buildScenario(makeParams({lifestyleSplit:0, diCap:0, loans:[Object.assign({},loan,{includeInSweep:true})]}));
+      const sched = buildScenario(makeParams({lifestyleSplit:0, diCap:0, loans:[Object.assign({},loan,{includeInSweep:false})]}));
+      const yr = 2031;
+      const plan = planHiPaydown(70000, [
+        {key:'cc', balance:60000, rate:0.14},
+        {key:'loan:HELOC', balance:50000, rate:0.20},
+      ]);
+      return {
+        sweptBal: swept.find(x=>x.cal===yr).famLoanBal,
+        schedBal: sched.find(x=>x.cal===yr).famLoanBal,
+        heloFirst: plan.order[0]==='loan:HELOC',
+        heloPaid: Math.round(plan.perDebt['loan:HELOC']||0),
+      };
+    });
+    console.log('  P7 — 2031 balance: swept $'+r.sweptBal+'K vs scheduled $'+r.schedBal+'K; 20% loan first in avalanche: '+r.heloFirst);
+    expect(r.heloFirst).toBe(true);
+    expect(r.heloPaid).toBe(50000);
+    expect(r.sweptBal).toBeLessThan(r.schedBal);   // avalanche retired it faster than schedule
+  });
+
+  test('P8 — Month-by-Month fixed breakdown: columns sum to Fixed; toggle default off', async ({ page }) => {
+    await loadApp(page);
+    const sums = await page.evaluate(() =>
+      window.__wfData.map(r => Math.abs(
+        (r.fc_mtg+r.fc_propCost+r.fc_health+r.fc_core+r.fc_famLoan+r.fc_hiMins+r.fc_tax) - r.tier1)));
+    expect(Math.max.apply(null, sums)).toBeLessThanOrEqual(4);   // per-component rounding only
+    await page.getByRole('button', { name: 'Cash Flow' }).click();
+    await page.waitForTimeout(400);
+    await expect(page.locator('th').filter({ hasText: 'Prop T/I' })).toHaveCount(0);   // default off
+    const tgl = page.locator('[data-testid="mbm-breakdown-toggle"]');
+    await tgl.scrollIntoViewIfNeeded();
+    await tgl.click();
+    await page.waitForTimeout(300);
+    await expect(page.locator('th').filter({ hasText: 'Prop T/I' })).toHaveCount(1);
+    console.log('  P8 — fixed columns sum to tier1 (max drift $'+Math.max.apply(null, sums)+'), toggle works');
+  });
+
+  test('P9 — TIMELINE: Sophia off-plan, You->Medicare, loan events present (from shared sources)', async ({ page }) => {
+    await loadApp(page);
+    const tl = page.locator('text=Financial Events Timeline');
+    await tl.scrollIntoViewIfNeeded();
+    await expect(page.getByText('Sophia → off health insurance').first()).toBeVisible();
+    await expect(page.getByText('You → Medicare').first()).toBeVisible();
+    await expect(page.getByText('Family loan starts').first()).toBeVisible();
+    await expect(page.getByText('Family loan paid off').first()).toBeVisible();
+    console.log('  P9 — timeline includes Medicare/off-plan/loan events');
   });
 
 });

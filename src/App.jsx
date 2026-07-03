@@ -1,12 +1,12 @@
-// v3.1.2 -- settlement card reorder, itemized proceeds breakdown with offset audit trail
+// v3.2.0 -- unified HI paydown, residual 3-way split, generalized loan segments, fixed-cost breakdown, timeline event alignment
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments } from "./engine.js";
-import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS } from "./defaults.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments, planHiPaydown, splitResidual, loanMonthlyPmt } from "./engine.js";
+import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS, DEFAULT_LOANS_SC, migrateScLoans } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
@@ -15,6 +15,7 @@ if (typeof window !== 'undefined') {
     DISPO_DEFAULTS, makeParams, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS,
     strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax,
     sixthSegmentGross, validateSixthSegments,
+    planHiPaydown, splitResidual, loanMonthlyPmt,
   };
 }
 import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_W, SVG_H, rNodePos } from "./relationships-data.js";
@@ -55,7 +56,7 @@ export default function App(){
     ssAge, workPts, lifestyleSplit, strRent, bottomRent, ltrRent, sixthRent, sixthMonths,
     reApp, rentGr, cpi, healthCpi, propCpi, taxEnabled, investRet, lifestyleDraws, strSchedule, mtrSchedule,
     ccBal, ccRate, ccMin, sophiaBal, sophiaRate, sophiaMin, nolanBal, nolanRate, nolanMin,
-    famLoanAmt, famLoanRate,
+    loans=DEFAULT_LOANS_SC,
     rdTopUp, rdCap, obTopUp, obCap, discFloor, fcfSchedule, sweepDelay, struct6, struct15, structLaf, maintStr, bufferMode,
     strPlatformPct=3, strCleanPct=4, mgrPct=0,
     duplex15thBasis=600_000, lafayetteBasis=300_000,
@@ -63,7 +64,7 @@ export default function App(){
     dispositions,
     settlementNeed=525_000, settlementYear=2026, gainOffsetPct=0,
     sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true, requireSameYearForOffset=true,
-    hiPaydownPct=100, caGainCap=1_200_000,
+    hiPaydownPct=100, caGainCap=1_200_000, settleLifestyleDraw=0,
     sixthIncomeMode='none', sixthSTRMonthly=9_000, sixthSTRSchedule=[],
     sixthSTRStartYear=2026, sixthSTRStopYear=2055, sixthSTRStopOnDebtClear=true,
     sixthIncomeSegments=[],
@@ -143,8 +144,8 @@ export default function App(){
   const setNolanBal       = v=>setSc(s=>({...s,nolanBal:v}));
   const setNolanRate      = v=>setSc(s=>({...s,nolanRate:v}));
   const setNolanMin       = v=>setSc(s=>({...s,nolanMin:v}));
-  const setFamLoanAmt     = v=>setSc(s=>({...s,famLoanAmt:v}));
-  const setFamLoanRate    = v=>setSc(s=>({...s,famLoanRate:v}));
+  const setLoans          = v=>setSc(s=>({...s,loans:typeof v==="function"?v(migrateScLoans(s)):v}));
+  const setSettleLifestyleDraw = v=>setSc(s=>({...s,settleLifestyleDraw:v}));
   const setRdTopUp        = v=>setSc(s=>({...s,rdTopUp:v}));
   const setRdCap          = v=>setSc(s=>({...s,rdCap:v}));
   const setObTopUp        = v=>setSc(s=>({...s,obTopUp:v}));
@@ -190,7 +191,7 @@ export default function App(){
       investReturn:sc.investRet/100,
       lifestyleDraws:(sc.lifestyleDraws||[]).filter(d=>d.enabled),
       ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
-      famLoanRate:sc.famLoanRate/100,
+      loans:migrateScLoans(snap).map(l=>({...l, rate:(l.rate||0)/100})),   // legacy famLoan pins auto-convert
       strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
     }));
   }
@@ -218,6 +219,7 @@ export default function App(){
   const [settleOpen,    setSettleOpen]    = useState({});     // v3.1.2 per-property disclosure in settlement breakdown
   // CF waterfall state now in sc object (see setSc setters above)
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
+  const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Fixed-cost columns in month table
   const [nextId,  setNextId]  = useState(()=>{
     try{ const s=localStorage.getItem('retirement_sim_nextid'); return s?parseInt(s):1; }catch(e){return 1;}
   });
@@ -256,7 +258,7 @@ export default function App(){
     investReturn:sc.investRet/100,
     lifestyleDraws:sc.lifestyleDraws.filter(d=>d.enabled),
     ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
-    famLoanRate:sc.famLoanRate/100,
+    loans:migrateScLoans(sc).map(l=>({...l, rate:(l.rate||0)/100})),
     strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
   }),[sc, diCap, maintRate]);
 
@@ -279,7 +281,7 @@ export default function App(){
         strSchedule:editedSc.strSchedule||[],
         mtrSchedule:editedSc.mtrSchedule||[],
       ccRate:editedSc.ccRate/100, sophiaRate:editedSc.sophiaRate/100, nolanRate:editedSc.nolanRate/100,
-      famLoanRate:editedSc.famLoanRate/100,
+      loans:migrateScLoans(editedSc).map(l=>({...l, rate:(l.rate||0)/100})),
       strPlatformPct:(editedSc.strPlatformPct||3)/100, strCleanPct:(editedSc.strCleanPct||4)/100, mgrPct:(editedSc.mgrPct||0)/100,
       maintRate:(editedSc.struct6*1000*editedSc.maintStr/100+editedSc.struct15*1000*editedSc.maintStr/100+editedSc.structLaf*1000*editedSc.maintStr/100)/
                (BASE.primaryValue+BASE.duplexValue+BASE.lafayetteValue)||0.005,
@@ -317,7 +319,14 @@ export default function App(){
     }
     if(Math.abs(settleData.residual - Math.max(0, settleData.totalProceeds - settlementNeed)) > 1)
       console.warn(`[settlement audit] residual ($${Math.round(settleData.residual)}) != max(0, Σ afterTaxNetProceeds - settlementNeed)`);
-  },[settleData,settlementNeed]);
+    // v3.2.0 conservation: draw + paydown + waterfall === residual
+    const rSet = liveRows.find(r=>r.cal===settlementYear);
+    if(rSet && settleData.sellers.length>0){
+      const splitSum = (rSet.settleDraw||0)+(rSet.hiPaydown||0)+(rSet.wfDebtPaid||0)+(rSet.wfToSavings||0);
+      if(Math.abs(splitSum - settleData.residual) > 2)
+        console.warn(`[settlement audit] 3-way split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
+    }
+  },[settleData,settlementNeed,liveRows,settlementYear]);
 
   // -- Cash flow waterfall engine ----------------------------
   const wfData = useMemo(()=>{
@@ -360,11 +369,16 @@ export default function App(){
     } catch(e) {}
     const _paidYears = new Set();  // years where HI paydown has been applied
 
-    // Family loan payment
-    const flr = famLoanRate/100/12;
-    const famPmt = famLoanAmt>0
-      ? famLoanAmt*(flr*Math.pow(1+flr,BASE.famLoanMonths))/(Math.pow(1+flr,BASE.famLoanMonths)-1)
-      : 0;
+    // v3.2.0 generalized loans -- monthly state (rates already decimal in liveParams)
+    const _loans = (liveParams.loans||[]).map(l=>({
+      label: l.label||'Loan', rate: l.rate||0, amount: l.amount||0,
+      includeInSweep: !!l.includeInSweep,
+      pmt: loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
+      startAbs: Math.max(0, ((l.startYear||2026)-2026)*12 + ((l.startMonth||6)-6)),
+      bal: 0, started:false, startAnnounced:false, payoffAnnounced:false,
+    }));
+    const _sweepLoanQ = ()=>_loans.filter(L=>L.includeInSweep && L.bal>0)
+      .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
 
     // Running balances
     let ccBal    = payOffHI ? 0 : (liveParams.ccBal||60000);
@@ -396,27 +410,53 @@ export default function App(){
       const rg     = Math.pow(1+liveParams.rentGrowth,  mo/12);
       const pinf   = Math.pow(1+(liveParams.propCpi||liveParams.propInflation), mo/12);
 
-      // -- v3.1.0 HI paydown (§4.5): applied once at start of dispo year --
-      const _nolanOnNow = mo>=5;
-      if(!payOffHI && (_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
+      // -- v3.2.0 residual routing, applied once at the start of the dispo year
+      //    via the SHARED helpers (identical plan to the annual engine):
+      //    (a) lifestyle draw, (b) HI paydown avalanche (Nolan included --
+      //    his 5-month grace delays minimum payments, not lump-sum payoff),
+      //    (c) remainder -> waterfall: reserves to caps, then sweep/savings. --
+      let _oneTimeSweep = 0;      // (c) survivor joining this month's sweep
+      let _settleDrawMo = 0;      // (a) one-time lifestyle draw
+      let _payDetailMo  = null;   // (b) per-debt plan, for tests/audit
+      if((_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
         const residual = Math.max(0, (_yearCashAdd[calYear] - (_yearCashSub[calYear]||0)));
-        const paydownPct = (liveParams.hiPaydownPct || 0) / 100;
-        const totalHI_ = ccBal+sophiaBal+nolanBal;
-        let paydownAmt = Math.min(residual * paydownPct, totalHI_);
-        if(paydownAmt > 0){
-          const pdQ = [
-            {g:()=>ccBal,     s:(v)=>{ccBal=v;},     r:ccRate_},
-            {g:()=>sophiaBal, s:(v)=>{sophiaBal=v;}, r:sophiaRate_},
-            ...(_nolanOnNow?[{g:()=>nolanBal, s:(v)=>{nolanBal=v;}, r:nolanRate_}]:[]),
-          ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
-          let payLeft = paydownAmt;
-          for(const loan of pdQ){
-            if(payLeft<=0) break;
-            const pay = Math.min(payLeft, loan.g());
-            loan.s(loan.g()-pay);
-            payLeft -= pay;
+        const hiBal_ = payOffHI ? 0 : ccBal+sophiaBal+nolanBal;
+        const totalDebt_ = hiBal_ + _loans.reduce((s,L)=>s+(L.includeInSweep?L.bal:0),0);
+        const split = splitResidual(residual, {
+          lifestyleDraw: calYear===(settlementYear||2026) ? (liveParams.settleLifestyleDraw||0) : 0,
+          paydownPct: liveParams.hiPaydownPct||0,
+          totalDebt: totalDebt_,
+        });
+        const mkDebts = ()=>[
+          ...(!payOffHI ? [
+            {key:'cc',     balance:ccBal,     rate:ccRate_},
+            {key:'sophia', balance:sophiaBal, rate:sophiaRate_},
+            {key:'nolan',  balance:nolanBal,  rate:nolanRate_},
+          ]:[]),
+          ..._loans.filter(L=>L.includeInSweep && L.bal>0)
+            .map(L=>({key:'loan:'+L.label, balance:L.bal, rate:L.rate})),
+        ];
+        const applyPlan = (plan)=>{
+          for(const [key,pay] of Object.entries(plan.perDebt)){
+            if(key==='cc')          ccBal     = Math.max(0, ccBal-pay);
+            else if(key==='sophia') sophiaBal = Math.max(0, sophiaBal-pay);
+            else if(key==='nolan')  nolanBal  = Math.max(0, nolanBal-pay);
+            else { const L=_loans.find(l=>'loan:'+l.label===key); if(L) L.bal=Math.max(0,L.bal-pay); }
           }
-        }
+        };
+        const plan = planHiPaydown(split.paydownBudget, mkDebts());
+        applyPlan(plan);
+        _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
+        // (c) fill reserves/buckets to caps, in existing waterfall order
+        let rem = split.remainder;
+        const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
+        res6   += _fill(res6,   maint6Cap);
+        res15  += _fill(res15,  maint15Cap);
+        resLaf += _fill(resLaf, maintLafCap);
+        rdBal  += _fill(rdBal,  rdCap);
+        obBal  += _fill(obBal,  obCap);
+        _oneTimeSweep = rem;    // joins debt sweep if debt remains, else savings
+        _settleDrawMo = split.draw;
         _paidYears.add(calYear);
       }
 
@@ -502,7 +542,18 @@ export default function App(){
       const lafPmt    = lafKeepingFn(calYear)   ? BASE.lafPnI : 0;
       const mtg       = duplxPmt+lafPmt+primPmt;
       const core      = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf;
-      const famLoan   = mo < BASE.famLoanMonths ? famPmt : 0;
+      // v3.2.0 loans: step state; scheduled payments land in Fixed (fc_famLoan key kept)
+      let famLoan = 0;
+      for(const L of _loans){
+        if(!L.started && mo>=L.startAbs && L.amount>0){ L.bal=L.amount; L.started=true; }
+        if(L.bal>0){
+          L.bal *= (1+L.rate/12);
+          const pay = Math.min(L.pmt, L.bal);
+          L.bal -= pay;
+          famLoan += pay;
+          if(L.bal < 0.5) L.bal = 0;
+        }
+      }
       // HI minimums
       if(mo>=5) nolanOn=true;
       const minCC  = ccBal>0?ccMin_:0;
@@ -560,8 +611,10 @@ export default function App(){
       // surplusAboveFloor = the portion above the protected FCF floor
       const surplusAboveFloor = Math.max(0, afterBuckets - cfSplitProtect);
       // While in debt: surplus sweeps debt. When clear: same amount goes to savings.
+      // v3.2.0: the sale-month waterfall remainder joins whichever side applies.
       const hasDebt = hiDebtNow > 0;
-      const sweep = hasDebt ? surplusAboveFloor + maintRedirect : 0;
+      const sweep = hasDebt ? surplusAboveFloor + maintRedirect + _oneTimeSweep : 0;
+      const _oneTimeToSavings = hasDebt ? 0 : _oneTimeSweep;
 
       // Apply interest & payments to debt balances
       const intCC    = ccBal>0     ? ccBal*ccRate_/12       : 0;
@@ -578,6 +631,7 @@ export default function App(){
         {g:()=>ccBal,    s:(v)=>{ccBal=v;},     r:ccRate_},
         {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;},  r:sophiaRate_},
         ...(nolanOn?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate_}]:[]),
+        ..._sweepLoanQ(),   // v3.2.0: includeInSweep loans join the avalanche by rate
       ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
       for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
 
@@ -586,11 +640,12 @@ export default function App(){
       if(debtClearedMo<0 && hiDebtNow<=0) debtClearedMo = mo;
       const debtWasCleared = debtClearedMo >= 0;  // includes pre-cleared (payOffHI)
       const graceDone = debtWasCleared && !hasDebt && (mo - debtClearedMo) >= (sweepDelay||0);
-      // When debt is clear, the sweep amount (surplusAboveFloor) redirects to savings
-      const sweepToSavings = graceDone ? surplusAboveFloor + maintRedirect : 0;
+      // When debt is clear, the sweep amount (surplusAboveFloor) redirects to savings.
+      // The one-time waterfall remainder reaches savings regardless of grace.
+      const sweepToSavings = (graceDone ? surplusAboveFloor + maintRedirect : 0) + _oneTimeToSavings;
       // Compound savingsAcc monthly at investReturn, then add new sweep contribution
       if(savingsAcc>0) savingsAcc *= (1+(liveParams.investReturn||0.055)/12);
-      if(graceDone && sweepToSavings>0) savingsAcc += sweepToSavings;
+      if(sweepToSavings>0) savingsAcc += sweepToSavings;
 
       // Update balances
       rdBal  = Math.min(rdCap,  rdBal+rdAdd);
@@ -601,17 +656,27 @@ export default function App(){
 
       const hiDebtEnd = hiDebtNow;
       // disc = what you actually keep as Free Cash (floor + any kept margin above floor)
-      // sweepToSavings gets the rest; they should always sum to afterBuckets
-      const disc = graceDone
+      // sweepToSavings gets the rest; they should always sum to afterBuckets.
+      // v3.2.0: the one-time settlement lifestyle draw lands here too.
+      const disc = (graceDone
         ? cfSplitProtect   // floor + kept% of surplus; rest going to savings
-        : Math.max(effectiveFloor, afterBuckets - sweep);  // while in debt or grace period
+        : Math.max(effectiveFloor, afterBuckets - (sweep - _oneTimeSweep)))  // while in debt or grace period
+        + _settleDrawMo;
 
       // Detect key events
       const events=[];
-      if(mo===0) events.push("Launch -- family loan starts");
+      if(mo===0) events.push("Launch");
       if(mo===4) events.push("You -> Medicare");
       if(mo===5) events.push("Nolan loan payments begin");
-      if(mo===BASE.famLoanMonths-1) events.push("Family loan paid off!");
+      // v3.2.0 loan events from engine state (scheduled, sweep, and paydown payoffs)
+      for(const L of _loans){
+        if(L.started && !L.startAnnounced){ L.startAnnounced=true; events.push(`${L.label} starts -- $${Math.round(L.pmt).toLocaleString()}/mo`); }
+        if(L.started && L.bal<=0 && !L.payoffAnnounced){ L.payoffAnnounced=true; events.push(`${L.label} paid off!`); }
+      }
+      // v3.2.0 settlement residual routing events
+      if(_settleDrawMo>0) events.push(`Settlement lifestyle draw $${Math.round(_settleDrawMo/1000)}K`);
+      if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche)`);
+      if(_payDetailMo && _payDetailMo.remainder>0) events.push(`$${Math.round(_payDetailMo.remainder/1000)}K residual into waterfall`);
       if(rdBal>=rdCap&&rdBal-rdAdd<rdCap) events.push("Rainy day fund FULL -- redirecting to sweep");
       if(obBal>=obCap&&obBal-obAdd<obCap) events.push("Operating buffer FULL -- redirecting to sweep");
       if(debtClearedMo===mo && mo>0) events.push("ALL HI DEBT CLEARED! 🎉");
@@ -633,6 +698,11 @@ export default function App(){
         interestPaid:Math.round(interestPaid), minPmt:Math.round(minPmt),
         res6:Math.round(res6), res15:Math.round(res15), resLaf:Math.round(resLaf),
         sweepToSavings:Math.round(sweepToSavings), savingsAcc:Math.round(savingsAcc),
+        // v3.2.0 residual routing + loans (for tests/audit and the annual-engine parity check)
+        settleDraw: Math.round(_settleDrawMo),
+        paydownDetail: _payDetailMo ? _payDetailMo.perDebt : null,
+        oneTimeSweep: Math.round(_oneTimeSweep),
+        loansBal: Math.round(_loans.reduce((s,L)=>s+L.bal,0)),
         events,
         // Income breakdown
         pension:Math.round(pension),
@@ -646,8 +716,13 @@ export default function App(){
   },[liveParams,liveRows,dispositions,settlementNeed,settlementYear,
      lafStopYear,lafRental,sixthIncomeMode,topUnit,bottomRent,strRent,ltrRent,sixthRent,sixthMonths,
      workPts,ssAge,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
-     struct6,struct15,structLaf,maintStr,bufferMode,famLoanAmt,famLoanRate,payOffHI,
+     struct6,struct15,structLaf,maintStr,bufferMode,payOffHI,
      strPlatformPct,strCleanPct,mgrPct,strSchedule,mtrSchedule]);  // wfMonths only affects table slice, not engine run
+
+  // v3.2.0: expose both engines' outputs for Playwright parity/consistency tests
+  useEffect(()=>{
+    if(typeof window !== 'undefined'){ window.__wfData = wfData; window.__liveRows = liveRows; }
+  },[wfData, liveRows]);
 
   // -- Chart data ------------------------------------------
   // -- Chart data ------------------------------------------
@@ -884,6 +959,7 @@ export default function App(){
     // v3.1.0: paramSnapshot is sc format (same as SC_DEFAULTS keys).
     // Merge with SC_DEFAULTS so missing fields fall back to defaults.
     const next={...SC_DEFAULTS,...s};
+    next.loans = migrateScLoans(s);   // legacy famLoan pins auto-convert (famLoanAmt 0 -> no loans)
     if(next.lifestyleDraws) next.lifestyleDraws=next.lifestyleDraws.map(d=>({...d,enabled:d.enabled!==false}));
     if(activeSc==="live") setLiveSc(next);
     else setPinScs(ps=>({...ps,[activeSc]:next}));
@@ -894,6 +970,7 @@ export default function App(){
     setPinScs(ps=>{
       if(ps[pin.id]) return ps;
       const next={...SC_DEFAULTS,...(pin.paramSnapshot||{})};
+      next.loans = migrateScLoans(pin.paramSnapshot||{});
       return {...ps,[pin.id]:next};
     });
     setActiveSc(pin.id);
@@ -932,7 +1009,7 @@ export default function App(){
         reAppreciation:updatedSc.reApp/100, rentGrowth:updatedSc.rentGr/100, inflation:updatedSc.cpi/100,
         coreCpi:updatedSc.cpi/100, healthCpi:updatedSc.healthCpi/100, propCpi:updatedSc.propCpi/100,
         propInflation:(updatedSc.cpi/100)+0.007, investReturn:updatedSc.investRet/100,
-        famLoanRate:updatedSc.famLoanRate/100,
+        loans:migrateScLoans(updatedSc).map(l=>({...l, rate:(l.rate||0)/100})),
         strPlatformPct:(updatedSc.strPlatformPct||3)/100, strCleanPct:(updatedSc.strCleanPct||4)/100, mgrPct:(updatedSc.mgrPct||0)/100,
         lifestyleDraws:updatedSc.lifestyleDraws.filter(d=>d.enabled),
         strSchedule:updatedSc.strSchedule||[],
@@ -1095,7 +1172,7 @@ export default function App(){
         {key:"ccBal",      label:"Credit card",   color:"#f87171"},
         {key:"sophiaBal",  label:"Sophia loans",  color:"#fb923c"},
         {key:"nolanBal",   label:"Nolan loans",   color:"#fbbf24"},
-        {key:"famLoanBal", label:"Family loan",   color:"#a78bfa", hideZero:true},
+        {key:"famLoanBal", label:loans.length?("Loans: "+loans.map(l=>l.label).join(", ")):"Loans", color:"#a78bfa", hideZero:true},
         {key:"hiDebt",     label:"Total HI debt", color:"#ef4444", bold:true},
       ],
       note:"Avalanche method: highest rate first. CC (14%) attacked first, then Nolan (8.4%), then Sophia (8.1%). Family loan shown at start-of-year balance (paid off within 2026, not included in Total HI debt).",
@@ -1107,7 +1184,7 @@ export default function App(){
         {key:"fc_hlth",   label:"Health ins",        color:"#c084fc"},
         {key:"fc_core",   label:"Core living",       color:"#60a5fa"},
         {key:"fc_hiMins", label:"HI debt minimums",  color:"#fb923c", hideZero:true},
-        {key:"fc_fam",    label:"Family loan",       color:"#f59e0b", hideZero:true},
+        {key:"fc_fam",    label:"Loan payments",     color:"#f59e0b", hideZero:true},
         {key:"fc_rop",    label:"Rental op costs",   color:"#34d399", hideZero:true},
         {key:"fc_prop",   label:"Prop tax/insurance", color:"#e879f9"},
         {key:"fc_tax",    label:"Income tax (est)",   color:"#facc15"},
@@ -1431,7 +1508,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.1.2</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.2.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1722,9 +1799,12 @@ export default function App(){
               {(()=>{
                 const {sellers, totalProceeds, residual} = settleData;
                 const shortfall = totalProceeds - settlementNeed < -0.5;
-                const totalHI = (liveParams.ccBal||0)+(liveParams.sophiaBal||0)+(liveParams.nolanBal||0);
-                const paydown  = Math.min(residual * hiPaydownPct/100, totalHI);
-                const invested = residual - paydown;
+                // v3.2.0 3-way split figures come from the ENGINE rows (annual engine
+                // applies splitResidual/planHiPaydown; wfData applies the same plan)
+                const rSettle = liveRows.find(r=>r.cal===settlementYear) || {};
+                const drawApplied    = rSettle.settleDraw || 0;
+                const paydownApplied = rSettle.hiPaydown  || 0;
+                const waterfallAmt   = (rSettle.wfDebtPaid||0) + (rSettle.wfToSavings||0);
                 const fmtK = v=>"$"+Math.abs(Math.round(v/1000))+"K";
                 const modeLabel = m=>m==='sell_taxable'?'sell':m==='full_1031'?'full 1031':m==='partial_1031'?'partial 1031':m;
                 const line = (label,val,{neg,eq,bold}={}) => (
@@ -1816,13 +1896,23 @@ export default function App(){
                     )}
                   </div>
 
-                  {/* Decide how to use the residual (shown above) */}
+                  {/* v3.2.0 residual 3-way split -- decide how to use the number above */}
+                  <div data-testid="settle-draw-slider">
+                    {slider("(a) Lifestyle draw (one-time)", Math.min(settleLifestyleDraw, Math.round(residual)), setSettleLifestyleDraw,
+                      0, Math.max(0, Math.round(residual)), 5000,
+                      v=>"$"+Math.round(v/1000)+"K of $"+Math.round(residual/1000)+"K residual")}
+                  </div>
                   <div data-testid="settle-paydown-slider">
-                    {slider("HI paydown % of residual",hiPaydownPct,setHiPaydownPct,0,100,5,
+                    {slider("(b) HI paydown % of remaining residual",hiPaydownPct,setHiPaydownPct,0,100,5,
                       v=>v+"%")}
                   </div>
-                  <div style={{fontSize:9,color:muted,marginTop:-4}}>
-                    <span style={{color:green,fontFamily:mono}}>{fmtK(paydown)}</span> to HI debt (avalanche), <span style={{color:blue,fontFamily:mono}}>{fmtK(invested)}</span> to invested
+                  <div data-testid="settle-split-line" style={{fontSize:9,color:muted,marginTop:-2}}>
+                    <span data-testid="settle-draw-val" data-val={Math.round(drawApplied)} style={{color:amber,fontFamily:mono}}>{fmtK(drawApplied)}</span> lifestyle,{" "}
+                    <span data-testid="settle-paydown-val" data-val={Math.round(paydownApplied)} style={{color:green,fontFamily:mono}}>{fmtK(paydownApplied)}</span> to HI debt,{" "}
+                    <span data-testid="settle-wf-val" data-val={Math.round(waterfallAmt)} style={{color:blue,fontFamily:mono}}>{fmtK(waterfallAmt)}</span> into waterfall
+                  </div>
+                  <div style={{fontSize:8,color:dim,marginTop:2,fontStyle:"italic"}}>
+                    Waterfall: fills maint reserve / rainy day / op buffer to caps, then debt sweep, then savings.
                   </div>
                 </>);
               })()}
@@ -2494,8 +2584,61 @@ export default function App(){
                 })}
               </div>
             )}
-            {slider("Family Loan Amount",famLoanAmt,setFamLoanAmt,0,50000,5000,v=>v===0?"None":"$"+v.toLocaleString())}
-            {famLoanAmt>0&&slider("Family Loan Rate",famLoanRate,setFamLoanRate,4,10,0.25,v=>`${v.toFixed(2)}%  ($${Math.round(famLoanAmt*(v/100/12*Math.pow(1+v/100/12,BASE.famLoanMonths))/(Math.pow(1+v/100/12,BASE.famLoanMonths)-1)).toLocaleString()}/mo x ${BASE.famLoanMonths}mo)`)}
+            {/* -- Loans (v3.2.0 generalized segments, replaces family-loan params) -- */}
+            <div style={{marginTop:12,marginBottom:4}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Loans</span>
+                <button data-testid="loan-add"
+                  onClick={()=>setLoans(list=>[...list,{label:`Loan ${list.length+1}`,amount:25000,startYear:2026,startMonth:6,months:12,rate:7.5,includeInSweep:false}])}
+                  style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
+                    background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
+                  + add loan
+                </button>
+              </div>
+              <div style={{fontSize:8,color:dim,marginBottom:8}}>
+                Amortized payment from start month for the term; payment lands in Fixed costs.
+                "Sweepable" loans join the debt avalanche by rate (paid early by sweeps and sale paydowns).
+              </div>
+              {loans.length===0&&(
+                <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>No loans</div>
+              )}
+              {loans.map((L,li)=>{
+                const pmt = loanMonthlyPmt(L.amount||0,(L.rate||0)/100,L.months||0);
+                const updL = patch=>setLoans(list=>list.map((x,j)=>j===li?{...x,...patch}:x));
+                return (
+                  <div key={li} data-testid={`loan-row-${li}`} style={{background:bg2,border:`1px solid ${amber}44`,borderRadius:7,padding:"8px 10px",marginBottom:8}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                      <input value={L.label||""} onChange={e=>updL({label:e.target.value})}
+                        style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:4,color:amber,
+                          fontFamily:font,fontSize:10,fontWeight:"bold",padding:"2px 6px",width:130,outline:"none"}}/>
+                      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                        <span style={{fontSize:8,color:dim,fontFamily:mono}}>${Math.round(pmt).toLocaleString()}/mo × {L.months}mo</span>
+                        <button onClick={()=>setLoans(list=>list.filter((_,j)=>j!==li))}
+                          style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                            background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
+                      </div>
+                    </div>
+                    {slider("Amount",L.amount||0,v=>updL({amount:v}),0,300000,1000,v=>"$"+v.toLocaleString())}
+                    {slider("Rate",L.rate||0,v=>updL({rate:v}),0,30,0.25,v=>v.toFixed(2)+"%")}
+                    {slider("Term (months)",L.months||1,v=>updL({months:v}),1,120,1,v=>v+" mo")}
+                    <div style={{display:"flex",gap:8}}>
+                      <div style={{flex:1}}>
+                        {slider("Start year",L.startYear||2026,v=>updL({startYear:v}),2026,2046,1,v=>v+"")}
+                      </div>
+                      <div style={{flex:1}}>
+                        {slider("Start month",L.startMonth||6,v=>updL({startMonth:v}),1,12,1,v=>new Date(2000,v-1).toLocaleString('default',{month:'short'}))}
+                      </div>
+                    </div>
+                    <div style={{marginTop:2}}>
+                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Join debt-sweep avalanche (pay off early)</div>
+                      {toggle(!!L.includeInSweep, v=>updL({includeInSweep:v}), [
+                        {v:false,l:"Scheduled only"},{v:true,l:"Sweepable",c:amber}
+                      ])}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
 
             {/* MARKET ASSUMPTIONS */}
             {sect("Market Assumptions")}
@@ -2879,8 +3022,11 @@ export default function App(){
                 evts.push({cat:"cost", icon:"MTG", desc:"Mortgages switch IO → full P&I (HI debt cleared)", delta:r.mtg-prev.mtg, note:`$${prev.mtg.toLocaleString()} → $${r.mtg.toLocaleString()}/mo`});
               if(prev && r.mtg < prev.mtg-200)
                 evts.push({cat:"cost", icon:"MTG", desc:"Mortgage cost drops", delta:r.mtg-prev.mtg, note:`$${prev.mtg.toLocaleString()} → $${r.mtg.toLocaleString()}/mo`});
-              if(prev && r.famLoan===0 && prev.famLoan>0)
-                evts.push({cat:"cost", icon:"LN", desc:"Family loan paid off", delta:-prev.famLoan, note:`−$${prev.famLoan.toLocaleString()}/mo freed`});
+              // v3.2.0 loan events straight from engine state (not hardcoded)
+              for(const lbl of (r.loanStarts||[]))
+                evts.push({cat:"cost", icon:"LN", desc:`${lbl} starts`, delta:r.famLoan, note:`$${(r.famLoan||0).toLocaleString()}/mo avg this year`});
+              for(const lbl of (r.loanPayoffs||[]))
+                evts.push({cat:"cost", icon:"LN", desc:`${lbl} paid off`, delta:-(prev?.famLoan||r.famLoan||0), note:"payment freed"});
               if(prev && r.minDebt < prev.minDebt-100){
                 const cleared=[];
                 if(prev.ccBal>0 && r.ccBal===0) cleared.push(`CC paid off (−$${ccMin.toLocaleString()}/mo)`);
@@ -2891,6 +3037,27 @@ export default function App(){
               }
               if(prev && r.debtSweep===0 && prev.debtSweep>0)
                 evts.push({cat:"cost", icon:"HI", desc:"All HI debt cleared — avalanche sweep ends", delta:prev.debtSweep, note:`+$${prev.debtSweep.toLocaleString()}/mo freed to discretionary`});
+
+              // v3.2.0 health/Medicare transitions from the SAME BASE constants the
+              // monthly model uses (previously only cost-delta-derived, so Sophia's
+              // off-plan year -- where the kids' premium doesn't change -- was missing)
+              {
+                const _hlNames = evts.filter(e=>e.icon==="HL").map(e=>e.desc).join(" ");
+                if(yr===BASE.startYear)
+                  evts.push({cat:"cost", icon:"HL", desc:"You → Medicare", delta:0, note:`Ericsson $${BASE.healthYouEricsson} → Medicare ~$${BASE.healthYouMedicare}/mo (Nov ${BASE.startYear})`});
+                if(yr===BASE.sophiaOff && !/Sophia/.test(_hlNames))
+                  evts.push({cat:"cost", icon:"HL", desc:"Sophia → off health insurance", delta:0, note:`kids' premium continues while Nolan is on plan (through ${BASE.nolanOff-1})`});
+                if(yr===BASE.nolanOff && !/Nolan/.test(_hlNames))
+                  evts.push({cat:"cost", icon:"HL", desc:"Nolan → off health insurance", delta:0, note:"kids' premium ends"});
+                if(yr===BASE.brendaMedYear && !/Brenda/.test(_hlNames))
+                  evts.push({cat:"cost", icon:"HL", desc:"Brenda → Medicare", delta:0, note:"Ericsson → Medicare premium"});
+              }
+
+              // v3.2.0 settlement residual events (from engine row fields)
+              if((r.settleDraw||0)>0)
+                evts.push({cat:"income", icon:"DR", desc:"Settlement lifestyle draw (one-time)", delta:Math.round(r.settleDraw/12), note:`$${r.settleDraw.toLocaleString()} from sale residual`});
+              if((r.hiPaydown||0)>0)
+                evts.push({cat:"cost", icon:"HI", desc:"Sale-proceeds HI paydown (avalanche)", delta:0, note:`$${Math.round(r.hiPaydown/1000)}K lump-sum${(r.wfDebtPaid||0)>0?` + $${Math.round(r.wfDebtPaid/1000)}K via waterfall`:""}`});
 
               // Milestone events
               if(r.hiDebt===0 && (!prev||prev.hiDebt>0))
@@ -3416,7 +3583,8 @@ export default function App(){
                 {label:"Health insurance",  sub:"You + Brenda + kids (until off plan)",                    val:r0.fc_health,  color:"#c084fc", note:null},
                 {label:"Core living",       sub:"Car $250 · Other ins $500 · Food $900 · Utilities $400 · Personal $600", val:r0.fc_core, color:"#60a5fa", note:null},
                 {label:"HI debt minimums",  sub:"CC + Sophia + Nolan loans",                               val:r0.fc_hiMins,  color:"#fb923c", note:r0.fc_hiMins===0?"Paid off or none":null},
-                {label:"Family loan",       sub:"$25K at 7.5% × 8mo",                                     val:r0.fc_famLoan, color:"#f59e0b", note:r0.fc_famLoan===0?"Paid off":null},
+                {label:"Loans",             sub:loans.length?loans.map(l=>`${l.label}: $${Math.round((l.amount||0)/1000)}K @ ${l.rate}% × ${l.months}mo`).join(" · "):"None",
+                                            val:r0.fc_famLoan, color:"#f59e0b", note:r0.fc_famLoan===0?(loans.length?"Paid off / not started":"None"):null},
                 {label:"Rental op costs",   sub:topUnit==="str"?"Platform "+strPlatformPct+"% + cleaning "+strCleanPct+"%":"Mgmt "+mgrPct+"% on LTR/MTR", val:r0.fc_rentalOp||0, color:"#34d399", note:(r0.fc_rentalOp||0)===0?"Self-managed / none":null},
               ];
               const total = rows_fc.reduce((s,r)=>s+r.val,0);
@@ -3514,8 +3682,15 @@ export default function App(){
 
             {/* Month-by-month table */}
             <div style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:14}}>
-              <div style={{fontSize:11,color:muted,fontWeight:"bold",marginBottom:10}}>
-                Month-by-Month Cash Flow
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{fontSize:11,color:muted,fontWeight:"bold"}}>
+                  Month-by-Month Cash Flow
+                </div>
+                <button data-testid="mbm-breakdown-toggle" onClick={()=>setMbmBreakdown(v=>!v)} style={{
+                  background:mbmBreakdown?red+"22":"transparent",border:`1px solid ${mbmBreakdown?red:bdr}`,
+                  borderRadius:4,color:mbmBreakdown?red:dim,cursor:"pointer",
+                  fontSize:9,padding:"2px 8px",fontFamily:font,
+                }}>{mbmBreakdown?"collapse fixed":"fixed breakdown"}</button>
               </div>
               <div style={{overflowX:"auto",maxHeight:420,overflowY:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:9}}>
@@ -3528,6 +3703,12 @@ export default function App(){
                       <th style={{textAlign:"right",padding:"6px 8px",color:amber,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Work</th>
                       <th style={{textAlign:"right",padding:"6px 6px",color:green,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap",borderLeft:`1px solid ${bdr}`}}>Total In</th>
                       <th style={{textAlign:"right",padding:"6px 8px",color:red,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Fixed</th>
+                      {mbmBreakdown&&[
+                        ["Mtg","fc_mtg"],["Prop T/I","fc_propCost"],["Health","fc_health"],["Core","fc_core"],
+                        ["Loans","fc_famLoan"],["HI Mins","fc_hiMins"],["Tax","fc_tax"],
+                      ].map(([l])=>(
+                        <th key={l} style={{textAlign:"right",padding:"6px 6px",color:"#f87171aa",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap",fontStyle:"italic"}}>{l}</th>
+                      ))}
                       <th style={{textAlign:"right",padding:"6px 8px",color:"#fb923c",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Maint Res</th>
                       <th style={{textAlign:"right",padding:"6px 8px",color:"#fbbf24",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Rainy Day</th>
                       <th style={{textAlign:"right",padding:"6px 8px",color:amber,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Op Buffer</th>
@@ -3550,6 +3731,11 @@ export default function App(){
                             <td style={{padding:"5px 8px",color:r.workIncome>0?amber:dim,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>{r.workIncome>0?"$"+r.workIncome.toLocaleString():"-"}</td>
                             <td style={{padding:"5px 6px",color:green,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontWeight:"bold",borderLeft:`1px solid ${bdr}`}}>${r.totalInc.toLocaleString()}</td>
                           <td style={{padding:"5px 8px",color:red,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>-${r.tier1.toLocaleString()}</td>
+                          {mbmBreakdown&&["fc_mtg","fc_propCost","fc_health","fc_core","fc_famLoan","fc_hiMins","fc_tax"].map(k=>(
+                            <td key={k} style={{padding:"5px 6px",color:"#f8717199",fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontSize:8}}>
+                              {(r[k]||0)>0?"-$"+(r[k]||0).toLocaleString():"—"}
+                            </td>
+                          ))}
                           <td style={{padding:"5px 8px",color:"#fb923c",fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>{r.maintRes>0?"-$"+r.maintRes.toLocaleString():""}</td>
                           <td style={{padding:"5px 8px",color:"#fbbf24",fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>{r.rdAdd>0?"-$"+r.rdAdd.toLocaleString():<span style={{color:rdCap&&r.rdBal>=rdCap?green:dim}}>{r.rdBal>=rdCap?"FULL":""}</span>}</td>
                           <td style={{padding:"5px 8px",color:amber,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>{r.obAdd>0?"-$"+r.obAdd.toLocaleString():<span style={{color:obCap&&r.obBal>=obCap?green:dim}}>{r.obBal>=obCap?"FULL":""}</span>}</td>
