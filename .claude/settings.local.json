@@ -2,7 +2,30 @@
   "permissions": {
     "allow": [
       "Bash(node:*)",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -File run_tests.ps1 2>&1)"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File run_tests.ps1 2>&1)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(npx vite *)",
+      "Bash(npx playwright *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173)",
+      "Bash(break)",
+      "Bash(curl -s http://localhost:5173/src/App.jsx)",
+      "PowerShell(.\\\\run_tests.ps1)",
+      "Bash(sed *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(npm run *)",
+      "Bash(python *)",
+      "Bash(git push *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)"
+    ],
+    "ask": [
+      "Bash(powershell*run_tests*)",
+      "Bash(*run_tests.ps1*)"
     ]
   }
 }
