@@ -51,6 +51,71 @@ export const BASE = {
 };
 
 // =============================================================================
+// MORTGAGE STRUCTURE (v3.4.0) -- 6th St and 15th St are 30-year loans with a
+// 10-year interest-only period, originated ~Jul 2021 (IO ends ~Jul 2031).
+// Balances calibrated from servicer statements, Jul 2026. During IO the balance
+// stays FLAT absent extra principal; at IO end the payment recasts to amortize
+// the ACTUAL remaining balance over the remaining term (20 yrs at current
+// balances: 6th -> ~$5,260/mo, 15th -> ~$2,172/mo). Escrow/tax/insurance stay
+// in their separate cost lines. Lafayette keeps its amortizing treatment.
+// =============================================================================
+export const MORTGAGE_DEFAULTS = {
+  sixth:     { balance: 805_495, rate: 0.04875, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
+  fifteenth: { balance: 347_601, rate: 0.0435,  originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
+};
+
+export function mortgageMonthsSince(m, calYear, calMonth1to12){
+  return (calYear-(m.originYear||2021))*12 + (calMonth1to12-(m.originMonth||7));
+}
+// Balance on the no-extra-principal schedule (flat through IO, then annuity)
+export function mortgageBalanceClosed(m, monthsSinceOrigin){
+  const ioM=(m.ioYears||10)*12;
+  if(monthsSinceOrigin<=ioM) return m.balance;
+  const rm=m.rate/12, n=((m.termYears||30)-(m.ioYears||10))*12;
+  const k=Math.min(monthsSinceOrigin-ioM, n);
+  const pmt=loanMonthlyPmt(m.balance, m.rate, n);
+  return Math.max(0, m.balance*Math.pow(1+rm,k) - pmt*(Math.pow(1+rm,k)-1)/rm);
+}
+// Scheduled payment (interest-only during IO, recast annuity after)
+export function mortgagePaymentClosed(m, monthsSinceOrigin){
+  if(monthsSinceOrigin < (m.ioYears||10)*12) return m.balance*m.rate/12;
+  return loanMonthlyPmt(m.balance, m.rate, ((m.termYears||30)-(m.ioYears||10))*12);
+}
+
+// -----------------------------------------------------------------------------
+// DEFAULTS-TAB OVERRIDES (v3.4.0): the Defaults tab edits model constants that
+// have no slider. Overrides merge here, at the BASE boundary, so BOTH engines
+// see them (they read these objects live). Precedence: a pin's paramSnapshot
+// wins for the sc params it contains; these overrides fill everything else.
+// -----------------------------------------------------------------------------
+const BASE_CODE     = { ...BASE };
+const MORTGAGE_CODE = { sixth: { ...MORTGAGE_DEFAULTS.sixth }, fifteenth: { ...MORTGAGE_DEFAULTS.fifteenth } };
+let   DISPO_CODE    = null;   // captured lazily (DISPO_DEFAULTS is declared below)
+
+export function getDefaultsCode(){
+  if(!DISPO_CODE) DISPO_CODE = { ...DISPO_DEFAULTS };
+  return {
+    BASE: { ...BASE_CODE },
+    MORTGAGE_DEFAULTS: { sixth: { ...MORTGAGE_CODE.sixth }, fifteenth: { ...MORTGAGE_CODE.fifteenth } },
+    DISPO_DEFAULTS: { ...DISPO_CODE },
+  };
+}
+export function applyDefaultsOverrides(ov = {}){
+  if(!DISPO_CODE) DISPO_CODE = { ...DISPO_DEFAULTS };
+  Object.assign(BASE, BASE_CODE);
+  Object.assign(MORTGAGE_DEFAULTS.sixth, MORTGAGE_CODE.sixth);
+  Object.assign(MORTGAGE_DEFAULTS.fifteenth, MORTGAGE_CODE.fifteenth);
+  Object.assign(DISPO_DEFAULTS, DISPO_CODE);
+  for(const [k,v] of Object.entries(ov.BASE||{}))
+    if(k in BASE && typeof v==='number' && isFinite(v)) BASE[k]=v;
+  for(const key of ['sixth','fifteenth'])
+    for(const [k,v] of Object.entries(ov.MORTGAGE_DEFAULTS?.[key]||{}))
+      if(k in MORTGAGE_DEFAULTS[key] && typeof v==='number' && isFinite(v)) MORTGAGE_DEFAULTS[key][k]=v;
+  for(const [k,v] of Object.entries(ov.DISPO_DEFAULTS||{}))
+    if(k in DISPO_DEFAULTS && typeof v==='number' && isFinite(v)) DISPO_DEFAULTS[k]=v;
+}
+
+// =============================================================================
 // HELPERS
 // =============================================================================
 export function calcPmt(p,r,yrs=30){const rm=r/12,n=yrs*12;return p*(rm*Math.pow(1+rm,n))/(Math.pow(1+rm,n)-1);}
@@ -386,6 +451,41 @@ export function buildScenario(p) {
   const sweepLoanQ = ()=>loans.filter(L=>L.includeInSweep && L.bal>0)
     .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
 
+  // v3.4.0 mortgage state (6th + 15th): IO through ~Jul 2031, then recast to the
+  // ACTUAL remaining balance over the remaining term. Extra principal (the
+  // mortgage-principal waterfall bucket) reduces the balance and hence the recast.
+  const mkMtgSt = (m,label)=>({p:{...m}, label, bal:m.balance, recast:null, ioPmtAtRecast:0, transAnnounced:false, payoffAnnounced:false});
+  const mtgSixthSt = mkMtgSt(MORTGAGE_DEFAULTS.sixth, '6th St');
+  const mtgDplxSt  = mkMtgSt(MORTGAGE_DEFAULTS.fifteenth, '15th St');
+  const mtgTransByYear = {}, mtgPayoffByYear = {};
+  // One month of scheduled mortgage activity; returns the payment made.
+  function stepMtg(st, calYear, mo0to11, owned){
+    const m=st.p;
+    const k=(calYear-m.originYear)*12 + ((mo0to11+1)-m.originMonth);
+    if(k<0 || !owned || st.bal<=0) return 0;
+    const interest = st.bal*m.rate/12;
+    if(k < m.ioYears*12) return interest;              // IO: pay interest, balance flat
+    if(st.recast==null){                                // first P&I month: recast on ACTUAL balance
+      st.recast = loanMonthlyPmt(st.bal, m.rate, Math.max(1, m.termYears*12 - k));
+      st.ioPmtAtRecast = interest;
+      (mtgTransByYear[calYear]=mtgTransByYear[calYear]||[]).push({label:st.label, delta:Math.round(st.recast-interest)});
+    }
+    const pmt = Math.min(st.recast, st.bal + interest);
+    st.bal = Math.max(0, st.bal + interest - pmt);
+    return pmt;
+  }
+  // Extra principal (bucket / annual mirror); flags early payoff.
+  function mtgExtraPrincipal(st, calYear, owned, amount){
+    if(!owned || st.bal<=0 || amount<=0) return 0;
+    const pay=Math.min(amount, st.bal);
+    st.bal-=pay;
+    if(st.bal<=0 && !st.payoffAnnounced){
+      st.payoffAnnounced=true;
+      (mtgPayoffByYear[calYear]=mtgPayoffByYear[calYear]||[]).push(st.label);
+    }
+    return pay;
+  }
+
   // -----------------------------------------------------------------
   // v3.1.0 dispositions (per-property sale / 1031)
   // -----------------------------------------------------------------
@@ -398,13 +498,13 @@ export function buildScenario(p) {
   const duplexYr = dDuplex.mode==='keep' ? Infinity : (dDuplex.year|| 2055);
   const lafStopYr = p.lafStopYear || 2055;
 
-  function computeDispo(def, baseVal, baseMtg, baseRate, isPrimary){
+  function computeDispo(def, baseVal, payoffFn, isPrimary){
     if(def.mode==='keep') return {mode:'keep', year:Infinity, afterTaxNetProceeds:0, totalTax:0, recognizedGain:0, caSourceDeferredGain:0};
     const yrIdx = Math.max(0, (def.year||2055) - BASE.startYear);
     // v3.1.1: the Sale price slider IS the sale-year price. Previously fmv came from
     // BASE value x appreciation and salesPrice was silently ignored (proceeds ran high).
     const fmv   = (def.salesPrice > 0) ? def.salesPrice : baseVal * Math.pow(1+p.reAppreciation, yrIdx);
-    const mtgB  = remainBal(baseMtg, baseRate, 30, 5+yrIdx);
+    const mtgB  = payoffFn(def.year||2055);
     const depTaken = (def.depreciationRecapture || 0) / DISPO_DEFAULTS.recaptureRate;
     const propObj = {
       fmv,
@@ -422,9 +522,16 @@ export function buildScenario(p) {
     return { ...res, year: def.year, mode: def.mode, caSourceDeferredGain: def.caSourceDeferredGain || 0 };
   }
   const dispoRes = {
-    sixth:     computeDispo(dSixth,  BASE.primaryValue,   BASE.primaryMortgage,   BASE.primaryRate,   true),
-    barberry:  computeDispo(dLaf,    BASE.lafayetteValue, BASE.lafayetteMortgage, BASE.lafayetteRate, false),
-    fifteenth: computeDispo(dDuplex, BASE.duplexValue,    BASE.duplexMortgage,    BASE.duplexRate,    false),
+    // v3.4.0: 6th/15th payoffs follow the IO/recast schedule (flat balance through
+    // ~Jul 2031, then amortizing from the recast). NOTE: this closed form ignores
+    // any waterfall extra principal paid before the sale (payoff slightly
+    // overstated -> proceeds conservative). Lafayette keeps its amortizing form.
+    sixth:     computeDispo(dSixth,  BASE.primaryValue,
+                 yr=>mortgageBalanceClosed(MORTGAGE_DEFAULTS.sixth, mortgageMonthsSince(MORTGAGE_DEFAULTS.sixth, yr, 7)), true),
+    barberry:  computeDispo(dLaf,    BASE.lafayetteValue,
+                 yr=>remainBal(BASE.lafayetteMortgage, BASE.lafayetteRate, 30, 5+Math.max(0, yr-BASE.startYear)), false),
+    fifteenth: computeDispo(dDuplex, BASE.duplexValue,
+                 yr=>mortgageBalanceClosed(MORTGAGE_DEFAULTS.fifteenth, mortgageMonthsSince(MORTGAGE_DEFAULTS.fifteenth, yr, 7)), false),
   };
 
   // CA $1.2M cap: applies across barberry + fifteenth in year order
@@ -522,6 +629,7 @@ export function buildScenario(p) {
   }
   const paydownByYear = {}, drawByYear = {}, wfDebtByYear = {}, wfSavByYear = {};
   const paydownDetailByYear = {}, loanStartsByYear = {}, loanPayoffsByYear = {};
+  const mtgExtraBoundaryByYear = {};
 
   // IRMAA fires 2 yrs after any taxable dispo (mode != 'full_1031', recognized gain > 0)
   const irmaaYears = new Set();
@@ -576,10 +684,21 @@ export function buildScenario(p) {
       applyPlan(plan);
       const plan2 = planHiPaydown(split.remainder, mkDebts());
       applyPlan(plan2);
+      // v3.4.0: the waterfall remainder passes through the mortgage-principal
+      // bucket (capped per month) before landing in sweep savings.
+      let survivor = split.remainder - plan2.total;
+      if(p.mtgPrincipalOn && survivor>0){
+        const _cap = p.mtgPrincipalUncapped ? Infinity : (p.mtgPrincipalCap||0);
+        const room = Math.min(_cap, survivor);
+        let paid = mtgExtraPrincipal(mtgSixthSt, cal, keepPrimary, room);
+        paid    += mtgExtraPrincipal(mtgDplxSt,  cal, keepDuplex,  room - paid);
+        survivor -= paid;
+        mtgExtraBoundaryByYear[cal] = paid;
+      }
       drawByYear[cal]          = split.draw;
       paydownByYear[cal]       = plan.total;
       wfDebtByYear[cal]        = plan2.total;
-      wfSavByYear[cal]         = split.remainder - plan2.total;
+      wfSavByYear[cal]         = survivor;
       paydownDetailByYear[cal] = plan.perDebt;
     }
 
@@ -665,10 +784,12 @@ export function buildScenario(p) {
     const dplxVal = keepDuplex   ? BASE.duplexValue*app    : 0;
     const lafVal  = keepLafOwned ? BASE.lafayetteValue*app : 0;
     const primVal = keepPrimary  ? BASE.primaryValue*app   : 0;
-    const dplxBal = keepDuplex   ? remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+yr)       : 0;
+    // v3.4.0: 6th/15th balances come from the IO/recast mortgage STATE (flat
+    // through IO absent extra principal, then amortizing from the recast).
+    const dplxBal = keepDuplex   ? mtgDplxSt.bal  : 0;
     const lafBal  = keepLafOwned ? remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+yr) : 0;
-    const primBal = keepPrimary  ? remainBal(BASE.primaryMortgage,BASE.primaryRate,30,5+yr)     : 0;
-    const _mtgInt = dplxBal*BASE.duplexRate + lafBal*BASE.lafayetteRate + primBal*BASE.primaryRate;
+    const primBal = keepPrimary  ? mtgSixthSt.bal : 0;
+    const _mtgInt = dplxBal*mtgDplxSt.p.rate + lafBal*BASE.lafayetteRate + primBal*mtgSixthSt.p.rate;
     const taxAnnual=estimateTax(p,pension,workInc,yourSs,brendaSs,rental,_mtgInt);
 
     // -- Monthly mirror (same gating) --
@@ -697,15 +818,20 @@ export function buildScenario(p) {
     if(keepPrimary)  _maint0 += BASE.primaryValue*p.maintRate*_pinf0/12;
     const _core0  = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*_inf0;
     const _hlth0  = healthMonthly(BASE.startYear+yr, 99, p);
-    const _mtg0   = (keepDuplex?BASE.duplxIO:0) + (keepLafOwned?BASE.lafPnI:0) + (keepPrimary?BASE.primIO:0);
-    const _fixedMo= _mtg0 + _hlth0 + _propC0 + _core0 + _maint0 + taxAnnual/12;
-    const _baseDI = _incMo - _fixedMo;
+    // v3.4.0: 6th/15th mortgage payments are state-driven per month (IO -> recast)
+    // inside the loop below; only Lafayette's flat P&I is static here.
+    const _fixedMo= (keepLafOwned?BASE.lafPnI:0) + _hlth0 + _propC0 + _core0 + _maint0 + taxAnnual/12;
 
     // Start-of-year loan balance (loans starting this year count at full amount)
     const loansBalPre = loans.reduce((s,L)=>s + (L.started ? L.bal : (L.startAbs < (yr+1)*12 ? L.amount : 0)), 0);
-    let loanPmtYrTotal = 0;
+    let loanPmtYrTotal = 0, mtgPmtYrTotal = 0, mtgExtraYr = 0, mtgExtraFromSurplusYr = 0;
     for(let mo=0;mo<12;mo++){
       const absMo=yr*12+mo;
+      // -- v3.4.0 mortgages: step monthly (IO -> recast), regardless of HI state --
+      const _mtgMo = stepMtg(mtgSixthSt, cal, mo, keepPrimary)
+                   + stepMtg(mtgDplxSt,  cal, mo, keepDuplex)
+                   + (keepLafOwned ? BASE.lafPnI : 0);
+      mtgPmtYrTotal += _mtgMo;
       // -- v3.2.0 loans: step monthly regardless of HI debt state --
       let _loanMo = 0;
       for(const L of loans){
@@ -722,27 +848,45 @@ export function buildScenario(p) {
         }
       }
       loanPmtYrTotal += _loanMo;
-      if(p.payOffHI) continue;
-      if(absMo<5){ nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)); }
-      else{ nolanActive=true; }
-      const _minCC0  = ccBal>0?ccMin:0;
-      const _minSoph0= sophiaBal>0?sophiaMin:0;
-      const _minNol0 = nolanActive&&nolanBal>0?nolanMin:0;
-      const _minsMo  = _minCC0+_minSoph0+_minNol0;
-      if(ccBal>0){    ccBal    =Math.max(0,ccBal   *(1+ccRate/12)   -_minCC0); }
-      if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate/12)-_minSoph0);}
-      if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
-      const loopDebt=ccBal+sophiaBal+nolanBal;
-      const _avail = _baseDI - _minsMo - _loanMo;
+      let _minsMo = 0, loopDebt = 0, xtra = 0;
+      if(!p.payOffHI){
+        if(absMo<5){ nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)); }
+        else{ nolanActive=true; }
+        const _minCC0  = ccBal>0?ccMin:0;
+        const _minSoph0= sophiaBal>0?sophiaMin:0;
+        const _minNol0 = nolanActive&&nolanBal>0?nolanMin:0;
+        _minsMo  = _minCC0+_minSoph0+_minNol0;
+        if(ccBal>0){    ccBal    =Math.max(0,ccBal   *(1+ccRate/12)   -_minCC0); }
+        if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate/12)-_minSoph0);}
+        if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
+        loopDebt=ccBal+sophiaBal+nolanBal;
+      }
+      const _avail = (_incMo - _fixedMo - _mtgMo) - _minsMo - _loanMo;
       const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
-      let xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
-      const q=[
-        {g:()=>ccBal,    s:(v)=>{ccBal=v;},    r:ccRate},
-        {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;}, r:sophiaRate},
-        ...(nolanActive?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate}]:[]),
-        ...sweepLoanQ(),
-      ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
-      for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
+      if(!p.payOffHI){
+        xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
+        const q=[
+          {g:()=>ccBal,    s:(v)=>{ccBal=v;},    r:ccRate},
+          {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;}, r:sophiaRate},
+          ...(nolanActive?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate}]:[]),
+          ...sweepLoanQ(),
+        ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
+        for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
+      }
+      // -- v3.4.0 mortgage-principal bucket (annual mirror): fed by leftover
+      //    debt-sweep, or by the post-debt monthly surplus (which otherwise
+      //    becomes sweep savings -- subtracted from savings after the loop).
+      //    6th (4.875%) before 15th (4.35%); only while the property is held. --
+      if(p.mtgPrincipalOn){
+        const _cap = p.mtgPrincipalUncapped ? Infinity : (p.mtgPrincipalCap||0);
+        const fromSurplus = loopDebt<=0;
+        let room = Math.min(_cap, fromSurplus ? Math.max(0, _avail - _splitProtect) : Math.max(0, xtra));
+        let paid = 0;
+        paid += mtgExtraPrincipal(mtgSixthSt, cal, keepPrimary, room - paid);
+        paid += mtgExtraPrincipal(mtgDplxSt,  cal, keepDuplex,  room - paid);
+        mtgExtraYr += paid;
+        if(fromSurplus) mtgExtraFromSurplusYr += paid;
+      }
     }
     // Loan payoff events from state (catches scheduled, sweep, and boundary-paydown payoffs)
     for(const L of loans){
@@ -754,10 +898,10 @@ export function buildScenario(p) {
     const hiDebt=p.payOffHI?0:ccBal+sophiaBal+nolanBal;
     if(hiDebt<=0 && !debtCleared){ debtCleared=true; debtClearedYr=cal; }
 
-    const duplxPmt = keepDuplex   ? ((!p.payOffHI&&hiDebt>0)?BASE.duplxIO:BASE.duplxPnI) : 0;
-    const lafPmt   = keepLafOwned ? BASE.lafPnI : 0;
-    const primPmt  = keepPrimary  ? ((!p.payOffHI&&hiDebt>0)?BASE.primIO:BASE.primPnI)   : 0;
-    const mtgPmt   = (duplxPmt + lafPmt + primPmt)*12;
+    // v3.4.0: contractual IO -> recast P&I replaces the old HI-debt-driven
+    // payment switch (that was the regression -- the IO period is a loan term,
+    // not a strategy toggle). Accumulated from the state stepping above.
+    const mtgPmt   = mtgPmtYrTotal;
 
     const healthAnnual=yr===0
       ?(5*BASE.healthYouEricsson+7*BASE.healthYouMedicare+12*BASE.healthBrendaEricsson+12*BASE.healthKids)
@@ -783,8 +927,9 @@ export function buildScenario(p) {
     const splitProtect = Math.max(p.diCap*12, baseDI*(p.lifestyleSplit/100));
     const accel  =(!p.payOffHI&&hiDebt>0)?Math.max(0,baseDI-splitProtect):0;
     const surplusAboveProtect = Math.max(0, baseDI - splitProtect);
-    // v3.2.0: waterfall survivor of the sale-year remainder counts as sweep savings
-    const annualSweepToSav = (debtCleared ? surplusAboveProtect : 0) + (wfSavByYear[cal]||0);
+    // v3.2.0: waterfall survivor of the sale-year remainder counts as sweep savings.
+    // v3.4.0: minus whatever the mortgage-principal bucket took from that surplus.
+    const annualSweepToSav = Math.max(0, (debtCleared ? surplusAboveProtect : 0) - mtgExtraFromSurplusYr) + (wfSavByYear[cal]||0);
     const totalOut=baseOut+accel;
     const surplus =totalIncome-totalOut;
     const passive =pension+(yourSs+brendaSs)*12+rental;
@@ -835,7 +980,9 @@ export function buildScenario(p) {
       ccBal:    Math.round(ccBal/1000),
       sophiaBal:Math.round(sophiaBal/1000),
       nolanBal: Math.round(nolanBal/1000),
-      ioMode:   hiDebt>0 && !p.payOffHI && (keepPrimary||keepDuplex),
+      // v3.4.0: ioMode = a held mortgage is still inside its contractual IO window
+      ioMode:   (keepPrimary && mtgSixthSt.recast==null && mtgSixthSt.bal>0)
+             || (keepDuplex  && mtgDplxSt.recast==null  && mtgDplxSt.bal>0),
       // v3.1.0 dispo-year summary fields
       dispoTax: Math.round(dispoTaxYr),
       dispoNet: Math.round(yearCashAdd[cal] || 0),
@@ -848,6 +995,13 @@ export function buildScenario(p) {
       hiPaydownDetail: paydownDetailByYear[cal] || null,
       loanStarts:   loanStartsByYear[cal] || [],
       loanPayoffs:  loanPayoffsByYear[cal] || [],
+      // v3.4.0 mortgage structure fields
+      mtgTransitions: mtgTransByYear[cal] || [],       // [{label, delta $/mo}] at IO->P&I
+      mtgPayoffs:     mtgPayoffByYear[cal] || [],      // early payoff via extra principal
+      mtgExtra:       Math.round(mtgExtraYr + (mtgExtraBoundaryByYear[cal]||0)),
+      primBalRaw:     Math.round(primBal),
+      dplxBalRaw:     Math.round(dplxBal),
+      lafBalRaw:      Math.round(lafBal),
     });
   }
   // Expose disposition details for reconciliation card / UI

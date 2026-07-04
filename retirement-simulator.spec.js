@@ -522,10 +522,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v3.3.0"', async ({ page }) => {
+  test('E5 — Version header shows "v3.4.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.3.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v3.3.0');
+    await expect(page.locator('text=v3.4.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v3.4.0');
   });
 
 });
@@ -975,10 +975,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v3.3.0', async ({ page }) => {
+  test('L1 — Version header shows v3.4.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.3.0').first()).toBeVisible();
-    console.log('  L1 — Version v3.3.0 confirmed');
+    await expect(page.locator('text=v3.4.0').first()).toBeVisible();
+    console.log('  L1 — Version v3.4.0 confirmed');
   });
 
   test('L2 — payOffHI toggle hidden when sellYear is 2055 (never sell)', async ({ page }) => {
@@ -1257,9 +1257,9 @@ test.describe('Group M — v3.1.1 Dispositions', () => {
     expect(result.ccBal).toBe(0);
   });
 
-  test('M11 — Version badge shows v3.3.0', async ({ page }) => {
+  test('M11 — Version badge shows v3.4.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v3.3.0').first()).toBeVisible();
+    await expect(page.locator('text=v3.4.0').first()).toBeVisible();
   });
 
   test('M12 — window.__engine exposed with disposeAsset/taxRecognized', async ({ page }) => {

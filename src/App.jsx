@@ -1,11 +1,11 @@
-// v3.3.0 -- 6th St income segments-only: mode selector removed, overlaps allowed and summed, auto-stop removed
+// v3.4.0 -- IO/recast mortgage structure restored, Defaults tab with persistent overrides, mortgage-principal waterfall bucket
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments, sixthSegmentOverlaps, planHiPaydown, splitResidual, loanMonthlyPmt } from "./engine.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments, sixthSegmentOverlaps, planHiPaydown, splitResidual, loanMonthlyPmt, MORTGAGE_DEFAULTS, mortgageBalanceClosed, mortgagePaymentClosed, mortgageMonthsSince, applyDefaultsOverrides, getDefaultsCode } from "./engine.js";
 import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS, DEFAULT_LOANS_SC, migrateScLoans, migrateSixthIncomeSegments } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
@@ -16,9 +16,86 @@ if (typeof window !== 'undefined') {
     strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax,
     sixthSegmentGross, validateSixthSegments, sixthSegmentOverlaps, migrateSixthIncomeSegments,
     planHiPaydown, splitResidual, loanMonthlyPmt,
+    MORTGAGE_DEFAULTS, mortgageBalanceClosed, mortgagePaymentClosed, mortgageMonthsSince,
+    applyDefaultsOverrides, getDefaultsCode,
   };
 }
 import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_W, SVG_H, rNodePos } from "./relationships-data.js";
+
+// =============================================================================
+// v3.4.0 DEFAULTS TAB registry -- every model input with NO slider/control,
+// enumerated from engine.js (BASE, MORTGAGE_DEFAULTS, DISPO_DEFAULTS).
+// Paths address the overrides object handed to applyDefaultsOverrides().
+// =============================================================================
+const DEFAULTS_REGISTRY = [
+  {group:"Property Values & Sale Basis", items:[
+    ["BASE.primaryValue","6th St value $"],
+    ["BASE.duplexValue","15th St value $"],
+    ["BASE.lafayetteValue","Lafayette value $"],
+    ["BASE.sixthBasis","6th St basis (liq view) $"],
+    ["BASE.marriedExcl","§121 married exclusion $"],
+    ["BASE.sellingCosts","Selling costs (liq view, fraction)"],
+  ]},
+  {group:"Mortgages (30yr, 10yr interest-only, ~Jul 2021)", items:[
+    ["MORTGAGE_DEFAULTS.sixth.balance","6th St balance (Jul 2026) $"],
+    ["MORTGAGE_DEFAULTS.sixth.rate","6th St rate (decimal)"],
+    ["MORTGAGE_DEFAULTS.sixth.ioYears","6th St IO years"],
+    ["MORTGAGE_DEFAULTS.sixth.termYears","6th St term years"],
+    ["MORTGAGE_DEFAULTS.sixth.originYear","6th St origin year"],
+    ["MORTGAGE_DEFAULTS.sixth.originMonth","6th St origin month (1-12)"],
+    ["MORTGAGE_DEFAULTS.fifteenth.balance","15th St balance (Jul 2026) $"],
+    ["MORTGAGE_DEFAULTS.fifteenth.rate","15th St rate (decimal)"],
+    ["MORTGAGE_DEFAULTS.fifteenth.ioYears","15th St IO years"],
+    ["MORTGAGE_DEFAULTS.fifteenth.termYears","15th St term years"],
+    ["MORTGAGE_DEFAULTS.fifteenth.originYear","15th St origin year"],
+    ["MORTGAGE_DEFAULTS.fifteenth.originMonth","15th St origin month (1-12)"],
+    ["BASE.lafayetteMortgage","Lafayette balance (amortizing) $"],
+    ["BASE.lafayetteRate","Lafayette rate (decimal)"],
+    ["BASE.lafPnI","Lafayette P&I $/mo"],
+  ]},
+  {group:"Income Baselines", items:[
+    ["BASE.pensionMonthly","Pension $/mo"],
+    ["BASE.yourSsEarly","Your SS early $/mo"],
+    ["BASE.yourSsFRA","Your SS FRA $/mo"],
+    ["BASE.brendaSsFRA","Brenda SS FRA $/mo"],
+    ["BASE.brendaFraYear","Brenda FRA year"],
+    ["BASE.duplexBottomRent","15th bottom rent seed $/mo"],
+    ["BASE.lafayetteRent","Lafayette rent $/mo"],
+  ]},
+  {group:"Health Insurance", items:[
+    ["BASE.healthYouEricsson","You: Ericsson $/mo"],
+    ["BASE.healthYouMedicare","You: Medicare $/mo"],
+    ["BASE.healthMedicareInflation","Medicare inflation (decimal)"],
+    ["BASE.healthBrendaEricsson","Brenda: Ericsson $/mo"],
+    ["BASE.healthBrendaMedicare","Brenda: Medicare $/mo"],
+    ["BASE.ericssonInflation","Ericsson inflation (decimal)"],
+    ["BASE.healthKids","Kids premium $/mo"],
+    ["BASE.sophiaOff","Sophia off plan (year)"],
+    ["BASE.nolanOff","Nolan off plan (year)"],
+    ["BASE.brendaMedYear","Brenda → Medicare (year)"],
+    ["BASE.irmaaSurge","IRMAA surge $/mo/person"],
+  ]},
+  {group:"Property Tax & Insurance ($/mo)", items:[
+    ["BASE.primTaxMo","6th St tax"],["BASE.primInsMo","6th St insurance"],
+    ["BASE.dplxTaxMo","15th St tax"],["BASE.dplxInsMo","15th St insurance"],
+    ["BASE.lafTaxMo","Lafayette tax"],["BASE.lafInsMo","Lafayette insurance"],
+  ]},
+  {group:"Core Living ($/mo)", items:[
+    ["BASE.carLease","Car lease"],["BASE.otherIns","Other insurance"],
+    ["BASE.food","Food"],["BASE.utilities","Utilities"],["BASE.personal","Personal"],
+  ]},
+  {group:"Disposition Tax Rates (decimals)", items:[
+    ["DISPO_DEFAULTS.fedCapGainsRate","Fed cap gains + NIIT"],
+    ["DISPO_DEFAULTS.recaptureRate","§1250 recapture"],
+    ["DISPO_DEFAULTS.coTaxRate","CO flat"],
+    ["DISPO_DEFAULTS.caClawbackRate","CA clawback"],
+    ["DISPO_DEFAULTS.sellingCostsPct","Selling costs (dispositions)"],
+    ["DISPO_DEFAULTS.forcedSaleDiscount","Forced-sale discount"],
+    ["BASE.fedCapGains","Fed cap gains (liq view)"],
+    ["BASE.coCapGains","CO cap gains (liq view)"],
+  ]},
+];
+const pathGet = (obj, path)=>path.split('.').reduce((o,k)=>(o==null?undefined:o[k]), obj);
 
 export default function App(){
   // -- Tab state ---------------------------------------------
@@ -30,6 +107,24 @@ export default function App(){
   const relConnected = relActive
     ? new Set([relActive,...REDGES.filter(e=>e.f===relActive||e.t===relActive).flatMap(e=>[e.f,e.t])])
     : null;
+
+  // -- v3.4.0 Defaults-tab overrides (no-slider model constants) ------
+  // Loaded from localStorage and applied to the engine's BASE boundary BEFORE
+  // the first engine run. Precedence: a pin's paramSnapshot wins for the sc
+  // params it contains; these overrides fill everything else.
+  const [defaultsOv, setDefaultsOv] = useState(()=>{
+    let ov = {};
+    try{ ov = JSON.parse(localStorage.getItem('retirement_sim_defaults_overrides')||'{}') || {}; }catch(e){}
+    applyDefaultsOverrides(ov);
+    return ov;
+  });
+  const [defaultsRev, setDefaultsRev] = useState(0);
+  const defaultsCode = useMemo(()=>getDefaultsCode(),[]);
+  useEffect(()=>{
+    applyDefaultsOverrides(defaultsOv);
+    try{ localStorage.setItem('retirement_sim_defaults_overrides', JSON.stringify(defaultsOv)); }catch(e){}
+    setDefaultsRev(r=>r+1);
+  },[defaultsOv]);
 
   // -- Scenario state (single object for live + per-pin editing) ------
   const [liveSc,  setLiveSc]  = useState(SC_DEFAULTS);
@@ -65,6 +160,7 @@ export default function App(){
     settlementNeed=525_000, settlementYear=2026, gainOffsetPct=0,
     sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true, requireSameYearForOffset=true,
     hiPaydownPct=100, caGainCap=1_200_000, settleLifestyleDraw=0,
+    mtgPrincipalOn=false, mtgPrincipalCap=2000, mtgPrincipalUncapped=false,
     sixthIncomeSegments=[],
   } = sc;
 
@@ -137,6 +233,9 @@ export default function App(){
   const setNolanMin       = v=>setSc(s=>({...s,nolanMin:v}));
   const setLoans          = v=>setSc(s=>({...s,loans:typeof v==="function"?v(migrateScLoans(s)):v}));
   const setSettleLifestyleDraw = v=>setSc(s=>({...s,settleLifestyleDraw:v}));
+  const setMtgPrincipalOn       = v=>setSc(s=>({...s,mtgPrincipalOn:v}));
+  const setMtgPrincipalCap      = v=>setSc(s=>({...s,mtgPrincipalCap:v}));
+  const setMtgPrincipalUncapped = v=>setSc(s=>({...s,mtgPrincipalUncapped:v}));
   const setRdTopUp        = v=>setSc(s=>({...s,rdTopUp:v}));
   const setRdCap          = v=>setSc(s=>({...s,rdCap:v}));
   const setObTopUp        = v=>setSc(s=>({...s,obTopUp:v}));
@@ -251,7 +350,7 @@ export default function App(){
     ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
     loans:migrateScLoans(sc).map(l=>({...l, rate:(l.rate||0)/100})),
     strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
-  }),[sc, diCap, maintRate]);
+  }),[sc, diCap, maintRate, defaultsRev]);   // defaultsRev: engines read mutated BASE/MORTGAGE/DISPO objects
 
   const liveRows  = useMemo(()=>buildScenario(liveParams),[liveParams]);
   // For pins being actively edited, recompute rows from pinScs
@@ -281,6 +380,16 @@ export default function App(){
     return {...pin, rows, stats:keyStats(rows)};
   }),[pins, pinScs]);
   const liveStats = useMemo(()=>keyStats(liveRows),[liveRows]);
+
+  // v3.4.0: saved-pin rows must also see Defaults-tab overrides (their engine
+  // runs read the same mutated BASE boundary) -- rebuild on override change.
+  useEffect(()=>{
+    if(defaultsRev===0) return;
+    setPins(ps=>ps.map(p=>{
+      const rows=buildRowsFromSnapshot(p.paramSnapshot||{});
+      return {...p, rows, stats:keyStats(rows)};
+    }));
+  },[defaultsRev]);
 
   // v3.1.2 settlement breakdown -- everything the Settlement card displays comes
   // from here, pulled straight off the disposeAsset return objects (no UI recompute).
@@ -370,6 +479,26 @@ export default function App(){
     }));
     const _sweepLoanQ = ()=>_loans.filter(L=>L.includeInSweep && L.bal>0)
       .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
+
+    // v3.4.0 mortgage state (6th + 15th): contractual IO through ~Jul 2031, then
+    // payment recasts to amortize the ACTUAL balance over the remaining term.
+    const _mkMtg = (m,label)=>({p:{...m}, label, bal:m.balance, recast:null, ioPmt:0, transAnnounced:false, payoffAnnounced:false});
+    const _mtg6  = _mkMtg(MORTGAGE_DEFAULTS.sixth, '6th St');
+    const _mtg15 = _mkMtg(MORTGAGE_DEFAULTS.fifteenth, '15th St');
+    const _stepMtg = (st, calYear, calMonth1to12, owned)=>{
+      const m=st.p;
+      const k=(calYear-m.originYear)*12 + (calMonth1to12-m.originMonth);
+      if(k<0 || !owned || st.bal<=0) return 0;
+      const interest = st.bal*m.rate/12;
+      if(k < m.ioYears*12) return interest;              // IO: interest only, balance flat
+      if(st.recast==null){                                // recast on ACTUAL remaining balance
+        st.recast = loanMonthlyPmt(st.bal, m.rate, Math.max(1, m.termYears*12 - k));
+        st.ioPmt  = interest;
+      }
+      const pmt = Math.min(st.recast, st.bal + interest);
+      st.bal = Math.max(0, st.bal + interest - pmt);
+      return pmt;
+    };
 
     // Running balances
     let ccBal    = payOffHI ? 0 : (liveParams.ccBal||60000);
@@ -511,8 +640,9 @@ export default function App(){
       const kidsHlth  = (calYear<BASE.sophiaOff||calYear<BASE.nolanOff)?BASE.healthKids:0;
       const health    = hiMo+brendaHlth+kidsHlth;
       const hiDebtNow = ccBal+sophiaBal+nolanBal;
-      const duplxPmt  = duplexKeepingFn(calYear) ? ((!payOffHI&&hiDebtNow>0)?BASE.duplxIO:BASE.duplxPnI) : 0;
-      const primPmt   = keepingFn(calYear)      ? ((!payOffHI&&hiDebtNow>0)?BASE.primIO:BASE.primPnI)   : 0;
+      // v3.4.0: contractual IO -> recast P&I (was: HI-debt-driven payment switch)
+      const duplxPmt  = Math.round(_stepMtg(_mtg15, calYear, d.getMonth()+1, duplexKeepingFn(calYear)));
+      const primPmt   = Math.round(_stepMtg(_mtg6,  calYear, d.getMonth()+1, keepingFn(calYear)));
       const lafPmt    = lafKeepingFn(calYear)   ? BASE.lafPnI : 0;
       const mtg       = duplxPmt+lafPmt+primPmt;
       const core      = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf;
@@ -542,10 +672,10 @@ export default function App(){
       );
       // Income tax estimate -- annualize this month's income; mortgage interest deduction uses current balances
       const _yrsPaid = 5 + mo/12;
-      const _dplxBal = duplexKeepingFn(calYear) ? remainBal(BASE.duplexMortgage, BASE.duplexRate, 30, _yrsPaid) : 0;
+      const _dplxBal = duplexKeepingFn(calYear) ? _mtg15.bal : 0;   // v3.4.0 state balances
       const _lafBal  = lafKeepingFn(calYear)    ? remainBal(BASE.lafayetteMortgage, BASE.lafayetteRate, 30, _yrsPaid) : 0;
-      const _primBal = keepingFn(calYear)       ? remainBal(BASE.primaryMortgage, BASE.primaryRate, 30, _yrsPaid) : 0;
-      const _mtgInt  = _dplxBal*BASE.duplexRate + _lafBal*BASE.lafayetteRate + _primBal*BASE.primaryRate;
+      const _primBal = keepingFn(calYear)       ? _mtg6.bal : 0;
+      const _mtgInt  = _dplxBal*_mtg15.p.rate + _lafBal*BASE.lafayetteRate + _primBal*_mtg6.p.rate;
       const taxMo = Math.round(estimateTax(liveParams, BASE.pensionMonthly*12, wkInc*12, yourSsMo, brendaSsMo, rentalMo*12, _mtgInt) / 12);
       const tier1  = mtg+health+core+famLoan+hiMins+propCost+taxMo;
 
@@ -616,7 +746,27 @@ export default function App(){
       const graceDone = debtWasCleared && !hasDebt && (mo - debtClearedMo) >= (sweepDelay||0);
       // When debt is clear, the sweep amount (surplusAboveFloor) redirects to savings.
       // The one-time waterfall remainder reaches savings regardless of grace.
-      const sweepToSavings = (graceDone ? surplusAboveFloor + maintRedirect : 0) + _oneTimeToSavings;
+      let toSavings = (graceDone ? surplusAboveFloor + maintRedirect : 0) + _oneTimeToSavings;
+      // v3.4.0 mortgage-principal bucket: positioned after all upstream buckets
+      // and the HI debt sweep, immediately BEFORE the surplus->savings sweep.
+      // Fed by leftover debt-sweep (avalanche fully satisfied) plus what would
+      // otherwise go to savings; 6th (4.875%) before 15th (4.35%); only while
+      // the property is still held. Disabled (default) leaves flows untouched.
+      let mtgExtraMo = 0;
+      if(liveParams.mtgPrincipalOn){
+        const _mcap = liveParams.mtgPrincipalUncapped ? Infinity : (liveParams.mtgPrincipalCap||0);
+        const _leftover = Math.max(0, xtra);
+        const room = Math.min(_mcap, _leftover + toSavings);
+        for(const [st,ownedFn] of [[_mtg6,keepingFn],[_mtg15,duplexKeepingFn]]){
+          if(room - mtgExtraMo <= 0) break;
+          if(!ownedFn(calYear) || st.bal<=0) continue;
+          const pay = Math.min(room - mtgExtraMo, st.bal);
+          st.bal -= pay; mtgExtraMo += pay;
+        }
+        const _takenFromSavings = Math.max(0, mtgExtraMo - _leftover);
+        toSavings = Math.max(0, toSavings - _takenFromSavings);
+      }
+      const sweepToSavings = toSavings;
       // Compound savingsAcc monthly at investReturn, then add new sweep contribution
       if(savingsAcc>0) savingsAcc *= (1+(liveParams.investReturn||0.055)/12);
       if(sweepToSavings>0) savingsAcc += sweepToSavings;
@@ -646,6 +796,17 @@ export default function App(){
       for(const L of _loans){
         if(L.started && !L.startAnnounced){ L.startAnnounced=true; events.push(`${L.label} starts -- $${Math.round(L.pmt).toLocaleString()}/mo`); }
         if(L.started && L.bal<=0 && !L.payoffAnnounced){ L.payoffAnnounced=true; events.push(`${L.label} paid off!`); }
+      }
+      // v3.4.0 mortgage events from engine state
+      for(const st of [_mtg6,_mtg15]){
+        if(st.recast!=null && !st.transAnnounced){
+          st.transAnnounced=true;
+          events.push(`${st.label} mortgage: IO→P&I (+$${Math.round(st.recast-st.ioPmt).toLocaleString()}/mo)`);
+        }
+        if(st.bal<=0 && !st.payoffAnnounced){
+          st.payoffAnnounced=true;
+          events.push(`${st.label} mortgage paid off early! 🎉`);
+        }
       }
       // v3.2.0 settlement residual routing events
       if(_settleDrawMo>0) events.push(`Settlement lifestyle draw $${Math.round(_settleDrawMo/1000)}K`);
@@ -677,6 +838,10 @@ export default function App(){
         paydownDetail: _payDetailMo ? _payDetailMo.perDebt : null,
         oneTimeSweep: Math.round(_oneTimeSweep),
         loansBal: Math.round(_loans.reduce((s,L)=>s+L.bal,0)),
+        // v3.4.0 mortgage-principal bucket + balances
+        mtgExtra: Math.round(mtgExtraMo),
+        mtgBal6:  Math.round(_mtg6.bal),
+        mtgBal15: Math.round(_mtg15.bal),
         events,
         // Income breakdown
         pension:Math.round(pension),
@@ -691,7 +856,7 @@ export default function App(){
      lafStopYear,lafRental,topUnit,bottomRent,strRent,ltrRent,sixthRent,sixthMonths,
      workPts,ssAge,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
      struct6,struct15,structLaf,maintStr,bufferMode,payOffHI,
-     strPlatformPct,strCleanPct,mgrPct,strSchedule,mtrSchedule]);  // wfMonths only affects table slice, not engine run
+     strPlatformPct,strCleanPct,mgrPct,strSchedule,mtrSchedule,defaultsRev]);  // wfMonths only affects table slice, not engine run
 
   // v3.2.0: expose both engines' outputs for Playwright parity/consistency tests
   useEffect(()=>{
@@ -780,7 +945,7 @@ export default function App(){
         let primNet=0;
         if(sixthOwned){
           const pv=BASE.primaryValue*app;
-          const pb=remainBal(BASE.primaryMortgage,BASE.primaryRate,30,5+i);
+          const pb=r.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
           const sn=pv*(1-_SCOST);
           const taxable=Math.max(0,Math.max(0,sn-BASE.sixthBasis)-BASE.marriedExcl);
           primNet=sn-pb-taxable*_CGRATE;
@@ -788,14 +953,14 @@ export default function App(){
         let dplxNet=0;
         if(dupOwned){
           const dv=BASE.duplexValue*app;
-          const db=remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+i);
+          const db=r.dplxBalRaw ?? 0;
           const dsn=dv*(1-_SCOST);
           dplxNet=dsn-db-Math.max(0,dsn-_liq15thBasis)*_CGRATE;
         }
         let lafNet=0;
         if(lafOwned){
           const lv=BASE.lafayetteValue*app;
-          const lb=remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
+          const lb=r.lafBalRaw ?? remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
           const lsn=lv*(1-_SCOST);
           lafNet=lsn-lb-Math.max(0,lsn-_liqLafBasis)*_CGRATE;
         }
@@ -832,7 +997,7 @@ export default function App(){
           let pPrimNet=0;
           if(pSixthOwned){
             const pv=BASE.primaryValue*pApp;
-            const pb=remainBal(BASE.primaryMortgage,BASE.primaryRate,30,5+i);
+            const pb=pin.rows[i]?.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
             const sn=pv*(1-_SCOST);
             const taxable=Math.max(0,Math.max(0,sn-BASE.sixthBasis)-BASE.marriedExcl);
             pPrimNet=sn-pb-taxable*_CGRATE;
@@ -840,14 +1005,14 @@ export default function App(){
           let pDplxNet=0;
           if(pDupOwned){
             const dv=BASE.duplexValue*pApp;
-            const db=remainBal(BASE.duplexMortgage,BASE.duplexRate,30,5+i);
+            const db=pin.rows[i]?.dplxBalRaw ?? 0;
             const dsn=dv*(1-_SCOST);
             pDplxNet=dsn-db-Math.max(0,dsn-p15th)*_CGRATE;
           }
           let pLafNet=0;
           if(pLafOwned){
             const lv=BASE.lafayetteValue*pApp;
-            const lb=remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
+            const lb=pin.rows[i]?.lafBalRaw ?? remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
             const lsn=lv*(1-_SCOST);
             pLafNet=lsn-lb-Math.max(0,lsn-pLaf)*_CGRATE;
           }
@@ -1189,10 +1354,12 @@ export default function App(){
     const fmt = yFmt||(v=>v>=1000?`${(v/1000).toFixed(0)}K`:v);
     // Stable Y domain: if yDomain provided use it, else auto
     const axisDomain = yDomain || [0,'auto'];
-    // For breakdown table, use liveRows directly
-    // For NW chart use chartData (includes sweepSavK, savingsAcc-adjusted nw).
-    // For other charts use liveRows (have reqWork, surplus etc. the chart keys expect).
-    const bdSource = chartId==='nw' ? chartData : liveRows;
+    // Breakdown table source: NW and Fixed Costs read chartData (their series
+    // keys -- sweepSavK, fc_* -- are aggregated there from the authoritative
+    // monthly wfData; liveRows has neither). Other charts read liveRows, where
+    // reqWork/surplus/debt keys actually live. (v3.4.0 fix: fixedCosts read
+    // liveRows and rendered $0 for every fc_* cell.)
+    const bdSource = (chartId==='nw' || chartId==='fixedCosts') ? chartData : liveRows;
     const bdRows = bdSource.filter((_,i)=>i%2===0||i===bdSource.length-1); // every other year
     return (
       <div style={{background:bg1,border:`1px solid ${isExpanded?color:bdr}`,borderRadius:10,
@@ -1484,7 +1651,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.3.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.4.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1496,7 +1663,7 @@ export default function App(){
 
       {/* Tab bar */}
       <div style={{display:"flex",gap:4,borderBottom:`1px solid ${bdr}`,marginBottom:14}}>
-        {[["simulator","Simulator"],["cashflow","Cash Flow"],["relationships","Input / Output Map"],["glossary","Glossary"]].map(([key,label])=>(
+        {[["simulator","Simulator"],["cashflow","Cash Flow"],["defaults","Defaults"],["relationships","Input / Output Map"],["glossary","Glossary"]].map(([key,label])=>(
           <button key={key} onClick={()=>setActiveTab(key)} style={{
             padding:"8px 18px",border:"none",cursor:"pointer",fontFamily:font,fontSize:12,
             background:"transparent",color:activeTab===key?bright:muted,
@@ -2226,8 +2393,9 @@ export default function App(){
                 const fedTax      = taxableGain * BASE.fedCapGains;
                 const coTax       = taxableGain * BASE.coCapGains;
                 const totalTax    = fedTax + coTax;
-                const yrsPaidAtSale = 5 + (sellYear - BASE.startYear);
-                const mtgPayoff   = remainBal(BASE.primaryMortgage, BASE.primaryRate, 30, yrsPaidAtSale);
+                // v3.4.0: payoff follows the IO/recast schedule (flat through ~Jul 2031)
+                const mtgPayoff   = mortgageBalanceClosed(MORTGAGE_DEFAULTS.sixth,
+                  mortgageMonthsSince(MORTGAGE_DEFAULTS.sixth, sellYear, 7));
                 const hiPayoff    = payOffHI ? HI_TOTAL : 0;
                 const netToInvest = Math.max(0, saleNet - mtgPayoff - totalTax - hiPayoff);
                 const row = (label, val, col) => (
@@ -2832,9 +3000,14 @@ export default function App(){
                 const hlWho=yr===BASE.sophiaOff?"Sophia off plan":yr===BASE.nolanOff?"Nolan off plan":yr===BASE.brendaMedYear?"Brenda → Medicare":"";
                 evts.push({cat:"cost", icon:"HL", desc:`Health insurance drops${hlWho?` — ${hlWho}`:""}`, delta:r.health-prev.health, note:`$${prev.health.toLocaleString()} → $${r.health.toLocaleString()}/mo`});
               }
-              if(prev && r.mtg > prev.mtg+200)
-                evts.push({cat:"cost", icon:"MTG", desc:"Mortgages switch IO → full P&I (HI debt cleared)", delta:r.mtg-prev.mtg, note:`$${prev.mtg.toLocaleString()} → $${r.mtg.toLocaleString()}/mo`});
-              if(prev && r.mtg < prev.mtg-200)
+              // v3.4.0: contractual IO->P&I recast events straight from engine state
+              for(const t of (r.mtgTransitions||[]))
+                evts.push({cat:"cost", icon:"MTG", desc:`${t.label} mortgage: IO→P&I (+$${t.delta.toLocaleString()}/mo)`, delta:t.delta, note:`10-yr interest-only period ends; payment recasts to amortize the actual balance over the remaining term`});
+              for(const lbl of (r.mtgPayoffs||[]))
+                evts.push({cat:"milestone", icon:"MTG", desc:`${lbl} mortgage paid off early`, delta:0, note:"extra principal from the waterfall bucket retired it ahead of schedule"});
+              if(prev && r.mtg > prev.mtg+200 && !(r.mtgTransitions||[]).length && !(prev.mtgTransitions||[]).length)
+                evts.push({cat:"cost", icon:"MTG", desc:"Mortgage cost rises", delta:r.mtg-prev.mtg, note:`$${prev.mtg.toLocaleString()} → $${r.mtg.toLocaleString()}/mo`});
+              if(prev && r.mtg < prev.mtg-200 && !(r.mtgPayoffs||[]).length)
                 evts.push({cat:"cost", icon:"MTG", desc:"Mortgage cost drops", delta:r.mtg-prev.mtg, note:`$${prev.mtg.toLocaleString()} → $${r.mtg.toLocaleString()}/mo`});
               // v3.2.0 loan events straight from engine state (not hardcoded)
               for(const lbl of (r.loanStarts||[]))
@@ -3232,6 +3405,39 @@ export default function App(){
             </div>
 
 
+            {/* v3.4.0: Mortgage principal paydown bucket */}
+            {sect("Mortgage Principal Paydown")}
+            <div style={{fontSize:8,color:dim,marginBottom:8,lineHeight:1.6}}>
+              Extra principal to 6th St (4.875%) then 15th St (4.35%), fed AFTER all buckets
+              and the HI debt sweep, immediately before the surplus→savings sweep. Only while
+              the property is still held; Lafayette excluded (low rate/balance). Paying during
+              the IO window lowers the 2031 recast payment.
+            </div>
+            <div data-testid="mtg-principal-toggle" style={{marginBottom:8}}>
+              {toggle(mtgPrincipalOn,setMtgPrincipalOn,[
+                {v:false,l:"Off",c:dim},{v:true,l:"On",c:green}
+              ])}
+            </div>
+            {mtgPrincipalOn&&(<>
+              <div style={{marginBottom:6}}>
+                {toggle(mtgPrincipalUncapped,setMtgPrincipalUncapped,[
+                  {v:false,l:"Capped",c:amber},{v:true,l:"Uncapped",c:red}
+                ])}
+              </div>
+              {!mtgPrincipalUncapped&&slider("Monthly cap",mtgPrincipalCap,setMtgPrincipalCap,250,10000,250,v=>"$"+v.toLocaleString()+"/mo")}
+              {(()=>{
+                const totalExtra = wfData.reduce((s,r)=>s+(r.mtgExtra||0),0);
+                const last = wfData[wfData.length-1]||{};
+                return (
+                  <div style={{fontSize:9,color:dim,marginBottom:10}}>
+                    Applied over horizon: <span style={{color:green,fontFamily:mono}}>${Math.round(totalExtra/1000)}K</span>
+                    {" · "}end balances: 6th <span style={{fontFamily:mono}}>${Math.round((last.mtgBal6||0)/1000)}K</span>,
+                    15th <span style={{fontFamily:mono}}>${Math.round((last.mtgBal15||0)/1000)}K</span>
+                  </div>
+                );
+              })()}
+            </>)}
+
             {/* Tier 4: Lifestyle target + Sweep dial */}
             {sect("Tier 4 -- Lifestyle Target (FCF Floor)")}
             <div style={{fontSize:8,color:dim,marginBottom:8,lineHeight:1.6}}>
@@ -3574,6 +3780,129 @@ export default function App(){
 
         </div>
       )} {/* end cashflow tab */}
+
+      {/* ====== DEFAULTS TAB (v3.4.0) ====== */}
+      {activeTab==="defaults" && (()=>{
+        const codeGet = path=>pathGet(defaultsCode, path);
+        const ovGet   = path=>pathGet(defaultsOv, path);
+        const setOverride = (path, val)=>{
+          setDefaultsOv(prev=>{
+            const next = JSON.parse(JSON.stringify(prev||{}));
+            const keys = path.split('.');
+            if(val==null || !isFinite(val) || val===codeGet(path)){
+              let o=next;
+              for(let i=0;i<keys.length-1;i++){ if(!o[keys[i]]) return next; o=o[keys[i]]; }
+              delete o[keys[keys.length-1]];
+            } else {
+              let o=next;
+              for(let i=0;i<keys.length-1;i++){ o[keys[i]]=o[keys[i]]||{}; o=o[keys[i]]; }
+              o[keys[keys.length-1]]=val;
+            }
+            return next;
+          });
+        };
+        const resetPaths = paths=>setDefaultsOv(prev=>{
+          const next = JSON.parse(JSON.stringify(prev||{}));
+          for(const path of paths){
+            const keys=path.split('.');
+            let o=next, ok=true;
+            for(let i=0;i<keys.length-1;i++){ if(!o[keys[i]]){ok=false;break;} o=o[keys[i]]; }
+            if(ok) delete o[keys[keys.length-1]];
+          }
+          return next;
+        });
+        const modCount = DEFAULTS_REGISTRY.reduce((s,g)=>s+g.items.filter(([p])=>ovGet(p)!=null).length,0);
+        const exportDefaults = ()=>{
+          const blob=new Blob([JSON.stringify({version:1, savedAt:new Date().toISOString(), overrides:defaultsOv},null,2)],{type:'application/json'});
+          const url=URL.createObjectURL(blob);
+          const a=document.createElement('a');
+          a.href=url; a.download=`retirement-defaults-${new Date().toISOString().slice(0,10)}.json`;
+          a.click(); URL.revokeObjectURL(url);
+        };
+        const importDefaults = e=>{
+          const file=e.target.files?.[0];
+          if(!file) return;
+          const reader=new FileReader();
+          reader.onload=ev=>{
+            try{
+              const parsed=JSON.parse(ev.target.result);
+              setDefaultsOv(parsed.overrides || parsed || {});
+            }catch(err){ alert('Could not read defaults file: '+err.message); }
+          };
+          reader.readAsText(file);
+          e.target.value='';
+        };
+        return (
+        <div data-testid="defaults-tab">
+          <div style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:14,marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+              <div>
+                <div style={{fontSize:12,color:bright,fontWeight:"bold"}}>Model Defaults
+                  {modCount>0&&<span data-testid="defaults-mod-count" style={{fontSize:9,color:amber,marginLeft:8,fontFamily:mono}}>{modCount} modified</span>}
+                </div>
+                <div style={{fontSize:9,color:dim,marginTop:4,lineHeight:1.6,maxWidth:640}}>
+                  Every input the model uses that has no slider elsewhere. Edits persist in this browser
+                  (localStorage) and merge at the engine's BASE boundary, so both the annual and monthly
+                  engines see them. <span style={{color:muted}}>Precedence: a loaded pin's snapshot wins for the
+                  scenario params it contains; these overrides fill everything else.</span> Export writes a
+                  standalone defaults file — deliberately separate from pin JSONs.
+                </div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <button onClick={exportDefaults} style={{fontSize:9,padding:"4px 10px",borderRadius:4,fontFamily:font,
+                  background:"transparent",border:`1px solid ${bdr}`,color:muted,cursor:"pointer"}}>Export JSON</button>
+                <label style={{fontSize:9,padding:"4px 10px",borderRadius:4,fontFamily:font,
+                  background:"transparent",border:`1px solid ${bdr}`,color:muted,cursor:"pointer"}}>
+                  Import JSON<input type="file" accept=".json" onChange={importDefaults} style={{display:"none"}}/>
+                </label>
+                <button data-testid="defaults-reset-all" onClick={()=>setDefaultsOv({})} style={{fontSize:9,padding:"4px 10px",borderRadius:4,fontFamily:font,
+                  background:modCount>0?red+"22":"transparent",border:`1px solid ${modCount>0?red:bdr}`,color:modCount>0?red:dim,cursor:"pointer"}}>
+                  Reset ALL to code defaults</button>
+              </div>
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(340px, 1fr))",gap:12}}>
+            {DEFAULTS_REGISTRY.map(({group,items})=>{
+              const groupMods = items.filter(([p])=>ovGet(p)!=null).length;
+              return (
+                <div key={group} style={{background:bg1,border:`1px solid ${groupMods?amber+"55":bdr}`,borderRadius:10,padding:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <div style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>{group}</div>
+                    <button onClick={()=>resetPaths(items.map(([p])=>p))} disabled={!groupMods}
+                      style={{fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:groupMods?"pointer":"default",
+                        background:"transparent",border:`1px solid ${groupMods?amber:bdr}`,color:groupMods?amber:bdr}}>reset</button>
+                  </div>
+                  {items.map(([path,label])=>{
+                    const code=codeGet(path);
+                    const ov=ovGet(path);
+                    const modified = ov!=null;
+                    return (
+                      <div key={path} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,gap:8}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <span style={{fontSize:9,color:modified?amber:muted}}>
+                            {modified&&<span style={{display:"inline-block",width:6,height:6,borderRadius:3,background:amber,marginRight:5,verticalAlign:"middle"}}/>}
+                            {label}
+                          </span>
+                          {modified&&<span style={{fontSize:8,color:dim,marginLeft:6,fontFamily:mono}}>code: {code}</span>}
+                        </div>
+                        <input type="number" step="any" data-testid={`default-${path}`}
+                          value={ov ?? code ?? ''}
+                          onChange={e=>{
+                            const v=e.target.value;
+                            setOverride(path, v===''?null:parseFloat(v));
+                          }}
+                          style={{width:110,background:bg2,border:`1px solid ${modified?amber:bdr}`,borderRadius:4,
+                            color:modified?amber:bright,fontFamily:mono,fontSize:10,padding:"3px 6px",outline:"none",textAlign:"right"}}/>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        );
+      })()}
 
       {/* ====== RELATIONSHIPS TAB ====== */}
       {activeTab==="relationships" && (

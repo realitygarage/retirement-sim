@@ -1,0 +1,166 @@
+=== SESSION 19 JOURNAL — v3.4.0 ===
+Date: 2026-07-03
+Session goal: IO->P&I mortgage regression fix, Defaults tab with persistent
+overrides, mortgage-principal waterfall bucket. NEW WORKFLOW: implement ->
+user reviews -> (tests deferred this pass, see TEST STATUS).
+
+--- WHAT SHIPPED ---
+
+v3.4.0 -- IO/recast mortgage structure restored, Defaults tab with
+persistent overrides, mortgage-principal waterfall bucket.
+
+--- 1. IO -> P&I MORTGAGE STRUCTURE (regression fix) ---
+
+The regression: v3 amortized 6th/15th from 2021 via remainBal AND switched
+IO->P&I payments on HI-debt clearing -- but the IO period is a LOAN TERM,
+not a strategy toggle. Restored per-mortgage params in engine.js:
+
+  MORTGAGE_DEFAULTS = {
+    sixth:     { balance:805_495, rate:0.04875, originYear:2021,
+                 originMonth:7, termYears:30, ioYears:10 },
+    fifteenth: { balance:347_601, rate:0.0435, ... same shape },
+  }
+
+(balances calibrated from servicer statements, Jul 2026; IO payments derive
+exactly: 805,495 x 4.875%/12 = $3,272/mo; 347,601 x 4.35%/12 = $1,260/mo).
+Behavior, implemented as monthly STATE in both engines (annual buildScenario
+inner loop + wfData):
+  - during IO the balance stays flat absent extra principal;
+  - at month 120 (~Jul 2031) the payment recasts to amortize the ACTUAL
+    remaining balance over the remaining term: $5,260 (6th) / $2,171 (15th)
+    at current balances -- extra principal before 2031 lowers the recast;
+  - timeline + monthly Events emit "6th St mortgage: IO->P&I (+$1,988/mo)"
+    and "15th St ... (+$911/mo)" FROM ENGINE STATE (rows carry
+    mtgTransitions/mtgPayoffs); sold-before-2031 runs never recast;
+  - closed-form helpers (mortgageBalanceClosed / mortgagePaymentClosed /
+    mortgageMonthsSince) drive sale payoffs (computeDispo), the legacy
+    6th St Sale Details panel, and NW balances now come from state
+    (rows: primBalRaw/dplxBalRaw/lafBalRaw; chartData liq-NW + pin liq-NW
+    use them instead of remainBal).
+Escrow/tax/insurance stay in their existing cost lines (no double count).
+Lafayette keeps the old amortizing treatment (BASE.lafPnI).
+BASE.primIO/duplxIO/primPnI/duplxPnI are now legacy constants (unused).
+
+KNOCK-ON (correct, not a bug): P&I forced from mid-2031 raises fixed costs
+~$2.9K/mo; default HI-debt clear slips (annual ~2036). The old model
+under-stated post-2031 mortgage cost by paying IO while HI debt existed.
+
+EDGE (documented): disposition payoffs use the no-extra-principal closed
+form -- bucket prepayments before a sale slightly overstate payoff /
+understate proceeds (conservative).
+
+--- 2. DEFAULTS TAB ---
+
+New tab (Simulator | Cash Flow | Defaults | Map | Glossary): 7 groups /
+~55 no-slider constants enumerated from code -- BASE property values/basis,
+MORTGAGE_DEFAULTS (all fields), income baselines, health premiums +
+transition years, per-property tax/ins, core living, DISPO_DEFAULTS +
+liq-view cap-gains rates. Each row: label, numeric input, amber modified
+dot + "code: X" hint. Reset per group + Reset ALL. Export/Import writes a
+standalone defaults JSON (deliberately separate from pin files).
+
+Persistence: localStorage key 'retirement_sim_defaults_overrides', applied
+in the useState INITIALIZER (before the first engine run -- no flash).
+Application: applyDefaultsOverrides(ov) in engine.js resets BASE /
+MORTGAGE_DEFAULTS / DISPO_DEFAULTS to code values (captured in *_CODE
+copies) then merges numeric overrides -- both engines read these objects
+live; a defaultsRev counter is a dep of liveParams + wfData, and saved-pin
+rows rebuild on change. Precedence (documented in the tab header): a
+loaded pin's paramSnapshot wins for the sc params it contains;
+defaults-tab overrides fill everything else. getDefaultsCode() exposes
+pristine values for the modified-indicators.
+
+--- 3. MORTGAGE-PRINCIPAL WATERFALL BUCKET ---
+
+New sc params: mtgPrincipalOn (default OFF), mtgPrincipalCap ($2K/mo),
+mtgPrincipalUncapped. Controls live in the Cash Flow waterfall panel
+("Mortgage Principal Paydown", between Tier 3 and Tier 4) with an
+applied-over-horizon + end-balances readout.
+
+Position in the monthly chain: after maint/RD/OB buckets and the HI debt
+sweep, immediately BEFORE the surplus->savings sweep. Fed by leftover
+debt-sweep (avalanche fully satisfied first) plus what would otherwise go
+to savings; capped per month; 6th (4.875%) before 15th (4.35%); only while
+the property is held (Lafayette excluded by design). Conservation: the
+bucket only diverts money that existed in the flow; OFF is bit-identical
+to pre-v3.4.0 behavior (verified in node). Extra principal during IO
+lowers the 2031 recast (verified: cap $3K under payOffHI -> recast delta
+$1,988 -> $1,961). Early payoff emits "mortgage paid off early" event.
+Annual mirror: leftover xtra or post-debt monthly surplus feeds the bucket
+in the inner loop; the amount taken from surplus is subtracted from
+annualSweepToSav; the v3.2.0 sale-remainder also passes through the bucket
+before landing in sweep savings. The annual loop was restructured so
+loans/mortgages/bucket step even under payOffHI.
+
+--- 4. BONUS FIX: Fixed Costs breakdown table showed $0 ---
+
+Pre-existing bug (user screenshot): the Chart component's breakdown table
+read fc_* keys from liveRows, but those keys only exist in chartData
+(aggregated from the authoritative monthly wfData). liveRows -> undefined
+-> $0 in every cell; hideZero rows vanished. Fix: bdSource routes
+'fixedCosts' (like 'nw') to chartData. Verified: Mortgages row $5,498 ->
+$8,397 across the recast, totals populated. I1/I2/I3 only asserted row
+LABELS -- a value assertion is queued for the next test pass.
+
+--- FILES CHANGED ---
+
+src/engine.js     MORTGAGE_DEFAULTS + mortgage helpers + overrides
+                  machinery (BASE_CODE/MORTGAGE_CODE/DISPO_CODE,
+                  applyDefaultsOverrides, getDefaultsCode); buildScenario:
+                  mortgage state stepping, dynamic per-month _avail,
+                  state-driven NW balances/_mtgInt/payments, bucket mirror
+                  (+ boundary remainder), payOffHI loop restructure, new
+                  row fields (mtgTransitions, mtgPayoffs, mtgExtra,
+                  primBalRaw/dplxBalRaw/lafBalRaw), ioMode = contractual
+                  IO window; computeDispo takes payoffFn.
+src/defaults.js   mtgPrincipalOn/Cap/Uncapped in DEFAULTS + SC_DEFAULTS.
+src/App.jsx       v3.4.0 header/badge; DEFAULTS_REGISTRY + pathGet;
+                  defaultsOv/defaultsRev state + apply/persist effect +
+                  pin-rebuild effect; Defaults tab UI; wfData mortgage
+                  state + bucket + events + row fields (mtgExtra,
+                  mtgBal6/15); tax deduction + liq-NW from state balances;
+                  timeline mortgage events (generic jump suppressed when a
+                  transition explains it); bucket controls in waterfall
+                  panel; fixedCosts breakdown source fix.
+retirement-simulator.spec.js
+                  ONLY the three version-badge strings (E5/L1/M11) synced
+                  to v3.4.0 so the next run doesn't fail on the badge.
+
+--- TEST STATUS (deliberately deferred) ---
+
+The suite was NOT modified (beyond version strings) and NOT run this pass,
+per the new review-first workflow -- the user is crafting the next round of
+changes first. Verification done instead: node engine harness (IO pmts
+exact, recast $5,260/$2,171, flat IO balance, sold-2028 no transition +
+flat payoff, bucket direction + off-identical, overrides apply/reset) and
+a Playwright browser smoke (payment step $5,498->$8,397 at Jul '31 in
+wfData, matching annual transitions, Defaults tab override->engine->reset
+round trip, fixed-costs table populated).
+QUEUED for the next test pass (Group R + additions):
+  - flat balance during IO; payment step at month 120 == annuity formula;
+    recast uses ACTUAL balance (extra-principal direction); annual ==
+    monthly paths; sold-before-2031 never transitions
+  - defaults override changes engine output; reset restores; pin load
+    unaffected for snapshotted params
+  - bucket: fills only after upstream buckets/sweeps; conservation;
+    disabled == identical; IO-prepay lowers recast; sold property gets $0
+  - I-group value assertion: fixed-costs breakdown Total non-zero and ==
+    chartData fixedTotal ('26)
+  - EXPECT CHURN: G3/A-group debt-clear timing shifted by the 2031 P&I
+    step; any test leaning on post-2031 mortgage costs needs re-baselining.
+
+--- OPEN BACKLOG (carried) ---
+
+[P1] Run + repair the full suite for v3.4.0 (see TEST STATUS).
+[P1] Unify annual sweep model with wfData (buckets/floors drift).
+[P1] Phase 2 liquidation-NW disposeAsset; CPA rate calibration.
+[P2] Dispo payoff could consume mortgage STATE (extra-principal aware).
+[P2] Pin Comparison NW toggle; Glossary (segments, loans, residual split,
+     IO/recast, Defaults tab precedence).
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Read this journal (+18/17) first.
+2. Workflow: implement + bump version -> STOP for user diff review ->
+   on go-ahead: update/run tests (run_tests.ps1) -> commit -> journal.
+3. FIRST ORDER OF BUSINESS next session: the deferred v3.4.0 test pass.

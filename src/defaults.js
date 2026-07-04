@@ -177,6 +177,10 @@ export const DEFAULTS = {
   sophiaBal:     58_057,   sophiaRate:0.0814,sophiaMin: 737,
   nolanBal:     141_117,   nolanRate: 0.084, nolanMin: 1787,
   loans:         DEFAULT_LOANS_SC.map(l=>({...l, rate:l.rate/100})),  // engine-facing decimals
+  // v3.4.0 mortgage-principal waterfall bucket (after HI sweep, before savings)
+  mtgPrincipalOn:       false,
+  mtgPrincipalCap:      2_000,   // $/mo
+  mtgPrincipalUncapped: false,
   investedCash:  0,
   lifestyleDraws: [],
   strSchedule:   [],
@@ -251,6 +255,7 @@ export const SC_DEFAULTS = {
   sophiaBal:     58057,  sophiaRate:8.14, sophiaMin:737,
   nolanBal:      141117, nolanRate:8.40,  nolanMin:1787,
   loans:         DEFAULT_LOANS_SC,   // rate as %
+  mtgPrincipalOn:false, mtgPrincipalCap:2000, mtgPrincipalUncapped:false,
   rdTopUp:400, rdCap:10000, obTopUp:500, obCap:35000,
   discFloor:800, fcfSchedule:[], sweepDelay:0, struct6:600, struct15:500, structLaf:250,
   maintStr:0.75, bufferMode:"seq",
