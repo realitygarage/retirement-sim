@@ -1,169 +1,115 @@
 // =============================================================================
 // defaults.js  --  DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, SC_DEFAULTS
-// v3.1.0: per-property dispositions replace bespoke 6th-only sale block.
-//         Schema v3 -- old pins from v2.x are silently dropped on load.
+// v4.0.0-A: property-centric schema. properties[] replaces the flat
+//           dispositions/sixthIncomeSegments/topUnit/lafRental model.
+//           NO backward compatibility -- fresh schema, no migration.
 // =============================================================================
 import { BASE, DISPO_DEFAULTS } from "./engine.js";
 
 // -----------------------------------------------------------------------------
-// LIQUIDATION_DEFAULTS -- per-property CPA-worksheet figures.
-// Source: Ottinger.xlsx, 2026 accountant liquidation worksheet (Remax net sheets).
-// All figures are estimates; UI slider range = +/-50% of default.
+// PROPERTIES_DEFAULTS (v4.0.0-A) -- one entry per property; units array length
+// 1 or 2. mortgage.rate and appreciationPct are stored as DECIMALS in both the
+// engine-facing DEFAULTS and the UI-facing SC_DEFAULTS (unlike the old %-in-SC
+// convention for ccRate/sophiaRate/etc) -- this is new nested data, not a flat
+// knob, so there's no separate SC->engine conversion step for it; sliders that
+// edit these fields format the display as % but store the decimal directly.
+// Mortgage figures calibrated from servicer statements, Jul 2026 (v3.4.0).
+// Basis/CPA figures from the accountant liquidation worksheet (v3.1.0).
 // -----------------------------------------------------------------------------
-export const LIQUIDATION_DEFAULTS = {
-  sixth: {
-    label: '6th St (home)',
-    salesPrice:             1_675_000,
-    adjustedBasis:            899_550,  // $735K cost + $76K improvements + $88.55K closing
-    sec121Exclusion:          500_000,
-    caSourceDeferredGain:           0,
-    depreciationRecapture:          0,
-    cpaEstTax:                 62_000,  // Fed 50K + CO 12K + CA 0
-    cpaNetProceedsAfterTax:   708_881,
-  },
-  barberry: {                            // = Lafayette in sim (see spec §0)
-    label: '540 Barberry / Lafayette (rental)',
-    salesPrice:               625_000,
-    adjustedBasis:            183_043,  // carryover after 1031, per sheet
-    sec121Exclusion:                0,
-    caSourceDeferredGain:     391_507,
-    depreciationRecapture:     21_500,
-    cpaEstTax:                124_000,  // Fed 80K + CO 0 + CA 44K
-    cpaNetProceedsAfterTax:   283_567,
-  },
-  fifteenth: {
-    label: '2224 15th St (rental)',
-    salesPrice:             1_375_000,
-    adjustedBasis:            424_309,
-    sec121Exclusion:                0,
-    caSourceDeferredGain:     801_441,
-    depreciationRecapture:     44_000,
-    cpaEstTax:                288_000,  // Fed 200K + CO 8K + CA 80K
-    cpaNetProceedsAfterTax:   656_470,
-  },
-};
+export function freshPropertiesDefaults(){
+  return [
+    {
+      id: 'sixth', label: '6th St (home)', isPrimary: true,
+      value: 1_675_000, appreciationPct: null,   // null = inherit the Economy appreciation rate
+      mortgage: { balance: 805_495, rate: 0.04875, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
+      hold: {
+        mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
+        basis: 899_550, sec121Exclusion: 500_000, caSourceDeferredGain: 0, depreciationRecapture: 0,
+        cpaEstTax: 62_000, cpaNetProceedsAfterTax: 708_881,
+      },
+      units: [
+        { id: 'sixth-main', label: 'Main', segments: [] },
+      ],
+    },
+    {
+      id: 'fifteenth', label: '2224 15th St (rental)', isPrimary: false,
+      value: 1_375_000, appreciationPct: null,
+      mortgage: { balance: 347_601, rate: 0.0435, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
+      hold: {
+        mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
+        basis: 424_309, sec121Exclusion: 0, caSourceDeferredGain: 801_441, depreciationRecapture: 44_000,
+        cpaEstTax: 288_000, cpaNetProceedsAfterTax: 656_470,
+      },
+      units: [
+        { id: 'fifteenth-top', label: 'Top unit', segments: [
+          { yrFrom: 2026, yrTo: 2046, kind: 'str',
+            str: [{ days: 120, rate: 280, type: 'nightly' }], mtr: [{ months: 10, rate: 3100 }], ltr: { monthlyRent: 3100 } },
+        ] },
+        { id: 'fifteenth-bottom', label: 'Bottom unit', segments: [
+          { yrFrom: 2026, yrTo: 2046, kind: 'ltr',
+            str: [{ days: 120, rate: 280, type: 'nightly' }], mtr: [{ months: 10, rate: 3520 }], ltr: { monthlyRent: 3520 } },
+        ] },
+      ],
+    },
+    {
+      id: 'barberry', label: '540 Barberry / Lafayette (rental)', isPrimary: false,
+      value: 625_000, appreciationPct: null,
+      // ioYears:0 -- amortizing from origination (no interest-only period), matching the
+      // pre-v4 Lafayette treatment. Same mortgage state machine as the IO/recast properties.
+      // originMonth:1 (not 7, unlike sixth/fifteenth's servicer-calibrated Jul origin) --
+      // preserves the pre-v4 remainBal(...,5+yr) convention, which assumed exactly 5 years
+      // paid as of Jan 2026 (60 months); Barberry's true origination date is uncalibrated.
+      mortgage: { balance: 181_115, rate: 0.0410, originYear: 2021, originMonth: 1, termYears: 30, ioYears: 0 },
+      hold: {
+        mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
+        basis: 183_043, sec121Exclusion: 0, caSourceDeferredGain: 391_507, depreciationRecapture: 21_500,
+        cpaEstTax: 124_000, cpaNetProceedsAfterTax: 283_567,
+      },
+      units: [
+        { id: 'barberry-main', label: 'Main', segments: [
+          { yrFrom: 2026, yrTo: 2046, kind: 'ltr',
+            str: [{ days: 120, rate: 280, type: 'nightly' }], mtr: [{ months: 10, rate: 3150 }], ltr: { monthlyRent: 3150 } },
+        ] },
+      ],
+    },
+  ];
+}
 
 // -----------------------------------------------------------------------------
-// SETTLEMENT_DEFAULTS
+// ONE-TIME OBLIGATION (v4.0.0-A, was Settlement). offsetsCapitalGains: when true,
+// the obligation amount reduces that year's recognized capital gains (capped at
+// the gains pool) -- the Kimbell/Arrowsmith position, now assumed fully applied
+// (no percentage slider). The obligation still ALSO reduces the year's pooled
+// cash (paid out regardless of the tax treatment).
 // -----------------------------------------------------------------------------
-export const SETTLEMENT_DEFAULTS = {
-  settlementNeed:        525_000,   // slider band 450K-525K; hard range +/-50%
-  settlementYear:        2026,
-  gainOffsetPct:              0,    // 0-100, DEFAULT OFF (Kimbell/Arrowsmith, UNCONFIRMED)
-  sameYearSaleTaxBump:   50_000,    // +tax if all 3 sold same calendar year
-  sameYearSaleTaxBumpOn:  true,
-  requireSameYearForOffset: true,
-  settleLifestyleDraw:        0,    // v3.2.0: (a) one-time lifestyle draw from residual, $
-  hiPaydownPct:             100,    // v3.2.0: (b) % of (residual - draw) to HI debt avalanche
-  caGainCap:          1_200_000,    // CA $1.2M prior-1031 gain cap (§4.6)
-};
+export function freshObligationDefaults(){
+  return { amount: 525_000, year: 2026, quarter: 2, offsetsCapitalGains: true };
+}
 
 // -----------------------------------------------------------------------------
-// LOANS (v3.2.0) -- generalized loan segments, replaces famLoanAmt/famLoanRate.
-// SC-facing shape (rate as %); engine-facing copies use rate as decimal.
-// startMonth is a calendar month number (1-12); model launch is Jun 2026.
+// LOANS (v3.2.0) -- generalized loan segments, unrelated to the v4 property
+// schema change; unchanged.
 // -----------------------------------------------------------------------------
 export const DEFAULT_LOANS_SC = [
   { label:'Family loan', amount:25_000, startYear:2026, startMonth:6, months:8, rate:7.5, includeInSweep:false },
 ];
 
-// Resolve a saved scenario's loans with legacy famLoan back-compat:
-// explicit loans array wins; else famLoanAmt>0 converts to a "Family loan" row,
-// famLoanAmt===0 means NO loans; else fall back to defaults. Rates stay in %.
-export function migrateScLoans(snap){
-  if(Array.isArray(snap?.loans)) return snap.loans;
-  if(snap && snap.famLoanAmt !== undefined){
-    return snap.famLoanAmt>0
-      ? [{ label:'Family loan', amount:snap.famLoanAmt, startYear:2026, startMonth:6,
-           months:8, rate:snap.famLoanRate ?? 7.5, includeInSweep:false }]
-      : [];
-  }
-  return DEFAULT_LOANS_SC;
-}
-
-// -----------------------------------------------------------------------------
-// SIXTH_STR_DEFAULTS -- 6th St short-term rental (mirrors duplex-top STR pattern)
-// -----------------------------------------------------------------------------
-// v3.3.0: segments-only 6th St income. The mode selector (none/mtr/str), the
-// flat STR params, and the debt-clear auto-stop are GONE -- sixthIncomeSegments
-// is the sole driving input; empty list = no 6th St income. Concurrent
-// (overlapping) segments SUM.
-// [{ yrFrom, yrTo, kind:'str'|'mtr'|'ltr',
-//    str:[{days,rate,type}], mtr:[{months,rate}], ltr:{monthlyRent} }]
-export const SIXTH_STR_DEFAULTS = {
-  sixthIncomeSegments: [],
-};
-
-// Legacy 6th St income back-compat (v3.3.0): pins saved with the old mode
-// selector convert to equivalent segments. Explicit non-empty segments win;
-// mode 'mtr' (or the older sixthMTR:true) becomes one flat MTR segment from
-// the pin's rate x months; mode 'str' becomes one STR segment over
-// [startYear, stopYear-1] whose 360d x ($/mo, monthly-type) inner grosses
-// exactly 12 x monthly -- identical income to the old flat path. The removed
-// sixthSTRStopOnDebtClear field is ignored silently. (Schedule-detail fields
-// mtrSchedule / sixthSTRSchedule are NOT converted -- flat values only.)
-export function migrateSixthIncomeSegments(o={}){
-  const segs = Array.isArray(o.sixthIncomeSegments) ? o.sixthIncomeSegments : [];
-  if(segs.length) return segs;
-  const mode = o.sixthIncomeMode || (o.sixthMTR ? 'mtr' : 'none');
-  if(mode==='mtr'){
-    const rate   = o.sixthMTRRent   ?? o.sixthRent   ?? 6000;
-    const months = o.sixthMTRMonths ?? o.sixthMonths ?? 10;
-    if(rate>0 && months>0)
-      return [{ yrFrom:2026, yrTo:2046, kind:'mtr',
-        mtr:[{months, rate}], str:[{days:120,rate:280,type:'nightly'}], ltr:{monthlyRent:rate} }];
-  }
-  if(mode==='str'){
-    const monthly = o.sixthSTRMonthly ?? 9000;
-    const from = o.sixthSTRStartYear ?? 2026;
-    const to   = Math.min(2046, (o.sixthSTRStopYear ?? 2055) - 1);
-    if(monthly>0 && to>=from)
-      return [{ yrFrom:from, yrTo:to, kind:'str',
-        str:[{days:360, rate:monthly, type:'monthly'}], mtr:[{months:10,rate:6000}], ltr:{monthlyRent:6000} }];
-  }
-  return [];
-}
-
-// -----------------------------------------------------------------------------
-// Helper: build one disposition entry from LIQUIDATION_DEFAULTS
-// -----------------------------------------------------------------------------
-function dispoEntry(key) {
-  const liq = LIQUIDATION_DEFAULTS[key];
-  return {
-    mode:      'keep',                 // 'keep' | 'sell_taxable' | 'full_1031' | 'partial_1031'
-    year:      2055,
-    saleMode:  'market',               // 'market' | 'forced'
-    cashBoot:  0,                      // partial_1031 only
-    salesPrice:             liq.salesPrice,
-    adjustedBasis:          liq.adjustedBasis,
-    sec121Exclusion:        liq.sec121Exclusion,
-    caSourceDeferredGain:   liq.caSourceDeferredGain,
-    depreciationRecapture:  liq.depreciationRecapture,
-    // CPA reference (for reconciliation card, not simulated)
-    cpaEstTax:              liq.cpaEstTax,
-    cpaNetProceedsAfterTax: liq.cpaNetProceedsAfterTax,
-  };
-}
-
 // =============================================================================
 // DEFAULTS  --  engine-facing values (rates as decimals)
 // =============================================================================
 export const DEFAULTS = {
-  lafStopYear:   2055,     // rental-stop year for Lafayette (independent of sale)
-  topUnit:       "str",
-  lafRental:     true,
   payOffHI:      false,
   ssStartYear:   2026,
   ssAmount:      BASE.yourSsEarly,
   workPts: [{yr:0,val:5417},{yr:2,val:3000},{yr:5,val:1000},{yr:8,val:0}],
   lifestyleSplit: 30,
   diCap:         1200,
-  duplexBottomLTR: 3_520,
-  duplexTopSTR:  2800,
-  duplexTopLTR:  3100,
-  duplexTopMTR:  3100,
-  sixthMTRRent:   6000,
-  sixthMTRMonths: 10,
+  // v4.0.0-A cost profiles (economy knobs, applied automatically by segment kind)
+  strPlatformPct: 0.03,
+  strCleanPct:    0.04,
+  mgrPct:         0,
+  ltrVacancyPct:  0.04,
+  mtrCleaningFlat: 300,
   reAppreciation:0.04,
   rentGrowth:    0.03,
   inflation:     0.028,
@@ -183,64 +129,53 @@ export const DEFAULTS = {
   mtgPrincipalUncapped: false,
   investedCash:  0,
   lifestyleDraws: [],
-  strSchedule:   [],
-  mtrSchedule:   [],
-  // v3.1.0 per-property dispositions
-  dispositions: {
-    sixth:     dispoEntry('sixth'),
-    barberry:  dispoEntry('barberry'),
-    fifteenth: dispoEntry('fifteenth'),
-  },
-  // v3.1.0 settlement
-  ...SETTLEMENT_DEFAULTS,
-  // v3.1.0 6th St STR group
-  ...SIXTH_STR_DEFAULTS,
+  // v4.0.0-A property-centric schema
+  properties: freshPropertiesDefaults(),
+  obligation: freshObligationDefaults(),
+  settleLifestyleDraw:      0,     // pooled-routing (a) one-time lifestyle draw, $
+  hiPaydownPct:           100,     // pooled-routing (b) % of (pool - obligation - draw)
+  caGainCap:        1_200_000,     // CA $1.2M prior-1031 gain cap (§4.6, unchanged)
+  sameYearSaleTaxBump:   50_000,   // +tax if ALL properties sold same calendar year
+  sameYearSaleTaxBumpOn:  true,
 };
 
 // =============================================================================
-// makeParams  --  spread + normalize dispositions (no bespoke sale math)
+// makeParams  --  spread + deep-normalize properties (no legacy field mapping)
 // =============================================================================
 export function makeParams(overrides={}){
   const p={...DEFAULTS,...overrides};
-  // Merge disposition entries so partial overrides pick up default field values
-  p.dispositions = {
-    sixth:     { ...DEFAULTS.dispositions.sixth,     ...(overrides.dispositions?.sixth     || {}) },
-    barberry:  { ...DEFAULTS.dispositions.barberry,  ...(overrides.dispositions?.barberry  || {}) },
-    fifteenth: { ...DEFAULTS.dispositions.fifteenth, ...(overrides.dispositions?.fifteenth || {}) },
-  };
-  // v3.2.0 legacy famLoan back-compat (engine-facing: rate as decimal).
-  // Explicit loans array wins; famLoanAmt===0 means no loans.
-  if(!Array.isArray(overrides.loans) && overrides.famLoanAmt !== undefined){
-    p.loans = overrides.famLoanAmt>0
-      ? [{ label:'Family loan', amount:overrides.famLoanAmt, startYear:2026, startMonth:6,
-           months:8, rate:overrides.famLoanRate ?? 0.075, includeInSweep:false }]
-      : [];
-  }
+  const baseProps = freshPropertiesDefaults();
+  const ovProps = Array.isArray(overrides.properties) ? overrides.properties : null;
+  // Merge by id so partial overrides (e.g. just {hold:{mode:'sell', year:2028}})
+  // pick up every other default field. Properties not present in the override
+  // fall back to fresh defaults untouched.
+  p.properties = baseProps.map(base=>{
+    const ov = ovProps?.find(x=>x.id===base.id);
+    if(!ov) return base;
+    return {
+      ...base, ...ov,
+      mortgage: { ...base.mortgage, ...(ov.mortgage||{}) },
+      hold: { ...base.hold, ...(ov.hold||{}) },
+      units: Array.isArray(ov.units) ? ov.units.map((u,i)=>({ ...(base.units[i]||{}), ...u,
+        segments: Array.isArray(u.segments) ? u.segments : (base.units[i]?.segments||[]) })) : base.units,
+    };
+  });
+  p.obligation = { ...freshObligationDefaults(), ...(overrides.obligation||{}) };
   p.loans = (p.loans||[]).filter(l=>l && (l.amount||0)>0 && (l.months||0)>0);
-  // v3.3.0: legacy 6th St mode params convert to segments (segments-only model)
-  p.sixthIncomeSegments = migrateSixthIncomeSegments(overrides);
   return p;
 }
 
 export const PIN_COLORS = ["#f59e0b","#f472b6","#34d399","#60a5fa","#a78bfa","#fb923c"];
-export const SAVE_SCHEMA_VERSION = 3;  // v3.1.0: schema break, no back-compat with v2.x
+export const SAVE_SCHEMA_VERSION = 4;  // v4.0.0-A: schema break, no back-compat with v3.x
 
 // =============================================================================
 // SC_DEFAULTS  --  UI-facing scenario snapshot (rates as %, ints where UI is int)
 // =============================================================================
 export const SC_DEFAULTS = {
-  lafStopYear:   2055,
-  topUnit:       "str",
-  lafRental:     true,
   payOffHI:      false,
   ssAge:         65,
   workPts:       [{yr:0,val:5417},{yr:2,val:3000},{yr:5,val:1000},{yr:8,val:0}],
   lifestyleSplit:30,
-  strRent:       2800,
-  bottomRent:    3520,
-  ltrRent:       3100,
-  sixthRent:     6000,
-  sixthMonths:   10,
   reApp:         4.0,
   rentGr:        3.0,
   cpi:           2.8,
@@ -249,8 +184,6 @@ export const SC_DEFAULTS = {
   taxEnabled:    true,
   investRet:     5.5,
   lifestyleDraws:[],
-  strSchedule:[],
-  mtrSchedule:[],
   ccBal:         60000,  ccRate:14.0,  ccMin:1200,
   sophiaBal:     58057,  sophiaRate:8.14, sophiaMin:737,
   nolanBal:      141117, nolanRate:8.40,  nolanMin:1787,
@@ -262,14 +195,14 @@ export const SC_DEFAULTS = {
   strPlatformPct: 3.0,
   strCleanPct:    4.0,
   mgrPct:         0.0,
-  // v3.1.0 per-property dispositions (dollars, no % conversion needed)
-  dispositions: {
-    sixth:     dispoEntry('sixth'),
-    barberry:  dispoEntry('barberry'),
-    fifteenth: dispoEntry('fifteenth'),
-  },
-  // v3.1.0 settlement
-  ...SETTLEMENT_DEFAULTS,
-  // v3.1.0 6th St STR group
-  ...SIXTH_STR_DEFAULTS,
+  ltrVacancyPct:  4.0,     // v4.0.0-A: %, applied to LTR segment income only
+  mtrCleaningFlat: 300,    // v4.0.0-A: flat $ per MTR block present that year
+  // v4.0.0-A property-centric schema (dollars/decimals -- no % conversion needed)
+  properties: freshPropertiesDefaults(),
+  obligation: freshObligationDefaults(),
+  settleLifestyleDraw:      0,
+  hiPaydownPct:           100,
+  caGainCap:        1_200_000,
+  sameYearSaleTaxBump:   50_000,
+  sameYearSaleTaxBumpOn:  true,
 };

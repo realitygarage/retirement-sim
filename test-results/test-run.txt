@@ -1,15 +1,15 @@
 ﻿**********************
 Windows PowerShell transcript start
-Start time: 20260703075606
+Start time: 20260704131255
 Username: RGROG23\rober
 RunAs User: RGROG23\rober
 Configuration Name: 
 Machine: RGROG23 (Microsoft Windows NT 10.0.26200.0)
 Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command .\run_tests.ps1
 ; $_ec = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }
-; (Get-Location).Path | Out-File -FilePath 'C:\Users\rober\AppData\Local\Temp\claude\claude-pwd-ps-f248' -Encoding utf8 -NoNewline
+; (Get-Location).Path | Out-File -FilePath 'C:\Users\rober\AppData\Local\Temp\claude\claude-pwd-ps-0ada' -Encoding utf8 -NoNewline
 ; if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { $host.SetShouldExit($_ec) } else { exit $_ec }
-Process ID: 4312
+Process ID: 14808
 PSVersion: 5.1.26100.8737
 PSEdition: Desktop
 PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.8737
@@ -20,8 +20,8 @@ PSRemotingProtocolVersion: 2.3
 SerializationVersion: 1.1.0.1
 **********************
 Transcript started, output file is test-results\test-run.txt
->
+> wait for it to finish
 **********************
 Windows PowerShell transcript end
-End time: 20260703080446
+End time: 20260704131942
 **********************

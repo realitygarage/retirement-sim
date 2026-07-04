@@ -1,57 +1,41 @@
-// v3.4.0 -- IO/recast mortgage structure restored, Defaults tab with persistent overrides, mortgage-principal waterfall bucket
+// v4.0.0-A -- property/unit/segment schema, property-centric engines, pooled proceeds routing, scaffold UI
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, sixthSegmentGross, validateSixthSegments, sixthSegmentOverlaps, planHiPaydown, splitResidual, loanMonthlyPmt, MORTGAGE_DEFAULTS, mortgageBalanceClosed, mortgagePaymentClosed, mortgageMonthsSince, applyDefaultsOverrides, getDefaultsCode } from "./engine.js";
-import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS, DEFAULT_LOANS_SC, migrateScLoans, migrateSixthIncomeSegments } from "./defaults.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode } from "./engine.js";
+import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS_SC, freshPropertiesDefaults, freshObligationDefaults } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
   window.__engine = {
     BASE, buildScenario, keyStats, disposeAsset, taxRecognized,
-    DISPO_DEFAULTS, makeParams, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS, SIXTH_STR_DEFAULTS,
-    strScheduleIncome, mtrScheduleIncome, workFromCurve, remainBal, estimateTax,
-    sixthSegmentGross, validateSixthSegments, sixthSegmentOverlaps, migrateSixthIncomeSegments,
+    DISPO_DEFAULTS, makeParams,
+    workFromCurve, remainBal, estimateTax,
+    unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps,
+    yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo,
     planHiPaydown, splitResidual, loanMonthlyPmt,
-    MORTGAGE_DEFAULTS, mortgageBalanceClosed, mortgagePaymentClosed, mortgageMonthsSince,
+    mortgageBalanceClosed, mortgageMonthsSince,
     applyDefaultsOverrides, getDefaultsCode,
+    freshPropertiesDefaults, freshObligationDefaults,
   };
 }
 import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_W, SVG_H, rNodePos } from "./relationships-data.js";
 
 // =============================================================================
-// v3.4.0 DEFAULTS TAB registry -- every model input with NO slider/control,
-// enumerated from engine.js (BASE, MORTGAGE_DEFAULTS, DISPO_DEFAULTS).
+// v4.0.0-A DEFAULTS TAB registry -- every model input with NO slider/control,
+// enumerated from engine.js (BASE, DISPO_DEFAULTS). Property values/mortgages
+// moved onto properties[] (scenario data, edited in the property scaffold UI).
 // Paths address the overrides object handed to applyDefaultsOverrides().
 // =============================================================================
 const DEFAULTS_REGISTRY = [
-  {group:"Property Values & Sale Basis", items:[
-    ["BASE.primaryValue","6th St value $"],
-    ["BASE.duplexValue","15th St value $"],
-    ["BASE.lafayetteValue","Lafayette value $"],
-    ["BASE.sixthBasis","6th St basis (liq view) $"],
+  {group:"Liquidation-View Constants", items:[
     ["BASE.marriedExcl","§121 married exclusion $"],
     ["BASE.sellingCosts","Selling costs (liq view, fraction)"],
-  ]},
-  {group:"Mortgages (30yr, 10yr interest-only, ~Jul 2021)", items:[
-    ["MORTGAGE_DEFAULTS.sixth.balance","6th St balance (Jul 2026) $"],
-    ["MORTGAGE_DEFAULTS.sixth.rate","6th St rate (decimal)"],
-    ["MORTGAGE_DEFAULTS.sixth.ioYears","6th St IO years"],
-    ["MORTGAGE_DEFAULTS.sixth.termYears","6th St term years"],
-    ["MORTGAGE_DEFAULTS.sixth.originYear","6th St origin year"],
-    ["MORTGAGE_DEFAULTS.sixth.originMonth","6th St origin month (1-12)"],
-    ["MORTGAGE_DEFAULTS.fifteenth.balance","15th St balance (Jul 2026) $"],
-    ["MORTGAGE_DEFAULTS.fifteenth.rate","15th St rate (decimal)"],
-    ["MORTGAGE_DEFAULTS.fifteenth.ioYears","15th St IO years"],
-    ["MORTGAGE_DEFAULTS.fifteenth.termYears","15th St term years"],
-    ["MORTGAGE_DEFAULTS.fifteenth.originYear","15th St origin year"],
-    ["MORTGAGE_DEFAULTS.fifteenth.originMonth","15th St origin month (1-12)"],
-    ["BASE.lafayetteMortgage","Lafayette balance (amortizing) $"],
-    ["BASE.lafayetteRate","Lafayette rate (decimal)"],
-    ["BASE.lafPnI","Lafayette P&I $/mo"],
+    ["BASE.fedCapGains","Fed cap gains (liq view)"],
+    ["BASE.coCapGains","CO cap gains (liq view)"],
   ]},
   {group:"Income Baselines", items:[
     ["BASE.pensionMonthly","Pension $/mo"],
@@ -59,8 +43,6 @@ const DEFAULTS_REGISTRY = [
     ["BASE.yourSsFRA","Your SS FRA $/mo"],
     ["BASE.brendaSsFRA","Brenda SS FRA $/mo"],
     ["BASE.brendaFraYear","Brenda FRA year"],
-    ["BASE.duplexBottomRent","15th bottom rent seed $/mo"],
-    ["BASE.lafayetteRent","Lafayette rent $/mo"],
   ]},
   {group:"Health Insurance", items:[
     ["BASE.healthYouEricsson","You: Ericsson $/mo"],
@@ -91,8 +73,6 @@ const DEFAULTS_REGISTRY = [
     ["DISPO_DEFAULTS.caClawbackRate","CA clawback"],
     ["DISPO_DEFAULTS.sellingCostsPct","Selling costs (dispositions)"],
     ["DISPO_DEFAULTS.forcedSaleDiscount","Forced-sale discount"],
-    ["BASE.fedCapGains","Fed cap gains (liq view)"],
-    ["BASE.coCapGains","CO cap gains (liq view)"],
   ]},
 ];
 const pathGet = (obj, path)=>path.split('.').reduce((o,k)=>(o==null?undefined:o[k]), obj);
@@ -147,71 +127,52 @@ export default function App(){
 
   // Destructure active scenario for use in controls + engines
   const {
-    lafStopYear, topUnit, lafRental, payOffHI,
-    ssAge, workPts, lifestyleSplit, strRent, bottomRent, ltrRent, sixthRent, sixthMonths,
-    reApp, rentGr, cpi, healthCpi, propCpi, taxEnabled, investRet, lifestyleDraws, strSchedule, mtrSchedule,
+    payOffHI,
+    ssAge, workPts, lifestyleSplit,
+    reApp, rentGr, cpi, healthCpi, propCpi, taxEnabled, investRet, lifestyleDraws,
     ccBal, ccRate, ccMin, sophiaBal, sophiaRate, sophiaMin, nolanBal, nolanRate, nolanMin,
     loans=DEFAULT_LOANS_SC,
     rdTopUp, rdCap, obTopUp, obCap, discFloor, fcfSchedule, sweepDelay, struct6, struct15, structLaf, maintStr, bufferMode,
-    strPlatformPct=3, strCleanPct=4, mgrPct=0,
-    duplex15thBasis=600_000, lafayetteBasis=300_000,
-    // v3.1.0 dispositions + settlement + STR
-    dispositions,
-    settlementNeed=525_000, settlementYear=2026, gainOffsetPct=0,
-    sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true, requireSameYearForOffset=true,
+    strPlatformPct=3, strCleanPct=4, mgrPct=0, ltrVacancyPct=4, mtrCleaningFlat=300,
+    // v4.0.0-A property-centric schema
+    properties=freshPropertiesDefaults(),
+    obligation=freshObligationDefaults(),
     hiPaydownPct=100, caGainCap=1_200_000, settleLifestyleDraw=0,
+    sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true,
     mtgPrincipalOn=false, mtgPrincipalCap=2000, mtgPrincipalUncapped=false,
-    sixthIncomeSegments=[],
   } = sc;
 
-  // v3.1.0 shims -- expose disposition-derived legacy field names so existing UI
-  // panels keep rendering. New Disposition panel writes directly to dispositions.
-  const _dSixth  = dispositions?.sixth     || {mode:'keep', year:2055, salesPrice:1_675_000};
-  const _dLaf    = dispositions?.barberry  || {mode:'keep', year:2055};
-  const _dDuplex = dispositions?.fifteenth || {mode:'keep', year:2055};
-  const sellYear        = _dSixth.mode==='keep' ? 2055 : (_dSixth.year || 2055);
-  const sixthSalePrice  = _dSixth.salesPrice ?? 1_675_000;
-  const sixthCostOfSale = (DISPO_DEFAULTS.sellingCostsPct * 100);  // constant now (6%)
-  const sixthMTR        = sixthIncomeSegments.some(s=>s.kind!=='str');  // any MTR/LTR segment (legacy display shim)
-  const keepPrimary     = _dSixth.mode === 'keep';                 // UI-facing "hold indefinitely" flag
-  const saleDrawFrac    = 0;                                        // gone in v3.1.0 (residual → HI paydown)
+  const propById = useMemo(()=>Object.fromEntries(properties.map(pr=>[pr.id,pr])), [properties]);
 
   // Individual setters -- all route through setSc
-  const setDispo = useCallback((key, patch) => setSc(s => {
-    const cur = s.dispositions?.[key] || {};
-    return { ...s, dispositions: { ...(s.dispositions||{}), [key]: { ...cur, ...patch } } };
-  }), []);
-  // Legacy-shim setters -- write to dispositions.sixth for back-compat with existing UI
-  const setSellYear       = v=>setSc(s=>{
-    const cur = s.dispositions?.sixth || {};
-    const newMode = v>2046 ? 'keep' : (cur.mode==='keep' ? 'sell_taxable' : cur.mode || 'sell_taxable');
-    return {...s, dispositions:{...(s.dispositions||{}), sixth:{...cur, year:v, mode:newMode}}, ...(v>2046?{payOffHI:false}:{})};
-  });
-  const setLafStopYear    = v=>setSc(s=>({...s,lafStopYear:v}));
-  const setSaleDrawFrac   = _v=>{};   // no-op under v3.1.0
+  const setProperty = useCallback((id, patch) => setSc(s => ({
+    ...s, properties: (s.properties||freshPropertiesDefaults()).map(pr=>pr.id===id?{...pr,...patch}:pr),
+  })), []);
+  const setPropertyHold = useCallback((id, patch) => setSc(s => ({
+    ...s, properties: (s.properties||freshPropertiesDefaults()).map(pr=>pr.id===id?{...pr,hold:{...pr.hold,...patch}}:pr),
+  })), []);
+  const setPropertyMortgage = useCallback((id, patch) => setSc(s => ({
+    ...s, properties: (s.properties||freshPropertiesDefaults()).map(pr=>pr.id===id?{...pr,mortgage:{...pr.mortgage,...patch}}:pr),
+  })), []);
+  const setUnitSegments = useCallback((propId, unitIdx, updater) => setSc(s => ({
+    ...s, properties: (s.properties||freshPropertiesDefaults()).map(pr=>{
+      if(pr.id!==propId) return pr;
+      return { ...pr, units: pr.units.map((u,i)=>i!==unitIdx?u:{
+        ...u, segments: typeof updater==="function" ? updater(u.segments||[]) : updater,
+      })};
+    }),
+  })), []);
+  const setObligation = useCallback((patch) => setSc(s => ({
+    ...s, obligation: { ...(s.obligation||freshObligationDefaults()), ...patch },
+  })), []);
   const setSweepDelay     = v=>setSc(s=>({...s,sweepDelay:v}));
-  const setKeepPrimary    = v=>setDispo('sixth', {mode: v ? 'keep' : 'sell_taxable'});
-  const setSixthSalePrice = v=>setDispo('sixth', {salesPrice: v});
-  const setSixthCostOfSale= _v=>{};   // no-op; sellingCostsPct is now a DISPO_DEFAULTS constant
-  const setTopUnit        = v=>setSc(s=>({...s,topUnit:v}));
-  const setLafRental      = v=>setSc(s=>({...s,lafRental:v}));
   const setPayOffHI       = v=>setSc(s=>({...s,payOffHI:v}));
-  // v3.1.0 setters for new fields
-  const setSixthIncomeSegments = v=>setSc(s=>({...s,sixthIncomeSegments:typeof v==="function"?v(s.sixthIncomeSegments||[]):v}));
-  const setSettlementNeed  = v=>setSc(s=>({...s,settlementNeed:v}));
-  const setSettlementYear  = v=>setSc(s=>({...s,settlementYear:v}));
-  const setGainOffsetPct   = v=>setSc(s=>({...s,gainOffsetPct:v}));
   const setSameYearSaleTaxBumpOn = v=>setSc(s=>({...s,sameYearSaleTaxBumpOn:v}));
   const setSameYearSaleTaxBump   = v=>setSc(s=>({...s,sameYearSaleTaxBump:v}));
   const setHiPaydownPct    = v=>setSc(s=>({...s,hiPaydownPct:v}));
   const setSsAge          = v=>setSc(s=>({...s,ssAge:v}));
   const setWorkPts        = v=>setSc(s=>({...s,workPts:typeof v==="function"?v(s.workPts):v}));
   const setLifestyleSplit = v=>setSc(s=>({...s,lifestyleSplit:v}));
-  const setStrRent        = v=>setSc(s=>({...s,strRent:v}));
-  const setBottomRent     = v=>setSc(s=>({...s,bottomRent:v}));
-  const setLtrRent        = v=>setSc(s=>({...s,ltrRent:v}));
-  const setSixthRent      = v=>setSc(s=>({...s,sixthRent:v}));
-  const setSixthMonths    = v=>setSc(s=>({...s,sixthMonths:v}));
   const setReApp          = v=>setSc(s=>({...s,reApp:v}));
   const setRentGr         = v=>setSc(s=>({...s,rentGr:v}));
   const setCpi            = v=>setSc(s=>({...s,cpi:v}));
@@ -220,8 +181,6 @@ export default function App(){
   const setTaxEnabled     = v=>setSc(s=>({...s,taxEnabled:typeof v==="function"?v(s.taxEnabled):v}));
   const setInvestRet      = v=>setSc(s=>({...s,investRet:v}));
   const setLifestyleDraws = v=>setSc(s=>({...s,lifestyleDraws:typeof v==="function"?v(s.lifestyleDraws):v}));
-  const setStrSchedule    = v=>setSc(s=>({...s,strSchedule:typeof v==="function"?v(s.strSchedule):v}));
-  const setMtrSchedule    = v=>setSc(s=>({...s,mtrSchedule:typeof v==="function"?v(s.mtrSchedule):v}));
   const setCcBal          = v=>setSc(s=>({...s,ccBal:v}));
   const setCcRate         = v=>setSc(s=>({...s,ccRate:v}));
   const setCcMin          = v=>setSc(s=>({...s,ccMin:v}));
@@ -231,7 +190,7 @@ export default function App(){
   const setNolanBal       = v=>setSc(s=>({...s,nolanBal:v}));
   const setNolanRate      = v=>setSc(s=>({...s,nolanRate:v}));
   const setNolanMin       = v=>setSc(s=>({...s,nolanMin:v}));
-  const setLoans          = v=>setSc(s=>({...s,loans:typeof v==="function"?v(migrateScLoans(s)):v}));
+  const setLoans          = v=>setSc(s=>({...s,loans:typeof v==="function"?v(s.loans||DEFAULT_LOANS_SC):v}));
   const setSettleLifestyleDraw = v=>setSc(s=>({...s,settleLifestyleDraw:v}));
   const setMtgPrincipalOn       = v=>setSc(s=>({...s,mtgPrincipalOn:v}));
   const setMtgPrincipalCap      = v=>setSc(s=>({...s,mtgPrincipalCap:v}));
@@ -249,40 +208,36 @@ export default function App(){
   const setStrPlatformPct = v=>setSc(s=>({...s,strPlatformPct:v}));
   const setStrCleanPct    = v=>setSc(s=>({...s,strCleanPct:v}));
   const setMgrPct         = v=>setSc(s=>({...s,mgrPct:v}));
+  const setLtrVacancyPct  = v=>setSc(s=>({...s,ltrVacancyPct:v}));
+  const setMtrCleaningFlat= v=>setSc(s=>({...s,mtrCleaningFlat:v}));
   const setBufferMode        = v=>setSc(s=>({...s,bufferMode:v}));
-  const setDuplex15thBasis   = v=>setSc(s=>({...s,duplex15thBasis:v}));
-  const setLafayetteBasis    = v=>setSc(s=>({...s,lafayetteBasis:v}));
 
   // -- Pins --------------------------------------------------
-  // Convert a saved paramSnapshot (SC format, rates as %) to engine params (rates as decimals)
+  // Convert a saved paramSnapshot (SC format) to engine params. v4.0.0-A:
+  // properties/obligation pass straight through (no % conversion -- their
+  // rate/pct fields are stored as decimals directly in sc, unlike ccRate etc).
   function buildRowsFromSnapshot(snap){
     const sc={...SC_DEFAULTS,...snap};
     const diCap_=(sc.discFloor||800)+(sc.rdTopUp||400)+(sc.obTopUp||500);
     const totalMaint=(sc.struct6||600)*1000*(sc.maintStr||0.75)/100
                     +(sc.struct15||500)*1000*(sc.maintStr||0.75)/100
                     +(sc.structLaf||250)*1000*(sc.maintStr||0.75)/100;
-    const _dS = sc.dispositions?.sixth     || {mode:'keep'};
-    const _dL = sc.dispositions?.barberry  || {mode:'keep'};
-    const _dD = sc.dispositions?.fifteenth || {mode:'keep'};
-    const keepP = _dS.mode==='keep';
-    const keepL = _dL.mode==='keep';
-    const keepD = _dD.mode==='keep';
-    const totalVal=(keepP?BASE.primaryValue:0)+(keepD?BASE.duplexValue:0)+(keepL?BASE.lafayetteValue:0);
+    const props = sc.properties || freshPropertiesDefaults();
+    const totalVal = props.reduce((s,pr)=>s+(pr.hold?.mode==='keep'?pr.value:0), 0);
     const maintRate_=totalVal>0?totalMaint/totalVal:0.005;
     return buildScenario(makeParams({
       ...sc,
       ssStartYear:2026+(sc.ssAge-65),
       ssAmount:sc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(sc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
       diCap:diCap_, maintRate:maintRate_,
-      duplexBottomLTR:sc.bottomRent, duplexTopSTR:sc.strRent, duplexTopLTR:sc.ltrRent, duplexTopMTR:sc.ltrRent,
-      sixthMTRRent:sc.sixthRent, sixthMTRMonths:sc.sixthMonths,
       reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
       coreCpi:sc.cpi/100, healthCpi:sc.healthCpi/100, propCpi:sc.propCpi/100, propInflation:sc.cpi/100+0.007,
       investReturn:sc.investRet/100,
       lifestyleDraws:(sc.lifestyleDraws||[]).filter(d=>d.enabled),
       ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
-      loans:migrateScLoans(snap).map(l=>({...l, rate:(l.rate||0)/100})),   // legacy famLoan pins auto-convert
+      loans:(sc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
       strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
+      ltrVacancyPct:(sc.ltrVacancyPct||4)/100, mtrCleaningFlat:sc.mtrCleaningFlat||300,
     }));
   }
 
@@ -322,16 +277,17 @@ export default function App(){
   // diCap is still the hard floor (min FCF + buffers); split controls above-floor routing
   const diCap = discFloor + rdTopUp + obTopUp;
 
-  // Maintenance: derived from Cash Flow structure values + rate -- source of truth
-  // uiKeepPrimary = still holding 6th at launch (2026)
-  const uiKeepPrimary = keepPrimary || sellYear > BASE.startYear;
-  const uiKeepDuplex  = _dDuplex.mode === 'keep' || (_dDuplex.year||2055) > BASE.startYear;
-  const uiKeepLaf     = _dLaf.mode    === 'keep' || (_dLaf.year||2055)    > BASE.startYear;
+  // Maintenance: derived from Cash Flow structure values + rate -- source of truth.
+  // v4.0.0-A: "still held" now keyed by each property's OWN hold.mode/year
+  // (struct6 slider only matters while 6th is held at launch).
+  const uiKeepPrimary = propById.sixth?.hold.mode==='keep' || (propById.sixth?.hold.year||2055) > BASE.startYear;
+  const uiKeepDuplex  = propById.fifteenth?.hold.mode==='keep' || (propById.fifteenth?.hold.year||2055) > BASE.startYear;
+  const uiKeepLaf     = propById.barberry?.hold.mode==='keep' || (propById.barberry?.hold.year||2055) > BASE.startYear;
   const maintAnnual6   = uiKeepPrimary ? struct6*1000*maintStr/100 : 0;
   const maintAnnual15  = uiKeepDuplex  ? struct15*1000*maintStr/100 : 0;
   const maintAnnualLaf = uiKeepLaf     ? structLaf*1000*maintStr/100 : 0;
   const totalMaintAnnual = maintAnnual6+maintAnnual15+maintAnnualLaf;
-  const totalMarketVal = (uiKeepPrimary?BASE.primaryValue:0)+(uiKeepDuplex?BASE.duplexValue:0)+(uiKeepLaf?BASE.lafayetteValue:0);
+  const totalMarketVal = (uiKeepPrimary?(propById.sixth?.value||0):0)+(uiKeepDuplex?(propById.fifteenth?.value||0):0)+(uiKeepLaf?(propById.barberry?.value||0):0);
   const maintRate = totalMarketVal>0 ? totalMaintAnnual/totalMarketVal : 0.005;
 
   const liveParams = useMemo(()=>makeParams({
@@ -339,42 +295,39 @@ export default function App(){
     ssStartYear: 2026+(sc.ssAge-65),
     ssAmount:    sc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(sc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
     diCap, maintRate,
-    duplexBottomLTR:sc.bottomRent,
-    duplexTopSTR:sc.strRent, duplexTopLTR:sc.ltrRent, duplexTopMTR:sc.ltrRent,
-    sixthMTRRent:sc.sixthRent, sixthMTRMonths:sc.sixthMonths,
     reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
     coreCpi:sc.cpi/100, healthCpi:sc.healthCpi/100, propCpi:sc.propCpi/100,
     propInflation:(sc.cpi/100)+0.007,
     investReturn:sc.investRet/100,
     lifestyleDraws:sc.lifestyleDraws.filter(d=>d.enabled),
     ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
-    loans:migrateScLoans(sc).map(l=>({...l, rate:(l.rate||0)/100})),
+    loans:(sc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
     strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
-  }),[sc, diCap, maintRate, defaultsRev]);   // defaultsRev: engines read mutated BASE/MORTGAGE/DISPO objects
+    ltrVacancyPct:(sc.ltrVacancyPct||4)/100, mtrCleaningFlat:sc.mtrCleaningFlat||300,
+  }),[sc, diCap, maintRate, defaultsRev]);   // defaultsRev: engines read mutated BASE/DISPO objects
 
   const liveRows  = useMemo(()=>buildScenario(liveParams),[liveParams]);
   // For pins being actively edited, recompute rows from pinScs
   const effectivePins = useMemo(()=>pins.map(pin=>{
     const editedSc = pinScs[pin.id];
     if(!editedSc) return pin;
+    const eProps = editedSc.properties || freshPropertiesDefaults();
+    const eTotalVal = eProps.reduce((s,pr)=>s+(pr.hold?.mode==='keep'?pr.value:0),0);
     const p = makeParams({
       ...editedSc,
       ssStartYear:2026+(editedSc.ssAge-65),
       ssAmount:editedSc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(editedSc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
       diCap:editedSc.discFloor+editedSc.rdTopUp+editedSc.obTopUp,
-      duplexBottomLTR:editedSc.bottomRent, duplexTopSTR:editedSc.strRent, duplexTopLTR:editedSc.ltrRent, duplexTopMTR:editedSc.ltrRent,
-      sixthMTRRent:editedSc.sixthRent, sixthMTRMonths:editedSc.sixthMonths,
       reAppreciation:editedSc.reApp/100, rentGrowth:editedSc.rentGr/100, inflation:editedSc.cpi/100,
       coreCpi:editedSc.cpi/100, healthCpi:editedSc.healthCpi/100, propCpi:editedSc.propCpi/100,
       propInflation:(editedSc.cpi/100)+0.007, investReturn:editedSc.investRet/100,
       lifestyleDraws:editedSc.lifestyleDraws.filter(d=>d.enabled),
-        strSchedule:editedSc.strSchedule||[],
-        mtrSchedule:editedSc.mtrSchedule||[],
       ccRate:editedSc.ccRate/100, sophiaRate:editedSc.sophiaRate/100, nolanRate:editedSc.nolanRate/100,
-      loans:migrateScLoans(editedSc).map(l=>({...l, rate:(l.rate||0)/100})),
+      loans:(editedSc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
       strPlatformPct:(editedSc.strPlatformPct||3)/100, strCleanPct:(editedSc.strCleanPct||4)/100, mgrPct:(editedSc.mgrPct||0)/100,
+      ltrVacancyPct:(editedSc.ltrVacancyPct||4)/100, mtrCleaningFlat:editedSc.mtrCleaningFlat||300,
       maintRate:(editedSc.struct6*1000*editedSc.maintStr/100+editedSc.struct15*1000*editedSc.maintStr/100+editedSc.structLaf*1000*editedSc.maintStr/100)/
-               (BASE.primaryValue+BASE.duplexValue+BASE.lafayetteValue)||0.005,
+               (eTotalVal||1)||0.005,
     });
     const rows = buildScenario(p);
     return {...pin, rows, stats:keyStats(rows)};
@@ -391,80 +344,90 @@ export default function App(){
     }));
   },[defaultsRev]);
 
-  // v3.1.2 settlement breakdown -- everything the Settlement card displays comes
-  // from here, pulled straight off the disposeAsset return objects (no UI recompute).
+  // v4.0.0-A pooled routing breakdown -- everything the Obligation/routing card
+  // displays comes from here, pulled straight off the disposeAsset return
+  // objects (no UI recompute).
   const settleData = useMemo(()=>{
     const dr   = liveRows.dispoResults || {};
     const drNo = liveRows.dispoResultsNoOffset || {};
-    const sellers = ['sixth','fifteenth','barberry']
-      .map(k=>({k, d:dr[k], dn:drNo[k]||dr[k]}))
-      .filter(({d})=>d && d.mode && d.mode!=='keep' && d.year===settlementYear);
+    const sellers = properties
+      .map(pr=>({k:pr.id, label:pr.label, d:dr[pr.id], dn:drNo[pr.id]||dr[pr.id]}))
+      .filter(({d})=>d && d.mode && d.mode!=='keep' && d.year===obligation.year);
     const totalProceeds = sellers.reduce((s,{d})=>s+(d.afterTaxNetProceeds||0),0);
-    const residual = Math.max(0, totalProceeds - settlementNeed);
+    const residual = Math.max(0, totalProceeds - (obligation.amount||0));
     return {sellers, totalProceeds, residual};
-  },[liveRows,settlementYear,settlementNeed]);
+  },[liveRows,properties,obligation.year,obligation.amount]);
 
-  // v3.1.2 dev-mode consistency guard: warn if the displayed breakdown drifts from
-  // the engine's disposeAsset outputs or the residual formula. Guards against the
-  // UI diverging from the engine again (the v3.1.1 $919K bug class).
+  // v3.1.2 (carried) dev-mode consistency guard: warn if the displayed breakdown
+  // drifts from the engine's disposeAsset outputs or the residual formula.
   useEffect(()=>{
     if(!(import.meta.env && import.meta.env.DEV)) return;
     for(const {k,d} of settleData.sellers){
       if(d.mode==='full_1031') continue;
       const preTax = d.mode==='partial_1031' ? (d.cashBoot||0) : d.netSale - d.mortgagePayoff;
       if(Math.abs((d.grossPrice - d.sellingCosts) - d.netSale) > 1)
-        console.warn(`[settlement audit] ${k}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts ($${Math.round(d.grossPrice - d.sellingCosts)})`);
+        console.warn(`[obligation audit] ${k}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts ($${Math.round(d.grossPrice - d.sellingCosts)})`);
       if(Math.abs((preTax - d.totalTax) - d.afterTaxNetProceeds) > 1)
-        console.warn(`[settlement audit] ${k}: displayed after-tax ($${Math.round(d.afterTaxNetProceeds)}) != pre-tax - totalTax ($${Math.round(preTax - d.totalTax)}) -- UI drifting from disposeAsset`);
+        console.warn(`[obligation audit] ${k}: displayed after-tax ($${Math.round(d.afterTaxNetProceeds)}) != pre-tax - totalTax ($${Math.round(preTax - d.totalTax)}) -- UI drifting from disposeAsset`);
     }
-    if(Math.abs(settleData.residual - Math.max(0, settleData.totalProceeds - settlementNeed)) > 1)
-      console.warn(`[settlement audit] residual ($${Math.round(settleData.residual)}) != max(0, Σ afterTaxNetProceeds - settlementNeed)`);
+    if(Math.abs(settleData.residual - Math.max(0, settleData.totalProceeds - (obligation.amount||0))) > 1)
+      console.warn(`[obligation audit] residual ($${Math.round(settleData.residual)}) != max(0, Σ afterTaxNetProceeds - obligation.amount)`);
     // v3.2.0 conservation: draw + paydown + waterfall === residual
-    const rSet = liveRows.find(r=>r.cal===settlementYear);
+    const rSet = liveRows.find(r=>r.cal===obligation.year);
     if(rSet && settleData.sellers.length>0){
       const splitSum = (rSet.settleDraw||0)+(rSet.hiPaydown||0)+(rSet.wfDebtPaid||0)+(rSet.wfToSavings||0);
       if(Math.abs(splitSum - settleData.residual) > 2)
-        console.warn(`[settlement audit] 3-way split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
+        console.warn(`[obligation audit] 3-way split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
     }
-  },[settleData,settlementNeed,liveRows,settlementYear]);
+  },[settleData,obligation.amount,liveRows,obligation.year]);
 
   // -- Cash flow waterfall engine ----------------------------
   const wfData = useMemo(()=>{
-    // v3.1.0 dispositions -- pull from liveParams so we see the merged canonical form
-    const _dispo   = liveParams.dispositions || {};
-    const _sixthYr = _dispo.sixth?.mode    ==='keep' ? Infinity : (_dispo.sixth?.year    || 2055);
-    const _lafYr   = _dispo.barberry?.mode ==='keep' ? Infinity : (_dispo.barberry?.year || 2055);
-    const _dupYr   = _dispo.fifteenth?.mode==='keep' ? Infinity : (_dispo.fifteenth?.year|| 2055);
+    // v4.0.0-A: property-centric. `properties` is liveParams' merged canonical
+    // form. Ownership is checked at TRUE monthly resolution via
+    // unitOwnedThisMonth (this engine is authoritative, so income and mortgage
+    // stop exactly at the sale quarter boundary -- no annual approximation).
+    const _properties = liveParams.properties || [];
+    const _propById = Object.fromEntries(_properties.map(pr=>[pr.id, pr]));
+    const ownedMo = (propId, calYear, mo1to12) => unitOwnedThisMonth(_propById[propId]?.hold, calYear, mo1to12);
 
-    // Per-property "still owned in year cy" gates
-    const keepingFn      = (cy) => cy < _sixthYr;                             // 6th (primary)
-    const duplexKeepingFn= (cy) => cy < _dupYr;                               // 15th duplex
-    const lafKeepingFn   = (cy) => cy < _lafYr;                               // Lafayette
-    const lafRentingFn   = (cy) => lafRental && lafKeepingFn(cy) && cy < (lafStopYear||2055);
-
-    // Maint monthly amounts (structure-value-based); zeroed when property sold.
-    // These are re-checked per month inside the loop so post-sale years drop out.
+    // Maint monthly amounts (structure-value-based, from the Cash-Flow-tab
+    // structure sliders -- a distinct concept from properties[].value); zeroed
+    // when property sold. Re-checked per month so post-sale years drop out.
     const _maint6Base   = struct6 *1000*maintStr/100/12;
     const _maint15Base  = struct15*1000*maintStr/100/12;
     const _maintLafBase = structLaf*1000*maintStr/100/12;
     const maint6Cap  = _maint6Base   * 12 * 5;
     const maint15Cap = _maint15Base  * 12 * 5;
     const maintLafCap= _maintLafBase * 12 * 5;
+    const PROP_TAX_INS = {
+      sixth:     { tax: BASE.primTaxMo, ins: BASE.primInsMo },
+      fifteenth: { tax: BASE.dplxTaxMo, ins: BASE.dplxInsMo },
+      barberry:  { tax: BASE.lafTaxMo,  ins: BASE.lafInsMo  },
+    };
 
-    // Pre-compute per-year dispo proceeds & settlement outflow (for HI paydown timing)
+    // Segment cost profile (§1 table) -- SAME helper the annual engine uses,
+    // so netting cannot drift between the two.
+    const costOpts = {
+      strPlatformPct: liveParams.strPlatformPct||0, strCleanPct: liveParams.strCleanPct||0, mgrPct: liveParams.mgrPct||0,
+      ltrVacancyPct: liveParams.ltrVacancyPct||0, mtrCleaningFlat: liveParams.mtrCleaningFlat||0,
+    };
+
+    // Pre-compute per-year dispo proceeds & obligation outflow (for HI paydown timing)
     const _yearCashAdd = {};
     const _yearCashSub = {};
     try {
       // buildScenario already computed dispoRes; get via liveRows.dispoResults if present
       const _dr = (liveRows && liveRows.dispoResults) || {};
-      for(const key of ['sixth','barberry','fifteenth']){
-        const d = _dr[key];
+      for(const prop of _properties){
+        const d = _dr[prop.id];
         if(d && d.mode && d.mode !== 'keep' && (d.afterTaxNetProceeds||0) > 0){
           _yearCashAdd[d.year] = (_yearCashAdd[d.year]||0) + d.afterTaxNetProceeds;
         }
       }
-      if((settlementNeed||0) > 0){
-        _yearCashSub[settlementYear||2026] = (_yearCashSub[settlementYear||2026]||0) + settlementNeed;
+      const _oblig = liveParams.obligation || {};
+      if((_oblig.amount||0) > 0){
+        _yearCashSub[_oblig.year||2026] = (_yearCashSub[_oblig.year||2026]||0) + _oblig.amount;
       }
     } catch(e) {}
     const _paidYears = new Set();  // years where HI paydown has been applied
@@ -480,11 +443,13 @@ export default function App(){
     const _sweepLoanQ = ()=>_loans.filter(L=>L.includeInSweep && L.bal>0)
       .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
 
-    // v3.4.0 mortgage state (6th + 15th): contractual IO through ~Jul 2031, then
-    // payment recasts to amortize the ACTUAL balance over the remaining term.
+    // v4.0.0-A mortgage state, one machine per property (generalized from the
+    // v3.4.0 hardcoded 6th+15th pair -- Lafayette/Barberry now share the SAME
+    // state machine, ioYears:0 recasting immediately at origination).
     const _mkMtg = (m,label)=>({p:{...m}, label, bal:m.balance, recast:null, ioPmt:0, transAnnounced:false, payoffAnnounced:false});
-    const _mtg6  = _mkMtg(MORTGAGE_DEFAULTS.sixth, '6th St');
-    const _mtg15 = _mkMtg(MORTGAGE_DEFAULTS.fifteenth, '15th St');
+    const _mtgSt = {};
+    for(const prop of _properties) _mtgSt[prop.id] = _mkMtg(prop.mortgage, prop.label);
+    const MTG_PRINCIPAL_ELIGIBLE_IDS = ['sixth','fifteenth'];
     const _stepMtg = (st, calYear, calMonth1to12, owned)=>{
       const m=st.p;
       const k=(calYear-m.originYear)*12 + (calMonth1to12-m.originMonth);
@@ -530,7 +495,7 @@ export default function App(){
       const rg     = Math.pow(1+liveParams.rentGrowth,  mo/12);
       const pinf   = Math.pow(1+(liveParams.propCpi||liveParams.propInflation), mo/12);
 
-      // -- v3.2.0 residual routing, applied once at the start of the dispo year
+      // -- v4.0.0-A pooled routing, applied once at the start of the pool year
       //    via the SHARED helpers (identical plan to the annual engine):
       //    (a) lifestyle draw, (b) HI paydown avalanche (Nolan included --
       //    his 5-month grace delays minimum payments, not lump-sum payoff),
@@ -543,7 +508,7 @@ export default function App(){
         const hiBal_ = payOffHI ? 0 : ccBal+sophiaBal+nolanBal;
         const totalDebt_ = hiBal_ + _loans.reduce((s,L)=>s+(L.includeInSweep?L.bal:0),0);
         const split = splitResidual(residual, {
-          lifestyleDraw: calYear===(settlementYear||2026) ? (liveParams.settleLifestyleDraw||0) : 0,
+          lifestyleDraw: calYear===((liveParams.obligation||{}).year||2026) ? (liveParams.settleLifestyleDraw||0) : 0,
           paydownPct: liveParams.hiPaydownPct||0,
           totalDebt: totalDebt_,
         });
@@ -585,50 +550,26 @@ export default function App(){
       const yourSsMo = (liveParams.ssStartYear && calYear>=liveParams.ssStartYear)
         ? liveParams.ssAmount : 0;
       const brendaSsMo = calYear>=BASE.brendaFraYear ? BASE.brendaSsFRA : 0;
-      // 15th duplex rental (gated by duplexKeepingFn)
-      const _dupOwned = duplexKeepingFn(calYear);
-      const _bot = _dupOwned ? liveParams.duplexBottomLTR : 0;
-      const _schedEntry = (_dupOwned && topUnit==="str") ? (strSchedule||[]).find(s=>{
-        const f=s.yrFrom??s.yr; const t=s.yrTo??s.yr;
-        return calYear>=f && calYear<=t;
-      }) : null;
-      const _top = !_dupOwned ? 0
-        : topUnit==="str"
-          ? (_schedEntry ? strScheduleIncome(_schedEntry.segments)/12 : liveParams.duplexTopSTR)
-          : topUnit==="ltr" ? liveParams.duplexTopLTR : liveParams.duplexTopMTR;
 
-      // 6th St primary income -- v3.3.0 segments-only: sum ALL segments covering
-      // this year (concurrent segments add, e.g. room STR + whole-house MTR).
-      // MTR/LTR-kind gross nets mgr % below; STR-kind nets platform+clean+mgr below.
-      const _sixthSegs = liveParams.sixthIncomeSegments || [];
-      let _sixthMtrMo = 0, _sixthStrGrossMo = 0;
-      if(keepingFn(calYear)){
-        for(const s of _sixthSegs){
-          const f=s.yrFrom??s.yr; const t=s.yrTo??s.yr;
-          if(calYear<f || calYear>t) continue;
-          const g = sixthSegmentGross(s)/12*rg;
-          if(s.kind==='str') _sixthStrGrossMo += g; else _sixthMtrMo += g;
+      // -- Rental income (v4.0.0-A): for each held property, for each unit,
+      //    sum GROSS + NET across all covering segments. rentalMo stays GROSS
+      //    (matching the existing display contract); rentalOpCost = gross-net,
+      //    using the SAME unitSegmentNet the annual engine calls -- this is
+      //    what guarantees the two engines cannot disagree on the netting. --
+      let rentalMo = 0, _rentalNetMo = 0;
+      for(const prop of _properties){
+        if(!ownedMo(prop.id, calYear, d.getMonth()+1)) continue;
+        for(const unit of (prop.units||[])){
+          for(const seg of (unit.segments||[])){
+            const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
+            if(calYear<f || calYear>t) continue;
+            rentalMo     += unitSegmentGross(seg)/12*rg;
+            _rentalNetMo += unitSegmentNet(seg, costOpts)/12*rg;
+          }
         }
       }
-
-      // rentalMo is GROSS across all units; op costs deducted below
-      const rentalMo = _bot*rg
-        + _top*rg
-        + (lafRentingFn(calYear)?BASE.lafayetteRent*rg:0)
-        + _sixthMtrMo
-        + _sixthStrGrossMo;
+      const rentalOpCost = Math.round(rentalMo - _rentalNetMo);
       const wkInc     = workFromCurve(mo/12, workPts)*inf;
-
-      // -- RENTAL OPERATING COSTS (deducted from gross rental income) --
-      const _topGross = _top*rg;
-      const _strOpCost = _dupOwned && topUnit==="str"
-        ? _topGross*((liveParams.strPlatformPct||0.03)+(liveParams.strCleanPct||0.04))
-        : _dupOwned ? _topGross*(liveParams.mgrPct||0) : 0;
-      const _lafGross = lafRentingFn(calYear)?BASE.lafayetteRent*rg:0;
-      const _lafOpCost = _lafGross*(liveParams.mgrPct||0);
-      const _sixthOpCost = _sixthMtrMo*(liveParams.mgrPct||0)
-        + _sixthStrGrossMo*((liveParams.strPlatformPct||0)+(liveParams.strCleanPct||0)+(liveParams.mgrPct||0));
-      const rentalOpCost = Math.round(_strOpCost+_lafOpCost+_sixthOpCost);
       const totalInc  = pension+yourSsMo+brendaSsMo+rentalMo+wkInc-rentalOpCost;
 
       // -- TIER 1: FIXED COSTS --
@@ -640,11 +581,10 @@ export default function App(){
       const kidsHlth  = (calYear<BASE.sophiaOff||calYear<BASE.nolanOff)?BASE.healthKids:0;
       const health    = hiMo+brendaHlth+kidsHlth;
       const hiDebtNow = ccBal+sophiaBal+nolanBal;
-      // v3.4.0: contractual IO -> recast P&I (was: HI-debt-driven payment switch)
-      const duplxPmt  = Math.round(_stepMtg(_mtg15, calYear, d.getMonth()+1, duplexKeepingFn(calYear)));
-      const primPmt   = Math.round(_stepMtg(_mtg6,  calYear, d.getMonth()+1, keepingFn(calYear)));
-      const lafPmt    = lafKeepingFn(calYear)   ? BASE.lafPnI : 0;
-      const mtg       = duplxPmt+lafPmt+primPmt;
+      // v4.0.0-A: contractual IO -> recast P&I, ALL properties via the same
+      // state machine (Lafayette/Barberry included -- no more flat BASE.lafPnI).
+      let mtg = 0;
+      for(const prop of _properties) mtg += _stepMtg(_mtgSt[prop.id], calYear, d.getMonth()+1, ownedMo(prop.id, calYear, d.getMonth()+1));
       const core      = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf;
       // v3.2.0 loans: step state; scheduled payments land in Fixed (fc_famLoan key kept)
       let famLoan = 0;
@@ -664,25 +604,28 @@ export default function App(){
       const minSoph= sophiaBal>0?sophiaMin_:0;
       const minNol = nolanOn&&nolanBal>0?nolanMin_:0;
       const hiMins = payOffHI?0:minCC+minSoph+minNol;
-      // Property tax + insurance (gated per property)
+      // Property tax + insurance (gated per property, v4.0.0-A: true monthly ownership)
       const propCost = Math.round(
-          (duplexKeepingFn(calYear) ? (BASE.dplxTaxMo+BASE.dplxInsMo)*pinf : 0)
-        + (keepingFn(calYear)       ? (BASE.primTaxMo+BASE.primInsMo)*pinf : 0)
-        + (lafKeepingFn(calYear)    ? (BASE.lafTaxMo+BASE.lafInsMo)*pinf  : 0)
+        _properties.reduce((s,prop)=>{
+          if(!ownedMo(prop.id, calYear, d.getMonth()+1)) return s;
+          const ti = PROP_TAX_INS[prop.id];
+          return s + (ti ? (ti.tax+ti.ins)*pinf : 0);
+        }, 0)
       );
-      // Income tax estimate -- annualize this month's income; mortgage interest deduction uses current balances
-      const _yrsPaid = 5 + mo/12;
-      const _dplxBal = duplexKeepingFn(calYear) ? _mtg15.bal : 0;   // v3.4.0 state balances
-      const _lafBal  = lafKeepingFn(calYear)    ? remainBal(BASE.lafayetteMortgage, BASE.lafayetteRate, 30, _yrsPaid) : 0;
-      const _primBal = keepingFn(calYear)       ? _mtg6.bal : 0;
-      const _mtgInt  = _dplxBal*_mtg15.p.rate + _lafBal*BASE.lafayetteRate + _primBal*_mtg6.p.rate;
+      // Income tax estimate -- annualize this month's income; mortgage interest
+      // deduction uses current per-property STATE balances (v4.0.0-A: generalized).
+      const _mtgInt = _properties.reduce((s,prop)=>{
+        if(!ownedMo(prop.id, calYear, d.getMonth()+1)) return s;
+        const st = _mtgSt[prop.id];
+        return s + st.bal*st.p.rate;
+      }, 0);
       const taxMo = Math.round(estimateTax(liveParams, BASE.pensionMonthly*12, wkInc*12, yourSsMo, brendaSsMo, rentalMo*12, _mtgInt) / 12);
       const tier1  = mtg+health+core+famLoan+hiMins+propCost+taxMo;
 
       // -- MAINTENANCE RESERVES (cap-aware, time-gated by ownership) --
-      const maint6Mo   = keepingFn(calYear)       ? _maint6Base   : 0;
-      const maint15Mo  = duplexKeepingFn(calYear) ? _maint15Base  : 0;
-      const maintLafMo = lafKeepingFn(calYear)    ? _maintLafBase : 0;
+      const maint6Mo   = ownedMo('sixth', calYear, d.getMonth()+1)     ? _maint6Base   : 0;
+      const maint15Mo  = ownedMo('fifteenth', calYear, d.getMonth()+1) ? _maint15Base  : 0;
+      const maintLafMo = ownedMo('barberry', calYear, d.getMonth()+1)  ? _maintLafBase : 0;
       const res6Add   = (res6  <maint6Cap  )?Math.min(maint6Mo,  maint6Cap  -res6  ):0;
       const res15Add  = (res15 <maint15Cap )?Math.min(maint15Mo, maint15Cap -res15 ):0;
       const resLafAdd = (resLaf<maintLafCap)?Math.min(maintLafMo,maintLafCap-resLaf):0;
@@ -757,9 +700,10 @@ export default function App(){
         const _mcap = liveParams.mtgPrincipalUncapped ? Infinity : (liveParams.mtgPrincipalCap||0);
         const _leftover = Math.max(0, xtra);
         const room = Math.min(_mcap, _leftover + toSavings);
-        for(const [st,ownedFn] of [[_mtg6,keepingFn],[_mtg15,duplexKeepingFn]]){
+        for(const id of MTG_PRINCIPAL_ELIGIBLE_IDS){
           if(room - mtgExtraMo <= 0) break;
-          if(!ownedFn(calYear) || st.bal<=0) continue;
+          const st = _mtgSt[id];
+          if(!st || !ownedMo(id, calYear, d.getMonth()+1) || st.bal<=0) continue;
           const pay = Math.min(room - mtgExtraMo, st.bal);
           st.bal -= pay; mtgExtraMo += pay;
         }
@@ -797,9 +741,10 @@ export default function App(){
         if(L.started && !L.startAnnounced){ L.startAnnounced=true; events.push(`${L.label} starts -- $${Math.round(L.pmt).toLocaleString()}/mo`); }
         if(L.started && L.bal<=0 && !L.payoffAnnounced){ L.payoffAnnounced=true; events.push(`${L.label} paid off!`); }
       }
-      // v3.4.0 mortgage events from engine state
-      for(const st of [_mtg6,_mtg15]){
-        if(st.recast!=null && !st.transAnnounced){
+      // v4.0.0-A mortgage events from engine state (all properties)
+      for(const prop of _properties){
+        const st = _mtgSt[prop.id];
+        if(st.recast!=null && !st.transAnnounced && (st.p.ioYears||0)>0){
           st.transAnnounced=true;
           events.push(`${st.label} mortgage: IO→P&I (+$${Math.round(st.recast-st.ioPmt).toLocaleString()}/mo)`);
         }
@@ -808,8 +753,8 @@ export default function App(){
           events.push(`${st.label} mortgage paid off early! 🎉`);
         }
       }
-      // v3.2.0 settlement residual routing events
-      if(_settleDrawMo>0) events.push(`Settlement lifestyle draw $${Math.round(_settleDrawMo/1000)}K`);
+      // v4.0.0-A pooled-routing residual events
+      if(_settleDrawMo>0) events.push(`Obligation-year lifestyle draw $${Math.round(_settleDrawMo/1000)}K`);
       if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche)`);
       if(_payDetailMo && _payDetailMo.remainder>0) events.push(`$${Math.round(_payDetailMo.remainder/1000)}K residual into waterfall`);
       if(rdBal>=rdCap&&rdBal-rdAdd<rdCap) events.push("Rainy day fund FULL -- redirecting to sweep");
@@ -840,8 +785,8 @@ export default function App(){
         loansBal: Math.round(_loans.reduce((s,L)=>s+L.bal,0)),
         // v3.4.0 mortgage-principal bucket + balances
         mtgExtra: Math.round(mtgExtraMo),
-        mtgBal6:  Math.round(_mtg6.bal),
-        mtgBal15: Math.round(_mtg15.bal),
+        mtgBal6:  Math.round((_mtgSt.sixth?.bal)||0),
+        mtgBal15: Math.round((_mtgSt.fifteenth?.bal)||0),
         events,
         // Income breakdown
         pension:Math.round(pension),
@@ -852,11 +797,10 @@ export default function App(){
       });
     }
     return rows;
-  },[liveParams,liveRows,dispositions,settlementNeed,settlementYear,
-     lafStopYear,lafRental,topUnit,bottomRent,strRent,ltrRent,sixthRent,sixthMonths,
+  },[liveParams,liveRows,properties,obligation,
      workPts,ssAge,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
      struct6,struct15,structLaf,maintStr,bufferMode,payOffHI,
-     strPlatformPct,strCleanPct,mgrPct,strSchedule,mtrSchedule,defaultsRev]);  // wfMonths only affects table slice, not engine run
+     strPlatformPct,strCleanPct,mgrPct,ltrVacancyPct,mtrCleaningFlat,defaultsRev]);  // wfMonths only affects table slice, not engine run
 
   // v3.2.0: expose both engines' outputs for Playwright parity/consistency tests
   useEffect(()=>{
@@ -895,13 +839,11 @@ export default function App(){
     // Liquidation NW constants
     const _CGRATE = BASE.fedCapGains + BASE.coCapGains; // 0.282
     const _SCOST  = BASE.sellingCosts;                  // 0.05
+    const _liqPropById = Object.fromEntries((liveParams.properties||[]).map(pr=>[pr.id,pr]));
     const _liqReApp     = liveParams.reAppreciation;
-    const _liqDispo = liveParams.dispositions || {};
-    const _liqSixthYr = _liqDispo.sixth?.mode    ==='keep' ? Infinity : (_liqDispo.sixth?.year    || 2055);
-    const _liqLafYr   = _liqDispo.barberry?.mode ==='keep' ? Infinity : (_liqDispo.barberry?.year || 2055);
-    const _liqDupYr   = _liqDispo.fifteenth?.mode==='keep' ? Infinity : (_liqDispo.fifteenth?.year|| 2055);
-    const _liq15thBasis = liveSc.duplex15thBasis ?? 600_000;
-    const _liqLafBasis  = liveSc.lafayetteBasis  ?? 300_000;
+    const _liqSixthYr = _liqPropById.sixth?.hold.mode    ==='keep' ? Infinity : (_liqPropById.sixth?.hold.year    || 2055);
+    const _liqLafYr   = _liqPropById.barberry?.hold.mode ==='keep' ? Infinity : (_liqPropById.barberry?.hold.year || 2055);
+    const _liqDupYr   = _liqPropById.fifteenth?.hold.mode==='keep' ? Infinity : (_liqPropById.fifteenth?.hold.year|| 2055);
 
     return liveRows.map((r,i)=>{
       const cnt=cntByYear[r.cal]||12;
@@ -944,25 +886,25 @@ export default function App(){
         const lafOwned   = r.cal<_liqLafYr;
         let primNet=0;
         if(sixthOwned){
-          const pv=BASE.primaryValue*app;
+          const pv=(_liqPropById.sixth?.value||0)*app;
           const pb=r.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
           const sn=pv*(1-_SCOST);
-          const taxable=Math.max(0,Math.max(0,sn-BASE.sixthBasis)-BASE.marriedExcl);
+          const taxable=Math.max(0,Math.max(0,sn-(_liqPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
           primNet=sn-pb-taxable*_CGRATE;
         }
         let dplxNet=0;
         if(dupOwned){
-          const dv=BASE.duplexValue*app;
+          const dv=(_liqPropById.fifteenth?.value||0)*app;
           const db=r.dplxBalRaw ?? 0;
           const dsn=dv*(1-_SCOST);
-          dplxNet=dsn-db-Math.max(0,dsn-_liq15thBasis)*_CGRATE;
+          dplxNet=dsn-db-Math.max(0,dsn-(_liqPropById.fifteenth?.hold.basis||0))*_CGRATE;
         }
         let lafNet=0;
         if(lafOwned){
-          const lv=BASE.lafayetteValue*app;
-          const lb=r.lafBalRaw ?? remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
+          const lv=(_liqPropById.barberry?.value||0)*app;
+          const lb=r.lafBalRaw ?? 0;
           const lsn=lv*(1-_SCOST);
-          lafNet=lsn-lb-Math.max(0,lsn-_liqLafBasis)*_CGRATE;
+          lafNet=lsn-lb-Math.max(0,lsn-(_liqPropById.barberry?.hold.basis||0))*_CGRATE;
         }
         pt.liqNW=(primNet+dplxNet+lafNet+r.invested*1000+savAccRaw-r.hiDebtRaw)/1e6;
       }
@@ -985,36 +927,34 @@ export default function App(){
         {
           const pSnap=pin.paramSnapshot||{};
           const pApp=Math.pow(1+(pSnap.reApp??4)/100,i);
-          const _pD = pSnap.dispositions || {};
-          const pSixthYr = _pD.sixth?.mode    ==='keep' ? Infinity : (_pD.sixth?.year    || 2055);
-          const pDupYr   = _pD.fifteenth?.mode==='keep' ? Infinity : (_pD.fifteenth?.year|| 2055);
-          const pLafYr   = _pD.barberry?.mode ==='keep' ? Infinity : (_pD.barberry?.year || 2055);
-          const p15th=pSnap.duplex15thBasis??_liq15thBasis;
-          const pLaf=pSnap.lafayetteBasis??_liqLafBasis;
+          const pPropById = Object.fromEntries((pSnap.properties||freshPropertiesDefaults()).map(pr=>[pr.id,pr]));
+          const pSixthYr = pPropById.sixth?.hold.mode    ==='keep' ? Infinity : (pPropById.sixth?.hold.year    || 2055);
+          const pDupYr   = pPropById.fifteenth?.hold.mode==='keep' ? Infinity : (pPropById.fifteenth?.hold.year|| 2055);
+          const pLafYr   = pPropById.barberry?.hold.mode ==='keep' ? Infinity : (pPropById.barberry?.hold.year || 2055);
           const pSixthOwned = r.cal<pSixthYr;
           const pDupOwned   = r.cal<pDupYr;
           const pLafOwned   = r.cal<pLafYr;
           let pPrimNet=0;
           if(pSixthOwned){
-            const pv=BASE.primaryValue*pApp;
+            const pv=(pPropById.sixth?.value||0)*pApp;
             const pb=pin.rows[i]?.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
             const sn=pv*(1-_SCOST);
-            const taxable=Math.max(0,Math.max(0,sn-BASE.sixthBasis)-BASE.marriedExcl);
+            const taxable=Math.max(0,Math.max(0,sn-(pPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
             pPrimNet=sn-pb-taxable*_CGRATE;
           }
           let pDplxNet=0;
           if(pDupOwned){
-            const dv=BASE.duplexValue*pApp;
+            const dv=(pPropById.fifteenth?.value||0)*pApp;
             const db=pin.rows[i]?.dplxBalRaw ?? 0;
             const dsn=dv*(1-_SCOST);
-            pDplxNet=dsn-db-Math.max(0,dsn-p15th)*_CGRATE;
+            pDplxNet=dsn-db-Math.max(0,dsn-(pPropById.fifteenth?.hold.basis||0))*_CGRATE;
           }
           let pLafNet=0;
           if(pLafOwned){
-            const lv=BASE.lafayetteValue*pApp;
-            const lb=pin.rows[i]?.lafBalRaw ?? remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+i);
+            const lv=(pPropById.barberry?.value||0)*pApp;
+            const lb=pin.rows[i]?.lafBalRaw ?? 0;
             const lsn=lv*(1-_SCOST);
-            pLafNet=lsn-lb-Math.max(0,lsn-pLaf)*_CGRATE;
+            pLafNet=lsn-lb-Math.max(0,lsn-(pPropById.barberry?.hold.basis||0))*_CGRATE;
           }
           const pInvested=(pin.rows[i]?.invested??0)*1000;
           const pHiDebtRaw=(pin.rows[i]?.hiDebtRaw??0);
@@ -1023,7 +963,7 @@ export default function App(){
       });
       return pt;
     });
-  },[liveRows,pins,wfData,liveSc.duplex15thBasis,liveSc.lafayetteBasis]);
+  },[liveRows,pins,wfData,liveParams.properties]);
 
   // NW yr10 from chartData (includes savingsAcc from sweep) — used in stat card
   const liveNwYr10 = useMemo(()=>(chartData[10]?.nw ?? liveStats.nwYr10/1000),
@@ -1095,23 +1035,20 @@ export default function App(){
   const restorePin = useCallback((pin)=>{
     const s=pin.paramSnapshot||pin;
     if(!s) return;
-    // v3.1.0: paramSnapshot is sc format (same as SC_DEFAULTS keys).
-    // Merge with SC_DEFAULTS so missing fields fall back to defaults.
+    // v4.0.0-A: paramSnapshot is sc format (same as SC_DEFAULTS keys). No
+    // backward compatibility -- fresh schema, no migration. Merge with
+    // SC_DEFAULTS so missing fields (incl. properties/obligation) fall back.
     const next={...SC_DEFAULTS,...s};
-    next.loans = migrateScLoans(s);   // legacy famLoan pins auto-convert (famLoanAmt 0 -> no loans)
-    next.sixthIncomeSegments = migrateSixthIncomeSegments(s);   // v3.3.0: legacy 6th mode -> segments
     if(next.lifestyleDraws) next.lifestyleDraws=next.lifestyleDraws.map(d=>({...d,enabled:d.enabled!==false}));
     if(activeSc==="live") setLiveSc(next);
     else setPinScs(ps=>({...ps,[activeSc]:next}));
   },[activeSc]);
 
   const switchToPin = useCallback((pin)=>{
-    // If pin has no sc yet, seed it from its paramSnapshot (v3.1.0 sc-format only)
+    // If pin has no sc yet, seed it from its paramSnapshot
     setPinScs(ps=>{
       if(ps[pin.id]) return ps;
       const next={...SC_DEFAULTS,...(pin.paramSnapshot||{})};
-      next.loans = migrateScLoans(pin.paramSnapshot||{});
-      next.sixthIncomeSegments = migrateSixthIncomeSegments(pin.paramSnapshot||{});
       return {...ps,[pin.id]:next};
     });
     setActiveSc(pin.id);
@@ -1145,16 +1082,13 @@ export default function App(){
         ...updatedSc,
         ssStartYear:2026+(updatedSc.ssAge-65),
         ssAmount:updatedSc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(updatedSc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
-        duplexBottomLTR:updatedSc.bottomRent, duplexTopSTR:updatedSc.strRent, duplexTopLTR:updatedSc.ltrRent, duplexTopMTR:updatedSc.ltrRent,
-        sixthMTRRent:updatedSc.sixthRent, sixthMTRMonths:updatedSc.sixthMonths,
         reAppreciation:updatedSc.reApp/100, rentGrowth:updatedSc.rentGr/100, inflation:updatedSc.cpi/100,
         coreCpi:updatedSc.cpi/100, healthCpi:updatedSc.healthCpi/100, propCpi:updatedSc.propCpi/100,
         propInflation:(updatedSc.cpi/100)+0.007, investReturn:updatedSc.investRet/100,
-        loans:migrateScLoans(updatedSc).map(l=>({...l, rate:(l.rate||0)/100})),
+        loans:(updatedSc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
         strPlatformPct:(updatedSc.strPlatformPct||3)/100, strCleanPct:(updatedSc.strCleanPct||4)/100, mgrPct:(updatedSc.mgrPct||0)/100,
+        ltrVacancyPct:(updatedSc.ltrVacancyPct||4)/100, mtrCleaningFlat:updatedSc.mtrCleaningFlat||300,
         lifestyleDraws:updatedSc.lifestyleDraws.filter(d=>d.enabled),
-        strSchedule:updatedSc.strSchedule||[],
-        mtrSchedule:updatedSc.mtrSchedule||[],
         ccRate:updatedSc.ccRate/100, sophiaRate:updatedSc.sophiaRate/100, nolanRate:updatedSc.nolanRate/100,
       });
       const newRows = buildScenario(updatedParams);
@@ -1651,7 +1585,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v3.4.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.0.0-A</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1731,569 +1665,287 @@ export default function App(){
               </div>
             )}
 
-            {/* ONE-TIME DECISIONS */}
-            {sect("One-Time Decisions")}
-
-            {/* 6th St sell year -- legacy shim; disposition card is source of truth */}
-            {(()=>{
-              const sixthSliderOverridden = _dSixth.mode==='full_1031' || _dSixth.mode==='partial_1031';
-              const _sixthRes = liveRows.dispoResults?.sixth;
-              return (
-            <div style={{marginBottom:12}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                <span style={{fontSize:10,color:muted}}>Sell 6th St</span>
-                <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                  {sellYear<=2046
-                    ? <span style={{fontSize:10,color:red,fontFamily:mono,fontWeight:"bold"}}>{sellYear} (age {65+(sellYear-BASE.startYear)})</span>
-                    : <span style={{fontSize:10,color:dim,fontFamily:mono}}>never</span>
-                  }
-                  <button onClick={()=>setSellYear(2055)} disabled={sixthSliderOverridden} style={{
-                    fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                    background:sellYear>2046?"transparent":bg2,border:`1px solid ${sellYear>2046?dim:bdr}`,
-                    color:sellYear>2046?dim:amber}}>never</button>
-                </div>
-              </div>
-              <div data-testid="sell-sixth-slider" data-disabled={sixthSliderOverridden?"true":"false"}
-                style={sixthSliderOverridden?disabledStyle:undefined}>
-                <input type="range" min={2026} max={2055} step={1} value={Math.min(sellYear,2055)}
-                  onChange={e=>setSellYear(parseInt(e.target.value))}
-                  style={{width:"100%",accentColor:red,cursor:"pointer",height:4}}/>
-              </div>
-              {sixthSliderOverridden&&(
-                <div style={{fontSize:8,color:amber,marginTop:3,fontStyle:"italic"}}>
-                  Overridden — the 6th St disposition card below wins ({_dSixth.mode==='full_1031'?'Full 1031':'Partial 1031'} in {_dSixth.year||2055})
-                </div>
-              )}
-              {sellYear<=2046&&(<>
-                <div style={{fontSize:8,color:dim,marginTop:4,display:"flex",justifyContent:"space-between"}}>
-                  <span>Net proceeds ~${_sixthRes&&_sixthRes.afterTaxNetProceeds>0?Math.round(_sixthRes.afterTaxNetProceeds/1000)+"K":"--"}</span>
-                  <span>Sale tax ~${_sixthRes&&_sixthRes.totalTax>0?Math.round(_sixthRes.totalTax/1000)+"K":"--"}</span>
-                </div>
-                <div style={{marginTop:6}}>
-                  <div style={{fontSize:10,color:muted,marginBottom:3}}>HI debt at closing</div>
-                  {toggle(payOffHI,setPayOffHI,[
-                    {v:false,l:"Sweep over time",c:amber},{v:true,l:"Pay off at closing",c:green}
-                  ])}
-                </div>
-              </>)}
-            </div>
-              );
-            })()}
-
-            {/* Lafayette stop year -- grayed when the Lafayette disposition sale preempts it */}
-            {(()=>{
-              const lafStopOverridden = _dLaf.mode && _dLaf.mode!=='keep' && (_dLaf.year||2055) <= lafStopYear;
-              return (
-            <div style={{marginBottom:12}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                <span style={{fontSize:10,color:muted}}>Lafayette rental stops</span>
-                <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                  {lafStopYear<=2046
-                    ? <span style={{fontSize:10,color:amber,fontFamily:mono,fontWeight:"bold"}}>{lafStopYear} (age {65+(lafStopYear-BASE.startYear)})</span>
-                    : <span style={{fontSize:10,color:dim,fontFamily:mono}}>keeps renting</span>
-                  }
-                  <button onClick={()=>setLafStopYear(2055)} disabled={lafStopOverridden} style={{
-                    fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                    background:lafStopYear>2046?"transparent":bg2,border:`1px solid ${lafStopYear>2046?dim:bdr}`,
-                    color:lafStopYear>2046?dim:amber}}>never</button>
-                </div>
-              </div>
-              <div data-testid="laf-stop-slider" data-disabled={lafStopOverridden?"true":"false"}
-                style={lafStopOverridden?disabledStyle:undefined}>
-                <input type="range" min={2026} max={2055} step={1} value={Math.min(lafStopYear,2055)}
-                  onChange={e=>setLafStopYear(parseInt(e.target.value))}
-                  style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-              </div>
-              {lafStopOverridden
-                ? <div style={{fontSize:8,color:amber,marginTop:3,fontStyle:"italic"}}>
-                    Overridden — the Lafayette disposition card below wins (sold in {_dLaf.year||2055}, before this stop year)
-                  </div>
-                : <div style={{fontSize:8,color:dim,marginTop:3}}>
-                    {lafStopYear<=2046 ? "Lafayette income zeroes from this year (you move in, or stop renting)" : "Lafayette rental income continues through model horizon"}
-                  </div>}
-              {!lafRental&&<div style={{fontSize:8,color:dim,marginTop:2,fontStyle:"italic"}}>Lafayette rental toggle is off -- stop year has no effect</div>}
-            </div>
-              );
-            })()}
-
-            <div style={{marginBottom:10}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                <div style={{fontSize:10,color:muted}}>15th St Top Unit</div>
-                {soldBadge(_dDuplex,'fifteenth')}
-              </div>
-              <div data-testid="topunit-controls" data-disabled={soldFirstYear(_dDuplex)?"true":"false"}
-                style={soldFirstYear(_dDuplex)?disabledStyle:undefined}>
-                {toggle(topUnit,setTopUnit,[
-                  {v:"str",l:"STR"},{v:"ltr",l:"LTR"},{v:"mtr",l:"MTR",c:blue}
-                ])}
-              </div>
-              {soldCaption(_dDuplex)}
-            </div>
-
-            <div style={{marginBottom:10}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                <div style={{fontSize:10,color:muted}}>Lafayette</div>
-                {soldBadge(_dLaf,'barberry')}
-              </div>
-              <div data-testid="laf-controls" data-disabled={soldFirstYear(_dLaf)?"true":"false"}
-                style={soldFirstYear(_dLaf)?disabledStyle:undefined}>
-                {toggle(lafRental,setLafRental,[{v:true,l:"Rented LTR",c:green},{v:false,l:"Your home / vacant"}])}
-              </div>
-              {soldCaption(_dLaf)}
-            </div>
-
-            {/* v3.1.0 Dispositions & Settlement panel */}
-            {sect("Dispositions & Settlement")}
+            {/* ============================================================
+                v4.0.0-A SCAFFOLD UI -- property-centric. Rough/minimal by
+                design (Session A): no collapse groups, no polish. Exposes
+                every code path: per property mode/year/quarter, mortgage,
+                disposition fields, unit segment editors; the One-Time
+                Obligation block; the pooled routing chain. Session B
+                rebuilds this into the full collapsible sidebar IA.
+                ============================================================ */}
+            {sect("Properties (v4.0.0-A scaffold)")}
             <div style={{fontSize:9,color:dim,marginBottom:10,lineHeight:1.5}}>
-              Per-property sale / 1031 exchange decisions. Settlement funding pulls from sale proceeds.
-              Residual after settlement can pay down HI debt (avalanche order) or stay invested.
-              Values sourced from accountant liquidation worksheet.
+              Each property owns its hold/sell decision, its units, each unit's income
+              segments, and its disposition tax block. Sale timing granularity is the
+              quarter. Overlapping segments SUM on a unit, except LTR (exclusive --
+              a tenant occupies the whole unit).
             </div>
 
-            {/* Per-property disposition cards */}
-            {['sixth','fifteenth','barberry'].map(key => {
-              const d = dispositions?.[key] || {};
-              const liq = LIQUIDATION_DEFAULTS[key];
-              // v3.1.1: reconciliation compares against the offset-free engine run --
-              // the CPA sheet assumes no settlement gain-offset, so the slider must not move these rows
-              const engineRes = liveRows.dispoResultsNoOffset?.[key] || liveRows.dispoResults?.[key];
+            {properties.map(prop=>{
+              const hold = prop.hold||{};
+              const isSold = hold.mode && hold.mode!=='keep';
+              const engineRes = liveRows.dispoResults?.[prop.id];
+              const modeOpts = prop.isPrimary
+                ? [{v:'keep',l:'Keep',c:dim},{v:'sell',l:'Sell',c:red}]
+                : [{v:'keep',l:'Keep',c:dim},{v:'sell',l:'Sell',c:red},
+                   {v:'full_1031',l:'Full 1031',c:blue},{v:'partial_1031',l:'Partial 1031',c:blue}];
               return (
-                <div key={key} data-testid={`dispo-${key}-card`} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
+                <div key={prop.id} data-testid={`property-${prop.id}-card`} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:10}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <span style={{fontSize:11,color:bright,fontWeight:"bold"}}>{liq.label}</span>
-                    {d.mode!=='keep' && (
-                      <span style={{fontSize:9,color:amber,fontFamily:mono}}>
-                        {d.mode} · {d.year}
-                      </span>
-                    )}
+                    <span style={{fontSize:11,color:bright,fontWeight:"bold"}}>{prop.label}{prop.isPrimary?" (primary -- §121, no 1031)":""}</span>
+                    {isSold && <span data-testid={`sold-badge-${prop.id}`} style={{fontSize:9,color:red,fontFamily:mono,fontWeight:"bold"}}>SOLD {hold.mode} · Q{hold.quarter||1} {hold.year}</span>}
                   </div>
-                  <div style={{marginBottom:8}}>
-                    {toggle(d.mode||'keep', v=>setDispo(key,{mode:v}), [
-                      {v:'keep',l:'Keep',c:dim},
-                      {v:'sell_taxable',l:'Sell',c:red},
-                      {v:'full_1031',l:'Full 1031',c:blue},
-                      {v:'partial_1031',l:'Partial 1031',c:blue},
-                    ])}
+
+                  {/* Value + appreciation override */}
+                  {slider("Property value",prop.value||0,v=>setProperty(prop.id,{value:v}),
+                    Math.round((prop.value||500000)*0.5),Math.round((prop.value||500000)*2),5000,v=>"$"+Math.round(v/1000)+"K")}
+
+                  {/* Mode / year / quarter */}
+                  <div data-testid={`mode-toggle-${prop.id}`} style={{marginBottom:8}}>
+                    {toggle(hold.mode||'keep', v=>setPropertyHold(prop.id,{mode:v}), modeOpts)}
                   </div>
-                  {d.mode!=='keep' && (<>
-                    {slider("Year",d.year||2026,v=>setDispo(key,{year:v}),2026,2046,1,v=>v+"")}
-                    {slider("Sale price",d.salesPrice||0,v=>setDispo(key,{salesPrice:v}),
-                      Math.round(liq.salesPrice*0.5),Math.round(liq.salesPrice*1.5),5000,
-                      v=>"$"+Math.round(v/1000)+"K")}
-                    {slider("Adjusted basis",d.adjustedBasis||0,v=>setDispo(key,{adjustedBasis:v}),
-                      Math.round(liq.adjustedBasis*0.5),Math.round(liq.adjustedBasis*1.5),5000,
-                      v=>"$"+Math.round(v/1000)+"K")}
-                    {key!=='sixth' && slider("CA-source deferred gain",d.caSourceDeferredGain||0,
-                      v=>setDispo(key,{caSourceDeferredGain:v}),0,Math.round((liq.caSourceDeferredGain||1)*1.5),5000,
-                      v=>"$"+Math.round(v/1000)+"K")}
-                    {key!=='sixth' && slider("Depreciation recapture $",d.depreciationRecapture||0,
-                      v=>setDispo(key,{depreciationRecapture:v}),0,Math.max(60000,Math.round((liq.depreciationRecapture||0)*1.5)),1000,
-                      v=>"$"+Math.round(v/1000)+"K")}
-                    {d.mode==='partial_1031' && slider("Cash boot",d.cashBoot||0,
-                      v=>setDispo(key,{cashBoot:v}),0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
-                    <div style={{marginTop:6,marginBottom:6}}>
+                  {isSold && (<>
+                    <div data-testid={`sale-year-slider-${prop.id}`}>
+                      {slider("Sale year",hold.year||2026,v=>setPropertyHold(prop.id,{year:v}),2026,2046,1,v=>v+"")}
+                    </div>
+                    <div style={{marginBottom:10}}>
+                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale quarter (assumed at quarter boundary)</div>
+                      <div data-testid={`sale-quarter-toggle-${prop.id}`}>
+                        {toggle(hold.quarter||1, v=>setPropertyHold(prop.id,{quarter:v}), [1,2,3,4].map(q=>({v:q,l:'Q'+q})))}
+                      </div>
+                    </div>
+                    <div style={{marginBottom:8}}>
                       <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale mode</div>
-                      {toggle(d.saleMode||'market', v=>setDispo(key,{saleMode:v}), [
+                      {toggle(hold.saleMode||'market', v=>setPropertyHold(prop.id,{saleMode:v}), [
                         {v:'market',l:'Market'},{v:'forced',l:'Forced (-15%)',c:red}
                       ])}
                     </div>
+                    {slider("Adjusted basis",hold.basis||0,v=>setPropertyHold(prop.id,{basis:v}),
+                      Math.round((hold.basis||400000)*0.5),Math.round((hold.basis||400000)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
+                    {prop.isPrimary && slider("§121 exclusion",hold.sec121Exclusion||0,v=>setPropertyHold(prop.id,{sec121Exclusion:v}),0,500000,10000,v=>"$"+Math.round(v/1000)+"K")}
+                    {!prop.isPrimary && slider("CA-source deferred gain",hold.caSourceDeferredGain||0,v=>setPropertyHold(prop.id,{caSourceDeferredGain:v}),0,Math.max(10000,(hold.caSourceDeferredGain||0)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
+                    {!prop.isPrimary && slider("Depreciation recapture $",hold.depreciationRecapture||0,v=>setPropertyHold(prop.id,{depreciationRecapture:v}),0,Math.max(60000,(hold.depreciationRecapture||0)*1.5),1000,v=>"$"+Math.round(v/1000)+"K")}
+                    {hold.mode==='partial_1031' && slider("Cash boot",hold.cashBoot||0,v=>setPropertyHold(prop.id,{cashBoot:v}),0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
                     {engineRes && engineRes.mode && engineRes.mode!=='keep' && (
                       <div style={{marginTop:8,padding:8,background:bg1,borderRadius:4,fontSize:9}}>
                         <div style={{color:dim,marginBottom:3}}>Reconciliation vs CPA sheet:</div>
-                        {(()=>{
-                          const eTax = Math.round(engineRes.totalTax||0);
-                          const eNet = Math.round(engineRes.afterTaxNetProceeds||0);
-                          const taxDelta = liq.cpaEstTax > 0 ? (eTax-liq.cpaEstTax)/liq.cpaEstTax : 0;
-                          const netDelta = liq.cpaNetProceedsAfterTax > 0 ? (eNet-liq.cpaNetProceedsAfterTax)/liq.cpaNetProceedsAfterTax : 0;
-                          const warn = Math.abs(taxDelta) > 0.10 || Math.abs(netDelta) > 0.10;
-                          return (<>
-                            <div style={{color:muted}}>Tax: <span style={{color:bright,fontFamily:mono}}>${Math.round(eTax/1000)}K</span> vs CPA ${Math.round(liq.cpaEstTax/1000)}K <span style={{color:Math.abs(taxDelta)>0.1?amber:dim}}>(Δ {(taxDelta*100).toFixed(0)}%)</span></div>
-                            <div style={{color:muted}}>Net: <span style={{color:bright,fontFamily:mono}}>${Math.round(eNet/1000)}K</span> vs CPA ${Math.round(liq.cpaNetProceedsAfterTax/1000)}K <span style={{color:Math.abs(netDelta)>0.1?amber:dim}}>(Δ {(netDelta*100).toFixed(0)}%)</span></div>
-                            {warn && <div style={{color:amber,marginTop:3}}>Δ over 10% — recalibrate rates</div>}
-                          </>);
-                        })()}
+                        <div style={{color:muted}}>Tax: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.totalTax||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaEstTax||0)/1000)}K</div>
+                        <div style={{color:muted}}>Net: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.afterTaxNetProceeds||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaNetProceedsAfterTax||0)/1000)}K</div>
                       </div>
                     )}
                   </>)}
-                </div>
-              );
-            })}
 
-            {/* Global settlement panel -- v3.1.2 order: knobs -> proceeds breakdown -> paydown */}
-            <div data-testid="settlement-card" style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:8}}>
-              <div style={{fontSize:11,color:bright,fontWeight:"bold",marginBottom:8}}>Settlement</div>
-              {slider("Settlement need",settlementNeed,setSettlementNeed,262500,787500,5000,
-                v=>"$"+Math.round(v/1000)+"K")}
-              {slider("Settlement year",settlementYear,setSettlementYear,2026,2046,1,v=>v+"")}
-              <div data-testid="settle-offset-slider">
-                {slider("Gain offset % (UNCONFIRMED)",gainOffsetPct,setGainOffsetPct,0,100,5,
-                  v=>v+"%  ($"+Math.round(settlementNeed*v/100/1000)+"K)")}
-              </div>
-              <div style={{fontSize:9,color:dim,marginBottom:8,fontStyle:"italic",marginTop:-4}}>
-                Kimbell/Arrowsmith position — CPA to validate. Default OFF.
-              </div>
-              <div style={{marginBottom:8}}>
-                <div style={{fontSize:9,color:muted,marginBottom:3}}>Same-year 3-sale tax bump</div>
-                {toggle(sameYearSaleTaxBumpOn, setSameYearSaleTaxBumpOn, [
-                  {v:true,l:'On (+$'+Math.round((sameYearSaleTaxBump||0)/1000)+'K)',c:amber},
-                  {v:false,l:'Off',c:dim}
-                ])}
-              </div>
-              {(()=>{
-                const {sellers, totalProceeds, residual} = settleData;
-                const shortfall = totalProceeds - settlementNeed < -0.5;
-                // v3.2.0 3-way split figures come from the ENGINE rows (annual engine
-                // applies splitResidual/planHiPaydown; wfData applies the same plan)
-                const rSettle = liveRows.find(r=>r.cal===settlementYear) || {};
-                const drawApplied    = rSettle.settleDraw || 0;
-                const paydownApplied = rSettle.hiPaydown  || 0;
-                const waterfallAmt   = (rSettle.wfDebtPaid||0) + (rSettle.wfToSavings||0);
-                const fmtK = v=>"$"+Math.abs(Math.round(v/1000))+"K";
-                const modeLabel = m=>m==='sell_taxable'?'sell':m==='full_1031'?'full 1031':m==='partial_1031'?'partial 1031':m;
-                const line = (label,val,{neg,eq,bold}={}) => (
-                  <div style={{display:"flex",justifyContent:"space-between"}}>
-                    <span style={{color:bold?bright:muted,fontWeight:bold?"bold":"normal"}}>{(neg?"− ":eq?"= ":"  ")+label}</span>
-                    <span style={{fontFamily:mono,color:bold?green:neg?red:muted,fontWeight:bold?"bold":"normal"}}>{(neg?"−":"")+fmtK(val)}</span>
+                  {/* Mortgage (plain number inputs -- calibration constants, rarely touched) */}
+                  <div style={{marginTop:8,paddingTop:8,borderTop:`1px dashed ${bdr}`}}>
+                    <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6}}>Mortgage</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                      {[
+                        ["Balance $","balance",v=>parseFloat(v)],
+                        ["Rate (decimal)","rate",v=>parseFloat(v)],
+                        ["Origin year","originYear",v=>parseInt(v)],
+                        ["Origin month","originMonth",v=>parseInt(v)],
+                        ["Term (yrs)","termYears",v=>parseInt(v)],
+                        ["IO years","ioYears",v=>parseInt(v)],
+                      ].map(([label,field,parse])=>(
+                        <div key={field}>
+                          <div style={{fontSize:8,color:dim,marginBottom:2}}>{label}</div>
+                          <input data-testid={`mtg-${prop.id}-${field}`} type="number" step="any"
+                            value={prop.mortgage?.[field] ?? 0}
+                            onChange={e=>setPropertyMortgage(prop.id,{[field]:parse(e.target.value)})}
+                            style={{width:"100%",background:bg1,border:`1px solid ${bdr}`,borderRadius:4,
+                              color:bright,fontFamily:mono,fontSize:10,padding:"3px 6px",outline:"none"}}/>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                );
-                return (<>
-                  {/* Proceeds & residual breakdown -- itemized from disposeAsset outputs */}
-                  <div data-testid="settle-breakdown" style={{fontSize:9,color:muted,padding:8,background:bg1,borderRadius:4,marginTop:4,marginBottom:10}}>
-                    <div style={{color:dim,marginBottom:5,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Proceeds &amp; Residual — {settlementYear}</div>
-                    {sellers.length===0&&(
-                      <div style={{color:dim,fontStyle:"italic",marginBottom:4}}>No dispositions in {settlementYear} — settlement pulls from savings/cash.</div>
-                    )}
-                    {sellers.map(({k,d,dn})=>{
-                      const liq = LIQUIDATION_DEFAULTS[k];
-                      const open = settleOpen[k] ?? (sellers.length===1);
-                      const preTax = d.mode==='partial_1031' ? (d.cashBoot||0) : d.netSale - d.mortgagePayoff;
-                      const offsetAmt = Math.max(0,(dn.recognizedGain||0)-(d.recognizedGain||0));
-                      const compSum = (d.recaptureTax||0)+(d.fedCapGainsTax||0)+(d.caClawbackTax||0)+(d.coTax||0);
-                      const bumpShare = Math.max(0,(d.totalTax||0)-compSum);
-                      const costPct = d.grossPrice>0 ? Math.round(d.sellingCosts/d.grossPrice*100) : 0;
+
+                  {/* Units + segment editors */}
+                  <div style={{marginTop:10,paddingTop:8,borderTop:`1px dashed ${bdr}`}}>
+                    <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6}}>Units</div>
+                    {prop.units.map((unit,unitIdx)=>{
+                      const segs = unit.segments||[];
+                      const segErrors = validateUnitSegments(segs);
+                      const segOverlaps = unitSegmentOverlaps(segs);
+                      const updSeg = (ei,patch)=>setUnitSegments(prop.id,unitIdx,list=>list.map((x,j)=>j===ei?{...x,...patch}:x));
                       return (
-                        <div key={k} data-testid={`settle-prop-${k}`} style={{marginBottom:6,paddingBottom:6,borderBottom:`1px dashed ${bdr}`}}>
-                          <div onClick={()=>setSettleOpen(o=>({...o,[k]:!open}))}
-                            style={{cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                            <span style={{color:bright,fontWeight:"bold"}}>{open?"▾":"▸"} {liq.label} — {modeLabel(d.mode)} ({d.saleMode||'market'}), {d.year}</span>
-                            <span data-testid={`settle-aftertax-${k}`} data-val={Math.round(d.afterTaxNetProceeds||0)}
-                              style={{fontFamily:mono,color:green}}>{fmtK(d.afterTaxNetProceeds||0)}</span>
+                        <div key={unit.id} data-testid={`unit-${unit.id}`} style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:6,padding:8,marginBottom:8}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                            <span style={{fontSize:10,color:bright,fontWeight:"bold"}}>{unit.label}</span>
+                            <button data-testid={`seg-add-${unit.id}`}
+                              onClick={()=>setUnitSegments(prop.id,unitIdx,list=>{
+                                const prev=list[list.length-1];
+                                const yrFrom=prev?Math.min(2046,(prev.yrTo||prev.yrFrom||2026)+1):2026;
+                                return [...list,{yrFrom, yrTo:Math.min(2046,yrFrom+1), kind:'ltr',
+                                  str:[{days:120,rate:280,type:"nightly"}], mtr:[{months:10,rate:3000}], ltr:{monthlyRent:3000}}];
+                              })}
+                              style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
+                                background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
+                              + add segment
+                            </button>
                           </div>
-                          {open&&(d.mode==='full_1031'
-                            ? <div style={{color:dim,fontStyle:"italic",marginTop:3,paddingLeft:12}}>
-                                Full 1031 — no cash proceeds; {fmtK(d.deferredGain||0)} gain deferred into replacement asset.
-                              </div>
-                            : <div style={{marginTop:4,paddingLeft:12}}>
-                                {line("Gross sale price", d.grossPrice)}
-                                {line(`Selling costs (${costPct}%)`, d.sellingCosts, {neg:true})}
-                                {line("Net sale", d.netSale, {eq:true})}
-                                {line("Mortgage payoff", d.mortgagePayoff, {neg:true})}
-                                {d.mode==='partial_1031'
-                                  ? line("Cash boot (taxable slice)", d.cashBoot, {eq:true})
-                                  : line("Pre-tax proceeds", preTax, {eq:true})}
-                                <div style={{marginTop:4}}/>
-                                {line("Recognized gain", dn.recognizedGain||0)}
-                                {offsetAmt>0.5&&(
-                                  <div data-testid={`settle-offset-line-${k}`} style={{display:"flex",justifyContent:"space-between"}}>
-                                    <span style={{color:muted}}>− Settlement gain offset</span>
-                                    <span style={{fontFamily:mono,color:amber}}>−{fmtK(offsetAmt)}</span>
-                                  </div>
-                                )}
-                                {offsetAmt>0.5&&line("Taxable gain", d.recognizedGain||0, {eq:true})}
-                                <div style={{color:dim,marginTop:2}}>
-                                  Tax: recapture {fmtK(d.recaptureTax||0)} · fed {fmtK(d.fedCapGainsTax||0)} · CA {fmtK(d.caClawbackTax||0)} · CO {fmtK(d.coTax||0)}
-                                  {(d.otherStateCredit||0)>0.5?` (credit −${fmtK(d.otherStateCredit)})`:""}
-                                  {bumpShare>500?` · same-yr bump ${fmtK(bumpShare)}`:""}
+                          {segs.length===0 && (
+                            <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>No segments -- no income</div>
+                          )}
+                          {segs.map((seg,ei)=>{
+                            const kColor = seg.kind==='str'?amber:seg.kind==='mtr'?blue:green;
+                            const gross = unitSegmentGross(seg);
+                            const clip = segmentClipInfo(seg, hold);
+                            return (
+                              <div key={ei} data-testid={`seg-${unit.id}-${ei}`} style={{background:bg2,border:`1px solid ${kColor}55`,borderRadius:6,padding:8,marginBottom:6}}>
+                                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                                  <span style={{fontSize:9,color:kColor,fontWeight:"bold"}}>{seg.yrFrom}–{seg.yrTo} — {seg.kind.toUpperCase()} — ${Math.round(gross/12).toLocaleString()}/mo avg</span>
+                                  <button onClick={()=>setUnitSegments(prop.id,unitIdx,list=>list.filter((_,j)=>j!==ei))}
+                                    style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                                      background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
                                 </div>
-                                {line("Total tax", d.totalTax||0, {neg:true})}
-                                {offsetAmt>0.5&&(
-                                  <div data-testid={`settle-notax-${k}`} data-val={Math.round(dn.totalTax||0)}
-                                    style={{color:dim,fontStyle:"italic",textAlign:"right"}}>
-                                    (would be {fmtK(dn.totalTax||0)} without offset)
+                                <div style={{display:"flex",gap:8,marginBottom:6}}>
+                                  <div style={{flex:1}}>
+                                    <div style={{fontSize:8,color:dim,marginBottom:2}}>From {seg.yrFrom}</div>
+                                    <input type="range" min={2026} max={2046} step={1} value={seg.yrFrom}
+                                      onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrFrom:v,yrTo:Math.max(v,seg.yrTo)});}}
+                                      style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                                  </div>
+                                  <div style={{flex:1}}>
+                                    <div style={{fontSize:8,color:dim,marginBottom:2}}>To {seg.yrTo}</div>
+                                    <input type="range" min={2026} max={2046} step={1} value={seg.yrTo}
+                                      onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrTo:v,yrFrom:Math.min(seg.yrFrom,v)});}}
+                                      style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                                  </div>
+                                </div>
+                                <div style={{marginBottom:6}}>
+                                  {toggle(seg.kind,v=>updSeg(ei,{kind:v}),[
+                                    {v:'str',l:'STR',c:amber},{v:'mtr',l:'MTR',c:blue},{v:'ltr',l:'LTR',c:green}
+                                  ])}
+                                </div>
+                                {seg.kind==='str' && (seg.str||[]).map((g,si)=>(
+                                  <div key={si} style={{marginBottom:6}}>
+                                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                                      <span style={{fontSize:8,color:muted}}>Days</span>
+                                      <span style={{fontSize:8,color:amber,fontFamily:mono}}>{g.days}d</span>
+                                    </div>
+                                    <input type="range" min={0} max={365} step={5} value={g.days}
+                                      onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,days:parseInt(e.target.value)}:x)})}
+                                      style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                                      <span style={{fontSize:8,color:muted}}>Rate/night</span>
+                                      <span style={{fontSize:8,color:amber,fontFamily:mono}}>${g.rate}</span>
+                                    </div>
+                                    <input type="range" min={100} max={1200} step={10} value={g.rate}
+                                      onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
+                                      style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                                  </div>
+                                ))}
+                                {seg.kind==='mtr' && (seg.mtr||[]).map((g,si)=>(
+                                  <div key={si} style={{marginBottom:6}}>
+                                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                                      <span style={{fontSize:8,color:muted}}>Months</span>
+                                      <span style={{fontSize:8,color:blue,fontFamily:mono}}>{g.months}mo</span>
+                                    </div>
+                                    <input type="range" min={1} max={12} step={1} value={g.months}
+                                      onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,months:parseInt(e.target.value)}:x)})}
+                                      style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
+                                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                                      <span style={{fontSize:8,color:muted}}>Rate/mo</span>
+                                      <span style={{fontSize:8,color:blue,fontFamily:mono}}>${g.rate}</span>
+                                    </div>
+                                    <input type="range" min={2000} max={12000} step={250} value={g.rate}
+                                      onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
+                                      style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
+                                  </div>
+                                ))}
+                                {seg.kind==='ltr' && (
+                                  <div style={{marginBottom:6}}>
+                                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                                      <span style={{fontSize:8,color:muted}}>Monthly rent</span>
+                                      <span style={{fontSize:8,color:green,fontFamily:mono}}>${(seg.ltr?.monthlyRent||0).toLocaleString()}/mo</span>
+                                    </div>
+                                    <input type="range" min={1000} max={12000} step={50} value={seg.ltr?.monthlyRent||0}
+                                      onChange={e=>updSeg(ei,{ltr:{...(seg.ltr||{}),monthlyRent:parseInt(e.target.value)}})}
+                                      style={{width:"100%",accentColor:green,cursor:"pointer",height:4}}/>
                                   </div>
                                 )}
-                                {line("After-tax proceeds", d.afterTaxNetProceeds||0, {eq:true,bold:true})}
+                                {clip && clip.truncated && (
+                                  <div style={{fontSize:8,color:blue,fontStyle:"italic"}}>ⓘ truncated at Q{hold.quarter||1} {hold.year} sale</div>
+                                )}
                               </div>
+                            );
+                          })}
+                          {segOverlaps.length>0 && (
+                            <div data-testid={`seg-overlap-info-${unit.id}`} style={{fontSize:9,color:blue,background:blue+"11",border:`1px solid ${blue}33`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
+                              {segOverlaps.map((o,i)=>(
+                                <div key={i}>ⓘ {o.yrFrom===o.yrTo?o.yrFrom:`${o.yrFrom}–${o.yrTo}`}: concurrent segments — combined gross ${Math.round(o.combinedGross/1000)}K/yr</div>
+                              ))}
+                            </div>
+                          )}
+                          {segErrors.length>0 && (
+                            <div data-testid={`seg-errors-${unit.id}`} style={{fontSize:9,color:red,background:red+"11",border:`1px solid ${red}44`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
+                              {segErrors.map((e,i)=><div key={i}>&#9888; {e}</div>)}
+                            </div>
                           )}
                         </div>
                       );
                     })}
-                    <div style={{display:"flex",justifyContent:"space-between"}}>
-                      <span style={{color:muted}}>Σ after-tax proceeds</span>
-                      <span data-testid="settle-total" data-val={Math.round(totalProceeds)}
-                        style={{fontFamily:mono,color:bright}}>{fmtK(totalProceeds)}</span>
-                    </div>
-                    <div style={{display:"flex",justifyContent:"space-between"}}>
-                      <span style={{color:muted}}>− Settlement need</span>
-                      <span style={{fontFamily:mono,color:red}}>−{fmtK(settlementNeed)}</span>
-                    </div>
-                    <div style={{display:"flex",justifyContent:"space-between",marginTop:2}}>
-                      <span style={{color:bright,fontWeight:"bold"}}>= Residual</span>
-                      <span data-testid="settle-residual" data-val={Math.round(residual)}
-                        style={{fontFamily:mono,color:residual>0?green:amber,fontWeight:"bold"}}>{fmtK(residual)}</span>
-                    </div>
-                    {shortfall&&(
-                      <div style={{color:amber,fontStyle:"italic",marginTop:2}}>
-                        Proceeds don't cover the need — shortfall funded outside the sim (cash floors at 0).
-                      </div>
-                    )}
                   </div>
+                </div>
+              );
+            })}
 
-                  {/* v3.2.0 residual 3-way split -- decide how to use the number above */}
-                  <div data-testid="settle-draw-slider">
-                    {slider("(a) Lifestyle draw (one-time)", Math.min(settleLifestyleDraw, Math.round(residual)), setSettleLifestyleDraw,
-                      0, Math.max(0, Math.round(residual)), 5000,
-                      v=>"$"+Math.round(v/1000)+"K of $"+Math.round(residual/1000)+"K residual")}
-                  </div>
-                  <div data-testid="settle-paydown-slider">
-                    {slider("(b) HI paydown % of remaining residual",hiPaydownPct,setHiPaydownPct,0,100,5,
-                      v=>v+"%")}
-                  </div>
-                  <div data-testid="settle-split-line" style={{fontSize:9,color:muted,marginTop:-2}}>
-                    <span data-testid="settle-draw-val" data-val={Math.round(drawApplied)} style={{color:amber,fontFamily:mono}}>{fmtK(drawApplied)}</span> lifestyle,{" "}
-                    <span data-testid="settle-paydown-val" data-val={Math.round(paydownApplied)} style={{color:green,fontFamily:mono}}>{fmtK(paydownApplied)}</span> to HI debt,{" "}
-                    <span data-testid="settle-wf-val" data-val={Math.round(waterfallAmt)} style={{color:blue,fontFamily:mono}}>{fmtK(waterfallAmt)}</span> into waterfall
-                  </div>
-                  <div style={{fontSize:8,color:dim,marginTop:2,fontStyle:"italic"}}>
-                    Waterfall: fills maint reserve / rainy day / op buffer to caps, then debt sweep, then savings.
-                  </div>
-                </>);
-              })()}
+            {/* Cost profiles -- applied automatically by segment kind (§1 table) */}
+            {sect("Cost Profiles")}
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>Applied automatically by segment kind: STR = platform% + cleaning%; MTR = flat $/block cleaning; LTR = vacancy%. Mgmt fee applies to all three.</div>
+            {slider("STR platform fee",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%")}
+            {slider("STR cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%")}
+            {slider("MTR cleaning (flat $/block)",mtrCleaningFlat,setMtrCleaningFlat,0,1000,25,v=>"$"+v)}
+            {slider("LTR vacancy/collection loss",ltrVacancyPct,setLtrVacancyPct,0,15,0.5,v=>v+"%")}
+            {slider("Mgmt fee (all kinds)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross")}
+
+            {/* One-Time Obligation (was Settlement) */}
+            {sect("One-Time Obligation")}
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>When on, the obligation amount reduces that year's recognized capital gains (capped at the gains pool) -- the Kimbell/Arrowsmith position, now assumed fully applied.</div>
+            {slider("Amount",obligation.amount||0,v=>setObligation({amount:v}),262500,787500,5000,v=>"$"+Math.round(v/1000)+"K")}
+            {slider("Year",obligation.year||2026,v=>setObligation({year:v}),2026,2046,1,v=>v+"")}
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:9,color:muted,marginBottom:3}}>Quarter</div>
+              {toggle(obligation.quarter||1, v=>setObligation({quarter:v}), [1,2,3,4].map(q=>({v:q,l:'Q'+q})))}
+            </div>
+            <div style={{marginBottom:8}}>
+              {toggle(obligation.offsetsCapitalGains!==false, v=>setObligation({offsetsCapitalGains:v}), [
+                {v:true,l:'Offsets capital gains',c:green},{v:false,l:'No offset',c:dim}
+              ])}
+            </div>
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:9,color:muted,marginBottom:3}}>Same-year all-properties-sold tax bump</div>
+              {toggle(sameYearSaleTaxBumpOn, setSameYearSaleTaxBumpOn, [
+                {v:true,l:'On (+$'+Math.round((sameYearSaleTaxBump||0)/1000)+'K)',c:amber},
+                {v:false,l:'Off',c:dim}
+              ])}
             </div>
 
-            {/* 6th St income -- v3.3.0 segments-only (mode selector removed) */}
+            {/* Pooled proceeds routing (§3.4) */}
+            {sect("Pooled Proceeds Routing")}
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>All same-year dispositions feed ONE pool: obligation → lifestyle draw → HI paydown → remainder into the monthly waterfall.</div>
+            {slider("(a) Lifestyle draw (one-time $)",settleLifestyleDraw,setSettleLifestyleDraw,0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+            {slider("(b) HI paydown % of remaining pool",hiPaydownPct,setHiPaydownPct,0,100,5,v=>v+"%")}
             {(()=>{
-              const segErrors = validateSixthSegments(sixthIncomeSegments);
-              const segOverlaps = sixthSegmentOverlaps(sixthIncomeSegments);
-              const updSeg = (ei,patch)=>setSixthIncomeSegments(list=>list.map((x,j)=>j===ei?{...x,...patch}:x));
+              const rSettle = liveRows.find(r=>r.cal===obligation.year) || {};
+              const fmtK = v=>"$"+Math.round((v||0)/1000)+"K";
               return (
-            <div style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:12}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <div style={{fontSize:11,color:bright,fontWeight:"bold"}}>6th St Income (Segments)</div>
-                {soldBadge(_dSixth,'sixth')}
-              </div>
-              {soldCaption(_dSixth)}
-              <div data-testid="sixth-income-controls" data-disabled={soldFirstYear(_dSixth)?"true":"false"}
-                style={soldFirstYear(_dSixth)?disabledStyle:undefined}>
-              {/* Segmented income editor -- the sole driving input */}
-              <div>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                  <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Income Segments</span>
-                  <button data-testid="sixth-seg-add"
-                    onClick={()=>setSixthIncomeSegments(list=>{
-                      const prev=list[list.length-1];
-                      const yrFrom=prev?Math.min(2046,(prev.yrTo||prev.yrFrom||2026)+1):2026;
-                      return [...list,{yrFrom, yrTo:Math.min(2046,yrFrom+1), kind:'str',
-                        str:[{days:120,rate:280,type:"nightly"}],
-                        mtr:[{months:10,rate:6000}],
-                        ltr:{monthlyRent:6000}}];
-                    })}
-                    style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
-                      background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
-                    + add segment
-                  </button>
+                <div data-testid="pooled-routing-result" style={{fontSize:9,color:muted,padding:8,background:bg2,borderRadius:4,marginTop:4}}>
+                  {fmtK(rSettle.settleDraw)} lifestyle, {fmtK(rSettle.hiPaydown)} to HI debt, {fmtK((rSettle.wfDebtPaid||0)+(rSettle.wfToSavings||0))} into waterfall
                 </div>
-                <div style={{fontSize:8,color:dim,marginBottom:8}}>
-                  Year-range segments, each STR (days &times; rate, &le;365d/yr), MTR (months &times; rate, &le;12mo/yr) or LTR (flat rent).
-                  Overlapping segments are allowed and their incomes SUM (e.g. room STR + whole-house MTR). Empty list = no 6th St income.
-                </div>
-                {sixthIncomeSegments.length===0&&(
-                  <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>No segments -- no 6th St income</div>
-                )}
-                {sixthIncomeSegments.map((seg,ei)=>{
-                  const kColor = seg.kind==='str'?amber:seg.kind==='mtr'?blue:green;
-                  const gross = sixthSegmentGross(seg);
-                  const strDays = (seg.str||[]).reduce((s,g)=>s+(g.days||0),0);
-                  const mtrMos  = (seg.mtr||[]).reduce((s,g)=>s+(g.months||0),0);
-                  return (
-                    <div key={ei} style={{background:bg1,border:`1px solid ${kColor}55`,borderRadius:7,padding:"8px 10px",marginBottom:8}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                        <span style={{fontSize:9,color:kColor,fontWeight:"bold"}}>
-                          {seg.yrFrom}&ndash;{seg.yrTo} — {seg.kind.toUpperCase()} — ${Math.round(gross/12).toLocaleString()}/mo avg
-                        </span>
-                        <button onClick={()=>setSixthIncomeSegments(list=>list.filter((_,j)=>j!==ei))}
-                          style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                            background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
-                      </div>
-                      {/* Outer year range */}
-                      <div style={{display:"flex",gap:8,marginBottom:8}}>
-                        <div style={{flex:1}}>
-                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                            <span style={{fontSize:9,color:muted}}>From</span>
-                            <span style={{fontSize:9,color:kColor,fontFamily:mono}}>{seg.yrFrom}</span>
-                          </div>
-                          <input type="range" min={2026} max={2046} step={1} value={seg.yrFrom}
-                            onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrFrom:v,yrTo:Math.max(v,seg.yrTo)});}}
-                            style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
-                        </div>
-                        <div style={{flex:1}}>
-                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                            <span style={{fontSize:9,color:muted}}>To</span>
-                            <span style={{fontSize:9,color:kColor,fontFamily:mono}}>{seg.yrTo}</span>
-                          </div>
-                          <input type="range" min={2026} max={2046} step={1} value={seg.yrTo}
-                            onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrTo:v,yrFrom:Math.min(seg.yrFrom,v)});}}
-                            style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
-                        </div>
-                      </div>
-                      {/* Kind selector */}
-                      <div style={{marginBottom:8}}>
-                        {toggle(seg.kind,v=>updSeg(ei,{kind:v}),[
-                          {v:'str',l:'STR',c:amber},{v:'mtr',l:'MTR',c:blue},{v:'ltr',l:'LTR',c:green}
-                        ])}
-                      </div>
-                      {/* Inner editors */}
-                      {seg.kind==='str'&&(<>
-                        {(seg.str||[]).map((g,si)=>(
-                          <div key={si} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:5,padding:"6px 8px",marginBottom:6}}>
-                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                              <div style={{display:"flex",gap:4}}>
-                                {["nightly","monthly"].map(t=>(
-                                  <button key={t} onClick={()=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,type:t}:x)})}
-                                    style={{fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                                      background:(g.type||'nightly')===t?amber+"33":"transparent",
-                                      border:`1px solid ${(g.type||'nightly')===t?amber:bdr}`,
-                                      color:(g.type||'nightly')===t?amber:dim}}>
-                                    {t==="nightly"?"$/night":"$/mo block"}
-                                  </button>
-                                ))}
-                              </div>
-                              {(seg.str||[]).length>1&&(
-                                <button onClick={()=>updSeg(ei,{str:seg.str.filter((_,k)=>k!==si)})}
-                                  style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                                    background:"transparent",border:`1px solid ${bdr}`,color:dim}}>x</button>
-                              )}
-                            </div>
-                            <div style={{marginBottom:5}}>
-                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                                <span style={{fontSize:9,color:muted}}>Days</span>
-                                <span style={{fontSize:9,color:amber,fontFamily:mono}}>{g.days}d</span>
-                              </div>
-                              <input type="range" min={0} max={365} step={5} value={g.days}
-                                onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,days:parseInt(e.target.value)}:x)})}
-                                style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-                            </div>
-                            <div>
-                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                                <span style={{fontSize:9,color:muted}}>{(g.type||'nightly')==="nightly"?"Rate/night":"Rate/mo"}</span>
-                                <span style={{fontSize:9,color:amber,fontFamily:mono}}>${(g.rate||0).toLocaleString()}</span>
-                              </div>
-                              <input type="range"
-                                min={(g.type||'nightly')==="nightly"?100:1000}
-                                max={(g.type||'nightly')==="nightly"?1200:4500}
-                                step={(g.type||'nightly')==="nightly"?10:50}
-                                value={g.rate}
-                                onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
-                                style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-                            </div>
-                          </div>
-                        ))}
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                          <button onClick={()=>updSeg(ei,{str:[...(seg.str||[]),{days:30,rate:200,type:"nightly"}]})}
-                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>+ seg</button>
-                          <span style={{fontSize:8,color:strDays>365?red:dim,fontFamily:mono}}>
-                            {strDays}d / 365 {strDays>365?"— over cap, excess ignored":""}
-                          </span>
-                        </div>
-                      </>)}
-                      {seg.kind==='mtr'&&(<>
-                        {(seg.mtr||[]).map((g,si)=>(
-                          <div key={si} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:5,padding:"6px 8px",marginBottom:6}}>
-                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                              <span style={{fontSize:8,color:dim}}>Block {si+1}</span>
-                              {(seg.mtr||[]).length>1&&(
-                                <button onClick={()=>updSeg(ei,{mtr:seg.mtr.filter((_,k)=>k!==si)})}
-                                  style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                                    background:"transparent",border:`1px solid ${bdr}`,color:dim}}>x</button>
-                              )}
-                            </div>
-                            <div style={{marginBottom:5}}>
-                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                                <span style={{fontSize:9,color:muted}}>Months</span>
-                                <span style={{fontSize:9,color:blue,fontFamily:mono}}>{g.months}mo</span>
-                              </div>
-                              <input type="range" min={1} max={12} step={1} value={g.months}
-                                onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,months:parseInt(e.target.value)}:x)})}
-                                style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
-                            </div>
-                            <div>
-                              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                                <span style={{fontSize:9,color:muted}}>Rate/mo</span>
-                                <span style={{fontSize:9,color:blue,fontFamily:mono}}>${(g.rate||0).toLocaleString()}</span>
-                              </div>
-                              <input type="range" min={2000} max={12000} step={250} value={g.rate}
-                                onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
-                                style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
-                            </div>
-                          </div>
-                        ))}
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                          <button onClick={()=>updSeg(ei,{mtr:[...(seg.mtr||[]),{months:1,rate:5000}]})}
-                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>+ block</button>
-                          <span style={{fontSize:8,color:mtrMos>12?red:dim,fontFamily:mono}}>
-                            {mtrMos}mo / 12 {mtrMos>12?"— over cap, excess ignored":""}
-                          </span>
-                        </div>
-                      </>)}
-                      {seg.kind==='ltr'&&(
-                        <div>
-                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                            <span style={{fontSize:9,color:muted}}>Monthly rent</span>
-                            <span style={{fontSize:9,color:green,fontFamily:mono}}>${(seg.ltr?.monthlyRent||0).toLocaleString()}/mo</span>
-                          </div>
-                          <input type="range" min={2000} max={12000} step={250} value={seg.ltr?.monthlyRent||0}
-                            onChange={e=>updSeg(ei,{ltr:{...(seg.ltr||{}),monthlyRent:parseInt(e.target.value)}})}
-                            style={{width:"100%",accentColor:green,cursor:"pointer",height:4}}/>
-                        </div>
-                      )}
-                      <div style={{fontSize:8,color:kColor,textAlign:"right",marginTop:4}}>
-                        ${gross.toLocaleString()}/yr gross{seg.kind==='str'?" (platform+cleaning+mgr % netted out)":" (mgr % netted in cash flow)"}
-                      </div>
-                    </div>
-                  );
-                })}
-                {/* v3.3.0: overlaps are valid -- neutral informational line, never blocking */}
-                {segOverlaps.length>0&&(
-                  <div data-testid="sixth-seg-overlap-info" style={{fontSize:9,color:blue,background:blue+"11",
-                    border:`1px solid ${blue}33`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
-                    {segOverlaps.map((o,i)=>(
-                      <div key={i}>ⓘ {o.yrFrom===o.yrTo?o.yrFrom:`${o.yrFrom}–${o.yrTo}`}: concurrent segments — combined gross ${Math.round(o.combinedGross/1000)}K/yr (${Math.round(o.combinedGross/12).toLocaleString()}/mo)</div>
-                    ))}
-                  </div>
-                )}
-                {segErrors.length>0&&(
-                  <div data-testid="sixth-seg-errors" style={{fontSize:9,color:red,background:red+"11",
-                    border:`1px solid ${red}44`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
-                    {segErrors.map((e,i)=><div key={i}>&#9888; {e}</div>)}
-                  </div>
-                )}
-              </div>
-              </div>
-            </div>
               );
             })()}
-
-            {/* Rental operating cost sliders */}
-            {sect("Rental Operating Costs")}
-            <div style={{fontSize:8,color:dim,marginBottom:8}}>Deducted from gross rental income. Set to 0 if self-managing.</div>
-            {topUnit==="str"&&(<>
-              {slider("Platform fee (Airbnb/VRBO)",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
-              {slider("Cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%  (~$"+Math.round((strRent||2800)*v/100)+"/mo)")}
-            </>)}
-            {(topUnit==="ltr"||topUnit==="mtr"||sc.lafRental||(sc.sixthIncomeSegments||[]).length>0)&&
-              slider("Mgmt fee (LTR/MTR/Laf)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross")
-            }
-            <div style={{fontSize:8,color:dim,marginBottom:10,marginTop:-4}}>
-              {topUnit==="str"?`~$${Math.round((strRent||2800)*(strPlatformPct+strCleanPct)/100)}/mo platform+cleaning on 15th STR`
-                :`~$${Math.round((ltrRent||3100)*mgrPct/100)}/mo mgmt on 15th ${topUnit.toUpperCase()}`}
+            <div style={{marginTop:10}}>
+              <div style={{fontSize:10,color:muted,marginBottom:5}}>HI Debt at Closing</div>
+              {toggle(payOffHI,setPayOffHI,[
+                {v:false,l:"Sweep over time",c:amber},{v:true,l:"Pay off at closing",c:green}
+              ])}
             </div>
 
-            {/* v3.3.0: 6th St rental mode toggles removed -- the Income Segments
-                editor in "Dispositions & Settlement" is the sole 6th St control */}
-
-            <div style={{marginBottom:10}}>
+            {/* Restored v4.0.0-A: these three blocks are unrelated to the property
+                schema and were inadvertently swept up in the old-UI removal --
+                put back here, unchanged from pre-v4.0.0-A. */}
+            <div style={{marginBottom:10,marginTop:14}}>
               <div style={{fontSize:10,color:muted,marginBottom:5}}>Your SS Start Age</div>
               {toggle(ssAge,setSsAge,
                 [65,66,67,68,69,70].map(a=>({v:a,l:`${a}`,c:a>=67?green:amber}))
@@ -2314,22 +1966,11 @@ export default function App(){
             </div>
 
             <div style={{marginBottom:10}}>
-              <div style={{fontSize:10,color:muted,marginBottom:5}}>HI Debt at Launch</div>
-              {sellYear>2046
-                ? <div style={{fontSize:9,color:amber,background:amber+"11",border:`1px solid ${amber}33`,
-                    borderRadius:5,padding:"5px 10px"}}>
-                    Sweep over time (set a sell year above to unlock pay-off option)
-                  </div>
-                : null
-              }
-              {payOffHI&&sellYear<=2046&&<div style={{fontSize:9,color:green,marginTop:4}}>Paid from sale proceeds</div>}
-
-              {/* HI Debt detail inputs */}
-              {!payOffHI&&(<div style={{
+              <div style={{fontSize:10,color:muted,marginBottom:5}}>HI Debt Balances</div>
+              <div style={{
                 background:bg2,border:`1px solid ${bdr}`,borderRadius:7,
                 padding:"8px 10px",marginTop:8
               }}>
-                <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:8}}>HI Debt Balances</div>
                 {[
                   {label:"Credit Card", bal:ccBal, setBal:setCcBal, rate:ccRate, setRate:setCcRate, min:ccMin, setMin:setCcMin, balMax:120000, rateMax:29},
                   {label:"Sophia Loans", bal:sophiaBal, setBal:setSophiaBal, rate:sophiaRate, setRate:setSophiaRate, min:sophiaMin, setMin:setSophiaMin, balMax:150000, rateMax:15},
@@ -2372,200 +2013,12 @@ export default function App(){
                   <span>Total HI debt</span>
                   <span style={{color:red,fontFamily:mono}}>${(ccBal+sophiaBal+nolanBal).toLocaleString()}</span>
                 </div>
-              </div>)}
-
-            {/* Sale details -- only shown when a sell year is set */}
-            {sellYear<=2046&&!sixthMTR&&(<div style={{
-              background:bg2,border:`1px solid ${bdr}`,borderRadius:8,
-              padding:"10px 10px 8px",marginTop:8
-            }}>
-              <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:8}}>6th St Sale Details</div>
-              {slider("Sale price",sixthSalePrice,setSixthSalePrice,1_200_000,2_400_000,25_000,
-                v=>"$"+(v/1000).toFixed(0)+"K")}
-              {slider("Cost of sale",sixthCostOfSale,setSixthCostOfSale,3,9,0.5,
-                v=>v.toFixed(1)+"%  ($"+(sixthSalePrice*v/100/1000).toFixed(0)+"K)")}
-
-              {/* Cap gains summary */}
-              {(()=>{
-                const saleNet     = sixthSalePrice*(1-sixthCostOfSale/100);
-                const gain        = Math.max(0, saleNet - BASE.sixthBasis);
-                const taxableGain = Math.max(0, gain - BASE.marriedExcl);
-                const fedTax      = taxableGain * BASE.fedCapGains;
-                const coTax       = taxableGain * BASE.coCapGains;
-                const totalTax    = fedTax + coTax;
-                // v3.4.0: payoff follows the IO/recast schedule (flat through ~Jul 2031)
-                const mtgPayoff   = mortgageBalanceClosed(MORTGAGE_DEFAULTS.sixth,
-                  mortgageMonthsSince(MORTGAGE_DEFAULTS.sixth, sellYear, 7));
-                const hiPayoff    = payOffHI ? HI_TOTAL : 0;
-                const netToInvest = Math.max(0, saleNet - mtgPayoff - totalTax - hiPayoff);
-                const row = (label, val, col) => (
-                  <div style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:`1px solid ${bdr}22`}}>
-                    <span style={{color:dim}}>{label}</span>
-                    <span style={{color:col||muted,fontFamily:mono,fontSize:9}}>{val}</span>
-                  </div>
-                );
-                return (
-                  <div style={{fontSize:9,marginTop:8,display:"flex",flexDirection:"column",gap:0}}>
-                    {row("Sale price",    "$"+(sixthSalePrice/1000).toFixed(0)+"K", muted)}
-                    {row("Cost of sale",  "-$"+(sixthSalePrice*sixthCostOfSale/100/1000).toFixed(0)+"K", red)}
-                    {row("Net proceeds",  "$"+(saleNet/1000).toFixed(0)+"K", muted)}
-                    {row(`Mtg payoff (${sellYear})`,"-$"+(mtgPayoff/1000).toFixed(0)+"K", red)}
-                    {row("Gross gain",    "$"+(gain/1000).toFixed(0)+"K", muted)}
-                    {row("Married excl.", "-$"+(Math.min(gain,BASE.marriedExcl)/1000).toFixed(0)+"K", green)}
-                    {row("Taxable gain",  "$"+(taxableGain/1000).toFixed(0)+"K", taxableGain>0?amber:dim)}
-                    {row("Fed tax (23.8%)","-$"+(fedTax/1000).toFixed(0)+"K", red)}
-                    {row("CO tax (4.4%)", "-$"+(coTax/1000).toFixed(0)+"K", red)}
-                    {payOffHI&&row("HI debt payoff","-$"+(hiPayoff/1000).toFixed(0)+"K", red)}
-                    <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",marginTop:2,borderTop:`1px solid ${bdr}`}}>
-                      <span style={{color:muted,fontWeight:"bold"}}>Net to invest</span>
-                      <span style={{color:green,fontFamily:mono,fontWeight:"bold",fontSize:10}}>${(netToInvest/1000).toFixed(0)}K</span>
-                    </div>
-                    <div style={{color:dim,fontSize:8,marginTop:4}}>
-                      IRMAA: +${BASE.irmaaSurge*2}/mo Medicare in {BASE.startYear+2} (1yr lookback hit)
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>)}
+              </div>
             </div>
 
-            {/* LIQUIDATION NW BASIS */}
             {sect("Liquidation NW Basis")}
-            <div style={{fontSize:8,color:dim,marginBottom:8}}>Cost basis for "liq" toggle on NW chart. 5% selling costs + 28.2% cap gains on taxable gain. Rentals: no exclusion. 6th St: $500K married exclusion. (6th St basis is hardcoded at ${(BASE.sixthBasis/1000).toFixed(0)}K.)</div>
-            {slider("15th St (duplex) basis",duplex15thBasis,setDuplex15thBasis,200_000,1_200_000,25_000,v=>"$"+(v/1000).toFixed(0)+"K")}
-            {slider("Lafayette basis",lafayetteBasis,setLafayetteBasis,100_000,600_000,25_000,v=>"$"+(v/1000).toFixed(0)+"K")}
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>Cost basis for the "liq" toggle on the NW chart now comes directly from each property's disposition basis (above) -- 5% selling costs + 28.2% cap gains on taxable gain; rentals get no exclusion, 6th St gets the $500K married exclusion.</div>
 
-            {/* INCOME KNOBS */}
-            {sect("Income & Cost Knobs")}
-
-            {slider("15th Bottom LTR",bottomRent,setBottomRent,1500,5000,50,v=>`$${v.toLocaleString()}/mo`)}
-            {topUnit==="str"&&slider("15th Top STR (fallback rate)",strRent,setStrRent,1400,4200,100,v=>`$${v.toLocaleString()}/mo -- used for years with no schedule`)}
-            {topUnit!=="str"&&slider("15th Top LTR/MTR",ltrRent,setLtrRent,1550,4650,50,v=>`$${v.toLocaleString()}/mo`)}
-
-            {/* -- STR Schedule -- */}
-            {topUnit==="str"&&(
-              <div style={{marginTop:12,marginBottom:4}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                  <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>STR Schedule</span>
-                  <button
-                    onClick={()=>{
-                      const prev = strSchedule[strSchedule.length-1];
-                      const defaultSegs = prev ? prev.segments.map(s=>({...s})) : [{days:120,rate:280,type:"nightly"},{days:90,rate:3100,type:"monthly"}];
-                      const newYrFrom = prev ? Math.min(2046, (prev.yrTo||prev.yr||2026)+1) : 2026;
-                      const newYrTo   = Math.min(2046, newYrFrom+1);
-                      setStrSchedule(s=>[...s,{yrFrom:newYrFrom, yrTo:newYrTo, segments:defaultSegs}]);
-                    }}
-                    style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
-                      background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
-                    + add year
-                  </button>
-                </div>
-                <div style={{fontSize:8,color:dim,marginBottom:8}}>
-                  Per-year booking mix. Each segment is either nightly (STR) or monthly (LTR block). Years without an entry use the fallback rate above.
-                </div>
-                {strSchedule.length===0&&(
-                  <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>Using flat rate for all years</div>
-                )}
-                {strSchedule.map((entry,ei)=>{
-                  const annualGross = strScheduleIncome(entry.segments);
-                  const totalDays = entry.segments.reduce((s,g)=>s+(g.days||0),0);
-                  // Support both old {yr} format and new {yrFrom,yrTo}
-                  const yrFrom = entry.yrFrom ?? entry.yr ?? 2026;
-                  const yrTo   = entry.yrTo   ?? entry.yr ?? 2026;
-                  const yearLabel = yrFrom===yrTo ? String(yrFrom) : `${yrFrom}–${yrTo}`;
-                  return (
-                    <div key={ei} style={{background:bg2,border:`1px solid ${green}55`,borderRadius:7,padding:"8px 10px",marginBottom:8}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                        <div style={{display:"flex",alignItems:"center",gap:8}}>
-                          <span style={{fontSize:9,color:green,fontWeight:"bold"}}>
-                            {yearLabel} — {totalDays}d — ${Math.round(annualGross/12).toLocaleString()}/mo avg
-                          </span>
-                        </div>
-                        <div style={{display:"flex",gap:4}}>
-                          <button
-                            onClick={()=>setStrSchedule(s=>s.map((x,j)=>j===ei?{...x,segments:[...x.segments,{days:30,rate:200,type:"nightly"}]}:x))}
-                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>+ seg</button>
-                          <button
-                            onClick={()=>setStrSchedule(s=>s.filter((_,j)=>j!==ei))}
-                            style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                              background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
-                        </div>
-                      </div>
-                      {/* Year range selector */}
-                      <div style={{marginBottom:8,display:"flex",gap:8}}>
-                        <div style={{flex:1}}>
-                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                            <span style={{fontSize:9,color:muted}}>From</span>
-                            <span style={{fontSize:9,color:green,fontFamily:mono}}>{yrFrom}</span>
-                          </div>
-                          <input type="range" min={2026} max={2046} step={1} value={yrFrom}
-                            onChange={e=>{const v=parseInt(e.target.value);setStrSchedule(s=>s.map((x,j)=>j===ei?{...x,yrFrom:v,yrTo:Math.max(v,yrTo)}:x));}}
-                            style={{width:"100%",accentColor:green,cursor:"pointer",height:4}}/>
-                        </div>
-                        <div style={{flex:1}}>
-                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                            <span style={{fontSize:9,color:muted}}>To</span>
-                            <span style={{fontSize:9,color:green,fontFamily:mono}}>{yrTo}</span>
-                          </div>
-                          <input type="range" min={2026} max={2046} step={1} value={yrTo}
-                            onChange={e=>{const v=parseInt(e.target.value);setStrSchedule(s=>s.map((x,j)=>j===ei?{...x,yrTo:v,yrFrom:Math.min(yrFrom,v)}:x));}}
-                            style={{width:"100%",accentColor:green,cursor:"pointer",height:4}}/>
-                        </div>
-                      </div>
-                      {/* Segments */}
-                      {entry.segments.map((seg,si)=>(
-                        <div key={si} style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:5,padding:"6px 8px",marginBottom:6}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                            <div style={{display:"flex",gap:4}}>
-                              {["nightly","monthly"].map(t=>(
-                                <button key={t} onClick={()=>setStrSchedule(s=>s.map((x,j)=>j!==ei?x:{...x,segments:x.segments.map((g,k)=>k===si?{...g,type:t}:g)}))}
-                                  style={{fontSize:8,padding:"1px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                                    background:seg.type===t?green+"33":"transparent",
-                                    border:`1px solid ${seg.type===t?green:bdr}`,
-                                    color:seg.type===t?green:dim}}>
-                                  {t==="nightly"?"STR $/night":"LTR $/mo"}
-                                </button>
-                              ))}
-                            </div>
-                            {entry.segments.length>1&&(
-                              <button onClick={()=>setStrSchedule(s=>s.map((x,j)=>j!==ei?x:{...x,segments:x.segments.filter((_,k)=>k!==si)}))}
-                                style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
-                                  background:"transparent",border:`1px solid ${bdr}`,color:dim}}>x</button>
-                            )}
-                          </div>
-                          <div style={{marginBottom:5}}>
-                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                              <span style={{fontSize:9,color:muted}}>Days</span>
-                              <span style={{fontSize:9,color:amber,fontFamily:mono}}>{seg.days}d</span>
-                            </div>
-                            <input type="range" min={0} max={180} step={5} value={seg.days}
-                              onChange={e=>setStrSchedule(s=>s.map((x,j)=>j!==ei?x:{...x,segments:x.segments.map((g,k)=>k===si?{...g,days:parseInt(e.target.value)}:g)}))}
-                              style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-                          </div>
-                          <div>
-                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                              <span style={{fontSize:9,color:muted}}>{seg.type==="nightly"?"Rate/night":"Rate/mo"}</span>
-                              <span style={{fontSize:9,color:amber,fontFamily:mono}}>${seg.rate.toLocaleString()} -> ${Math.round(seg.type==="nightly"?seg.days*seg.rate:(seg.days/30)*seg.rate).toLocaleString()}/yr this seg</span>
-                            </div>
-                            <input type="range"
-                              min={seg.type==="nightly"?100:1000}
-                              max={seg.type==="nightly"?1200:4500}
-                              step={seg.type==="nightly"?10:50}
-                              value={seg.rate}
-                              onChange={e=>setStrSchedule(s=>s.map((x,j)=>j!==ei?x:{...x,segments:x.segments.map((g,k)=>k===si?{...g,rate:parseInt(e.target.value)}:g)}))}
-                              style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-                          </div>
-                        </div>
-                      ))}
-                      <div style={{fontSize:8,color:green,textAlign:"right",marginTop:2}}>
-                        Total: {totalDays}d booked -> ${annualGross.toLocaleString()}/yr gross (${Math.round(annualGross/12).toLocaleString()}/mo avg)
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
             {/* -- Loans (v3.2.0 generalized segments, replaces family-loan params) -- */}
             <div style={{marginTop:12,marginBottom:4}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
@@ -3369,14 +2822,14 @@ export default function App(){
             {/* Tier 1: Fixed costs / Maintenance */}
             {sect("Tier 1 -- Maintenance Reserves")}
             {slider("Rate (% of structure/yr)",maintStr,setMaintStr,0.25,1.5,0.25,v=>v+"%")}
-            {sellYear>2046&&slider("6th St structure value",struct6,setStruct6,300,900,50,v=>"$"+v+"K  ($"+Math.round(struct6*1000*maintStr/100/12).toLocaleString()+"/mo)")}
+            {uiKeepPrimary&&slider("6th St structure value",struct6,setStruct6,300,900,50,v=>"$"+v+"K  ($"+Math.round(struct6*1000*maintStr/100/12).toLocaleString()+"/mo)")}
             {slider("15th St structure value",struct15,setStruct15,250,750,50,v=>"$"+v+"K  ($"+Math.round(struct15*1000*maintStr/100/12).toLocaleString()+"/mo)")}
             {slider("Lafayette structure value",structLaf,setStructLaf,125,500,25,v=>"$"+v+"K  ($"+Math.round(structLaf*1000*maintStr/100/12).toLocaleString()+"/mo)")}
             <div style={{fontSize:9,color:dim,marginBottom:4}}>
               Cap = 5 yrs of reserves per property. Once full, monthly amount redirects to HI sweep.
             </div>
             <div style={{fontSize:9,color:amber,fontFamily:mono,marginBottom:10}}>
-              Total: ${Math.round(((sellYear>2046?struct6:0)+struct15+structLaf)*1000*maintStr/100/12).toLocaleString()}/mo
+              Total: ${Math.round(((uiKeepPrimary?struct6:0)+struct15+structLaf)*1000*maintStr/100/12).toLocaleString()}/mo
             </div>
 
             {/* Tier 2: Rainy day */}
@@ -3599,13 +3052,13 @@ export default function App(){
               const r0 = wfData[0];
               // Current month values
               const rows_fc = [
-                {label:"Mortgages",         sub:"15th duplex + Lafayette" + (keepPrimary?" + 6th St":""),  val:r0.fc_mtg,    color:"#f87171", note:null},
+                {label:"Mortgages",         sub:properties.filter(p=>(p.hold.mode==='keep')||(p.hold.year||2055)>BASE.startYear).map(p=>p.label).join(" + "),  val:r0.fc_mtg,    color:"#f87171", note:null},
                 {label:"Health insurance",  sub:"You + Brenda + kids (until off plan)",                    val:r0.fc_health,  color:"#c084fc", note:null},
                 {label:"Core living",       sub:"Car $250 · Other ins $500 · Food $900 · Utilities $400 · Personal $600", val:r0.fc_core, color:"#60a5fa", note:null},
                 {label:"HI debt minimums",  sub:"CC + Sophia + Nolan loans",                               val:r0.fc_hiMins,  color:"#fb923c", note:r0.fc_hiMins===0?"Paid off or none":null},
                 {label:"Loans",             sub:loans.length?loans.map(l=>`${l.label}: $${Math.round((l.amount||0)/1000)}K @ ${l.rate}% × ${l.months}mo`).join(" · "):"None",
                                             val:r0.fc_famLoan, color:"#f59e0b", note:r0.fc_famLoan===0?(loans.length?"Paid off / not started":"None"):null},
-                {label:"Rental op costs",   sub:topUnit==="str"?"Platform "+strPlatformPct+"% + cleaning "+strCleanPct+"%":"Mgmt "+mgrPct+"% on LTR/MTR", val:r0.fc_rentalOp||0, color:"#34d399", note:(r0.fc_rentalOp||0)===0?"Self-managed / none":null},
+                {label:"Rental op costs",   sub:"Platform/cleaning/vacancy/mgmt fees, applied per segment kind", val:r0.fc_rentalOp||0, color:"#34d399", note:(r0.fc_rentalOp||0)===0?"Self-managed / none":null},
               ];
               const total = rows_fc.reduce((s,r)=>s+r.val,0);
               return (
@@ -3641,11 +3094,6 @@ export default function App(){
                       <div style={{marginTop:10,borderTop:`1px solid ${bdr}22`,paddingTop:8}}>
                         <div style={{fontSize:9,color:amber,fontWeight:"bold",marginBottom:6,letterSpacing:0.5}}>⚠ Not currently modeled</div>
                         {[
-                          topUnit==="str"
-                            ? {label:"STR operating costs",  sub:"Cleaning (~$130/turn), Airbnb/VRBO platform fee (~3%), supplies"}
-                            : topUnit==="mtr"
-                            ? {label:"MTR management fee",   sub:"Typical 8–10% of gross rent if using a manager"}
-                            : {label:"LTR management fee",   sub:"Typical 8–10% of gross rent if using a manager (~$"+Math.round((ltrRent||3100)*0.09).toLocaleString()+"/mo)"},
                           {label:"Property/landlord ins. upgrade", sub:"STR/MTR may require special coverage vs standard homeowner policy"},
                           {label:"HOA fees", sub:"Check if 15th St duplex or Lafayette have HOA"},
                           {label:"Rental income tax",  sub:"Rental income is taxable — income tax estimate above includes some of this"},

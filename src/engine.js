@@ -25,45 +25,32 @@ export const HI_TOTAL = SOPHIA_LOANS.reduce((s,l)=>s+l.bal,0) + NOLAN_LOANS.redu
 // =============================================================================
 export const BASE = {
   myAge:65, wifeAge:60, startYear:2026,
-  primaryValue:1_700_000, lafayetteValue:590_000, duplexValue:1_500_000,
-  primaryMortgage:805_568,  primaryRate:0.04875,
-  lafayetteMortgage:181_115,lafayetteRate:0.0410,
-  duplexMortgage:347_601,   duplexRate:0.0435,
-  lafPnI:966, duplxIO:1260, primIO:3273, duplxPnI:2167, primPnI:5257,
-  sellingCosts:0.05,
+  sellingCosts:0.05,   // liq-NW quick-calc constant (not the per-disposition sellingCostsPct)
   healthYouEricsson:839, healthYouMedicare:335, healthMedicareInflation:0.04,
   healthBrendaEricsson:839, healthBrendaMedicare:335, ericssonInflation:0.015,
   healthKids:414,
   sophiaOff:2028, nolanOff:2031, brendaMedYear:2032,
   lafTaxMo:267, lafInsMo:154, dplxTaxMo:700, dplxInsMo:183, primTaxMo:873, primInsMo:200,
-  duplexBottomRent:3_520, lafayetteRent:3_150,
   carLease:250, otherIns:500, food:900, utilities:400, personal:600,
   pensionMonthly:3_300,
   yourSsEarly:3_271, yourSsFRA:3_874,
   brendaSsFRA:1_937,
   brendaFraYear:2034,
-  famLoanAmt:25_000, famLoanMonths:8,
-  sixthBasis:    930_000,
-  marriedExcl:   500_000,
-  fedCapGains:   0.238,
+  marriedExcl:   500_000,   // liq-NW quick-calc §121 approximation (generic, not property-specific)
+  fedCapGains:   0.238,     // liq-NW quick-calc cap-gains rate
   coCapGains:    0.044,
   irmaaSurge:    350,
 };
 
 // =============================================================================
-// MORTGAGE STRUCTURE (v3.4.0) -- 6th St and 15th St are 30-year loans with a
-// 10-year interest-only period, originated ~Jul 2021 (IO ends ~Jul 2031).
-// Balances calibrated from servicer statements, Jul 2026. During IO the balance
-// stays FLAT absent extra principal; at IO end the payment recasts to amortize
-// the ACTUAL remaining balance over the remaining term (20 yrs at current
-// balances: 6th -> ~$5,260/mo, 15th -> ~$2,172/mo). Escrow/tax/insurance stay
-// in their separate cost lines. Lafayette keeps its amortizing treatment.
+// PROPERTY MORTGAGE STRUCTURE (v3.4.0, generalized v4.0.0-A) -- each property
+// owns a mortgage { balance, rate, originYear, originMonth, termYears, ioYears }.
+// A single state machine covers both IO/recast loans (6th, 15th: 10-yr IO,
+// balance FLAT through IO absent extra principal, then payment recasts to
+// amortize the ACTUAL remaining balance over the remaining term) and fully
+// amortizing loans (Barberry/Lafayette: ioYears:0 recasts immediately at
+// origination). Escrow/tax/insurance stay in their separate cost lines.
 // =============================================================================
-export const MORTGAGE_DEFAULTS = {
-  sixth:     { balance: 805_495, rate: 0.04875, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
-  fifteenth: { balance: 347_601, rate: 0.0435,  originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
-};
-
 export function mortgageMonthsSince(m, calYear, calMonth1to12){
   return (calYear-(m.originYear||2021))*12 + (calMonth1to12-(m.originMonth||7));
 }
@@ -87,30 +74,23 @@ export function mortgagePaymentClosed(m, monthsSinceOrigin){
 // have no slider. Overrides merge here, at the BASE boundary, so BOTH engines
 // see them (they read these objects live). Precedence: a pin's paramSnapshot
 // wins for the sc params it contains; these overrides fill everything else.
+// v4.0.0-A: mortgage config moved onto properties[] (scenario data, edited
+// directly in the property scaffold UI) -- no longer a separate Defaults-tab
+// override target.
 // -----------------------------------------------------------------------------
-const BASE_CODE     = { ...BASE };
-const MORTGAGE_CODE = { sixth: { ...MORTGAGE_DEFAULTS.sixth }, fifteenth: { ...MORTGAGE_DEFAULTS.fifteenth } };
-let   DISPO_CODE    = null;   // captured lazily (DISPO_DEFAULTS is declared below)
+const BASE_CODE  = { ...BASE };
+let   DISPO_CODE = null;   // captured lazily (DISPO_DEFAULTS is declared below)
 
 export function getDefaultsCode(){
   if(!DISPO_CODE) DISPO_CODE = { ...DISPO_DEFAULTS };
-  return {
-    BASE: { ...BASE_CODE },
-    MORTGAGE_DEFAULTS: { sixth: { ...MORTGAGE_CODE.sixth }, fifteenth: { ...MORTGAGE_CODE.fifteenth } },
-    DISPO_DEFAULTS: { ...DISPO_CODE },
-  };
+  return { BASE: { ...BASE_CODE }, DISPO_DEFAULTS: { ...DISPO_CODE } };
 }
 export function applyDefaultsOverrides(ov = {}){
   if(!DISPO_CODE) DISPO_CODE = { ...DISPO_DEFAULTS };
   Object.assign(BASE, BASE_CODE);
-  Object.assign(MORTGAGE_DEFAULTS.sixth, MORTGAGE_CODE.sixth);
-  Object.assign(MORTGAGE_DEFAULTS.fifteenth, MORTGAGE_CODE.fifteenth);
   Object.assign(DISPO_DEFAULTS, DISPO_CODE);
   for(const [k,v] of Object.entries(ov.BASE||{}))
     if(k in BASE && typeof v==='number' && isFinite(v)) BASE[k]=v;
-  for(const key of ['sixth','fifteenth'])
-    for(const [k,v] of Object.entries(ov.MORTGAGE_DEFAULTS?.[key]||{}))
-      if(k in MORTGAGE_DEFAULTS[key] && typeof v==='number' && isFinite(v)) MORTGAGE_DEFAULTS[key][k]=v;
   for(const [k,v] of Object.entries(ov.DISPO_DEFAULTS||{}))
     if(k in DISPO_DEFAULTS && typeof v==='number' && isFinite(v)) DISPO_DEFAULTS[k]=v;
 }
@@ -185,32 +165,13 @@ export function estimateTax(p, pension, workInc, ssYours, ssBrenda, rentalGross,
 }
 
 // =============================================================================
-// SCHEDULE INCOME HELPERS
-// =============================================================================
-export function strScheduleIncome(segments){
-  let total=0;
-  for(const seg of (segments||[])){
-    if(!seg.days||!seg.rate) continue;
-    total += seg.type==='monthly' ? (seg.days/30)*seg.rate : seg.days*seg.rate;
-  }
-  return total;
-}
-export function mtrScheduleIncome(segments){
-  let total=0;
-  for(const seg of (segments||[])){
-    if(!seg.months||!seg.rate) continue;
-    total += seg.months * seg.rate;
-  }
-  return total;
-}
-
-// =============================================================================
-// 6TH ST SEGMENTED INCOME (v3.1.1)
+// UNIT SEGMENTED INCOME (v4.0.0-A, generalized from the v3.1.1 6th-St-only model)
 // Outer segment: { yrFrom, yrTo, kind:'str'|'mtr'|'ltr',
 //                  str:[{days,rate,type?}], mtr:[{months,rate}], ltr:{monthlyRent} }
-// Inner caps enforced here: STR days clamp to 365/yr, MTR months to 12/yr.
+// Inner caps: STR days clamp to 365/yr, MTR months clamp to 12/yr (enforced by
+// unitSegmentGross's running-total clamp AND flagged by validateUnitSegments).
 // =============================================================================
-export function sixthSegmentGross(seg){
+export function unitSegmentGross(seg){
   if(!seg) return 0;
   if(seg.kind==='ltr') return (seg.ltr?.monthlyRent||0)*12;
   if(seg.kind==='mtr'){
@@ -222,7 +183,7 @@ export function sixthSegmentGross(seg){
     }
     return total;
   }
-  // 'str' -- same inner shape as strSchedule segments (days x nightly or monthly rate)
+  // 'str' -- days x nightly-or-monthly rate, capped at 365 days/yr
   let used=0,total=0;
   for(const g of (seg.str||[])){
     if(!g.days||!g.rate) continue;
@@ -233,11 +194,33 @@ export function sixthSegmentGross(seg){
   return total;
 }
 
-// Returns [] when valid; list of human-readable errors otherwise.
-// v3.3.0: overlapping outer year ranges are ALLOWED (concurrent segments sum,
-// e.g. a room STR alongside a whole-house MTR) -- only per-segment inner caps
-// are validated here. Overlaps get an informational note in the UI instead.
-export function validateSixthSegments(segs){
+// Nets a segment's gross by its kind's cost profile (§1 table):
+//   STR: platform% + cleaning% + mgr%      MTR: flat $/block cleaning + mgr%
+//   LTR: vacancy% + mgr%
+export function unitSegmentNet(seg, opts={}){
+  const gross = unitSegmentGross(seg);
+  if(!seg) return 0;
+  if(seg.kind==='str'){
+    const pct = (opts.strPlatformPct||0)+(opts.strCleanPct||0)+(opts.mgrPct||0);
+    return Math.max(0, gross*(1-pct));
+  }
+  if(seg.kind==='mtr'){
+    const blocks = (seg.mtr||[]).filter(g=>(g.months||0)>0 && (g.rate||0)>0).length;
+    const cleaning = blocks*(opts.mtrCleaningFlat||0);
+    const mgr = gross*(opts.mgrPct||0);
+    return Math.max(0, gross - cleaning - mgr);
+  }
+  // ltr
+  const vac = gross*(opts.ltrVacancyPct||0);
+  const mgr = gross*(opts.mgrPct||0);
+  return Math.max(0, gross - vac - mgr);
+}
+
+// Returns [] when valid; list of human-readable errors otherwise. Overlapping
+// outer year ranges are ALLOWED and SUM, except: LTR is exclusive within its
+// span for a unit (a tenant occupies the whole unit) -- reject LTR overlapping
+// ANY other segment on the same unit. STR+MTR may coexist on one unit freely.
+export function validateUnitSegments(segs){
   const errors=[];
   const list=segs||[];
   for(let i=0;i<list.length;i++){
@@ -250,24 +233,79 @@ export function validateSixthSegments(segs){
       const m=(a.mtr||[]).reduce((s,g)=>s+(g.months||0),0);
       if(m>12) errors.push(`Segment ${i+1}: ${m} MTR months exceeds 12/yr cap`);
     }
+    if(a.kind==='ltr'){
+      const aF=a.yrFrom??a.yr, aT=a.yrTo??a.yr;
+      for(let j=0;j<list.length;j++){
+        if(i===j) continue;
+        const b=list[j];
+        const bF=b.yrFrom??b.yr, bT=b.yrTo??b.yr;
+        if(aF<=bT && bF<=aT){
+          errors.push(`Segment ${i+1} (LTR, ${aF}–${aT}) cannot overlap segment ${j+1} (${(b.kind||'').toUpperCase()}, ${bF}–${bT}) — LTR occupies the whole unit`);
+          break;
+        }
+      }
+    }
   }
   return errors;
 }
 
-// v3.3.0: contiguous year ranges covered by 2+ segments, with the combined
-// nominal gross $/yr (no rent growth) at each range start -- informational only.
-export function sixthSegmentOverlaps(segs){
+// Contiguous year ranges (within a unit) covered by 2+ segments, with the
+// combined nominal gross $/yr (no rent growth) -- informational only, never
+// blocking (LTR-exclusivity above is the only rejection rule).
+export function unitSegmentOverlaps(segs){
   const list=segs||[];
   const cover = yr=>list.filter(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return yr>=f&&yr<=t;});
   const out=[];
   let run=null;
   for(let yr=2026;yr<=2047;yr++){
     const c = yr<=2046 ? cover(yr) : [];
-    if(c.length>=2 && !run){ run={yrFrom:yr, yrTo:yr, combinedGross:c.reduce((s,x)=>s+sixthSegmentGross(x),0)}; }
+    if(c.length>=2 && !run){ run={yrFrom:yr, yrTo:yr, combinedGross:c.reduce((s,x)=>s+unitSegmentGross(x),0)}; }
     else if(c.length>=2 && run){ run.yrTo=yr; }
     else if(run){ out.push(run); run=null; }
   }
   return out;
+}
+
+// =============================================================================
+// PROPERTY HOLD / SALE TIMING (v4.0.0-A) -- sale timing granularity is the
+// quarter; hold: { mode, year, quarter (1-4) }.
+// =============================================================================
+export function quarterStartMonth(q){ return (Math.min(4,Math.max(1,q||1))-1)*3 + 1; }
+
+// Annual proration multiplier for a property's income in calendar year `year`:
+// 1 if fully held (keep, or year strictly before the sale year), 0 if fully
+// after the sale year, else the fraction of quarters held (sale at a quarter
+// boundary -> income counts for quarters STRICTLY BEFORE the sale quarter).
+export function yearHeldFraction(hold, year){
+  if(!hold || hold.mode==='keep') return 1;
+  const saleYear = hold.year||2055;
+  if(year < saleYear) return 1;
+  if(year > saleYear) return 0;
+  const q = Math.min(4, Math.max(1, hold.quarter||1));
+  return (q-1)/4;
+}
+
+// True monthly ownership check (drives both rental-income gating and mortgage
+// stepping, so the annual and monthly engines cannot disagree on WHEN a
+// property stops being owned).
+export function unitOwnedThisMonth(hold, calYear, mo1to12){
+  if(!hold || hold.mode==='keep') return true;
+  const saleYear = hold.year||2055;
+  if(calYear < saleYear) return true;
+  if(calYear > saleYear) return false;
+  return mo1to12 < quarterStartMonth(hold.quarter);
+}
+
+// UI-only: is this segment clipped by the property's sale date? Never blocks
+// income calculation (the engine sums whatever's given, gated by ownership) --
+// this just drives the non-blocking "truncated at Q{n} {year} sale" notice.
+export function segmentClipInfo(seg, hold){
+  if(!hold || hold.mode==='keep') return null;
+  const saleYear = hold.year||2055;
+  const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
+  if(f>saleYear) return {fullyAfterSale:true};
+  if(t>=saleYear) return {truncated:true, quarter:hold.quarter||1, year:saleYear};
+  return null;
 }
 
 // =============================================================================
@@ -343,7 +381,7 @@ export function taxRecognized(recognized, opts = {}) {
 
 // prop: { fmv, basis, mortgageBalance, isPrimary?, sec121Exclusion?,
 //         caSourceDeferredGain?, depreciationTaken? }
-// mode: 'keep' | 'sell_taxable' | 'full_1031' | 'partial_1031'
+// mode: 'keep' | 'sell' (primary: no 1031) | 'full_1031' | 'partial_1031' (rentals)
 // opts: { saleMode?, cashBoot?, sellingCostsPct?, rates? }
 export function disposeAsset(prop, mode, opts = {}) {
   if (mode === 'keep') return null;
@@ -383,7 +421,7 @@ export function disposeAsset(prop, mode, opts = {}) {
     caSourceDeferredGain: prop.caSourceDeferredGain || 0,
   };
 
-  if (mode === 'sell_taxable') {
+  if (mode === 'sell') {
     r.recognizedGain = realizedGain;
     const t = taxRecognized(realizedGain, taxOpts);
     Object.assign(r, t);
@@ -451,12 +489,16 @@ export function buildScenario(p) {
   const sweepLoanQ = ()=>loans.filter(L=>L.includeInSweep && L.bal>0)
     .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
 
-  // v3.4.0 mortgage state (6th + 15th): IO through ~Jul 2031, then recast to the
-  // ACTUAL remaining balance over the remaining term. Extra principal (the
-  // mortgage-principal waterfall bucket) reduces the balance and hence the recast.
-  const mkMtgSt = (m,label)=>({p:{...m}, label, bal:m.balance, recast:null, ioPmtAtRecast:0, transAnnounced:false, payoffAnnounced:false});
-  const mtgSixthSt = mkMtgSt(MORTGAGE_DEFAULTS.sixth, '6th St');
-  const mtgDplxSt  = mkMtgSt(MORTGAGE_DEFAULTS.fifteenth, '15th St');
+  // v4.0.0-A: property-centric mortgage state, one machine per property (see
+  // mortgageBalanceClosed/mortgagePaymentClosed for the closed-form equivalent
+  // used by disposeAsset). ioYears:0 (Barberry/Lafayette) recasts immediately.
+  const properties = p.properties || [];
+  const mtgStates = properties.map(prop=>({
+    id: prop.id, label: prop.label, isPrimary: prop.isPrimary,
+    p: { ...prop.mortgage }, bal: prop.mortgage.balance,
+    recast: null, ioPmtAtRecast: 0, transAnnounced: false, payoffAnnounced: false,
+  }));
+  const mtgById = Object.fromEntries(mtgStates.map(s=>[s.id,s]));
   const mtgTransByYear = {}, mtgPayoffByYear = {};
   // One month of scheduled mortgage activity; returns the payment made.
   function stepMtg(st, calYear, mo0to11, owned){
@@ -468,7 +510,10 @@ export function buildScenario(p) {
     if(st.recast==null){                                // first P&I month: recast on ACTUAL balance
       st.recast = loanMonthlyPmt(st.bal, m.rate, Math.max(1, m.termYears*12 - k));
       st.ioPmtAtRecast = interest;
-      (mtgTransByYear[calYear]=mtgTransByYear[calYear]||[]).push({label:st.label, delta:Math.round(st.recast-interest)});
+      // Only an emit event when there was a genuine IO period (ioYears>0) --
+      // ioYears:0 properties recast on their very first stepped month, which
+      // isn't a "transition" worth telling the user about.
+      if(m.ioYears>0) (mtgTransByYear[calYear]=mtgTransByYear[calYear]||[]).push({label:st.label, delta:Math.round(st.recast-interest)});
     }
     const pmt = Math.min(st.recast, st.bal + interest);
     st.bal = Math.max(0, st.bal + interest - pmt);
@@ -476,7 +521,7 @@ export function buildScenario(p) {
   }
   // Extra principal (bucket / annual mirror); flags early payoff.
   function mtgExtraPrincipal(st, calYear, owned, amount){
-    if(!owned || st.bal<=0 || amount<=0) return 0;
+    if(!st || !owned || st.bal<=0 || amount<=0) return 0;
     const pay=Math.min(amount, st.bal);
     st.bal-=pay;
     if(st.bal<=0 && !st.payoffAnnounced){
@@ -485,58 +530,44 @@ export function buildScenario(p) {
     }
     return pay;
   }
+  // Mortgage-principal waterfall bucket (v3.4.0, carried): held 6th & 15th
+  // only, in that priority order -- Lafayette/Barberry excluded by design.
+  const MTG_PRINCIPAL_ELIGIBLE_IDS = ['sixth','fifteenth'];
 
   // -----------------------------------------------------------------
-  // v3.1.0 dispositions (per-property sale / 1031)
+  // v4.0.0-A per-property sale / 1031 disposition (generalized over
+  // properties[] -- no more hardcoded sixth/barberry/fifteenth).
   // -----------------------------------------------------------------
-  const dispo    = p.dispositions || {};
-  const dSixth   = dispo.sixth     || {mode:'keep'};
-  const dLaf     = dispo.barberry  || {mode:'keep'};
-  const dDuplex  = dispo.fifteenth || {mode:'keep'};
-  const sixthYr  = dSixth.mode ==='keep' ? Infinity : (dSixth.year || 2055);
-  const lafYr    = dLaf.mode   ==='keep' ? Infinity : (dLaf.year   || 2055);
-  const duplexYr = dDuplex.mode==='keep' ? Infinity : (dDuplex.year|| 2055);
-  const lafStopYr = p.lafStopYear || 2055;
-
-  function computeDispo(def, baseVal, payoffFn, isPrimary){
-    if(def.mode==='keep') return {mode:'keep', year:Infinity, afterTaxNetProceeds:0, totalTax:0, recognizedGain:0, caSourceDeferredGain:0};
-    const yrIdx = Math.max(0, (def.year||2055) - BASE.startYear);
-    // v3.1.1: the Sale price slider IS the sale-year price. Previously fmv came from
-    // BASE value x appreciation and salesPrice was silently ignored (proceeds ran high).
-    const fmv   = (def.salesPrice > 0) ? def.salesPrice : baseVal * Math.pow(1+p.reAppreciation, yrIdx);
-    const mtgB  = payoffFn(def.year||2055);
-    const depTaken = (def.depreciationRecapture || 0) / DISPO_DEFAULTS.recaptureRate;
+  function computeDispo(prop){
+    const hold = prop.hold||{mode:'keep'};
+    if(hold.mode==='keep') return {mode:'keep', year:Infinity, afterTaxNetProceeds:0, totalTax:0, recognizedGain:0, caSourceDeferredGain:0};
+    const yrIdx = Math.max(0, (hold.year||2055) - BASE.startYear);
+    const appPct = prop.appreciationPct ?? p.reAppreciation;
+    const fmv = prop.value * Math.pow(1+appPct, yrIdx);
+    const saleMonth = quarterStartMonth(hold.quarter);
+    const mtgB = mortgageBalanceClosed(prop.mortgage, mortgageMonthsSince(prop.mortgage, hold.year||2055, saleMonth));
+    const depTaken = (hold.depreciationRecapture || 0) / DISPO_DEFAULTS.recaptureRate;
     const propObj = {
       fmv,
-      basis: def.adjustedBasis || 0,
+      basis: hold.basis || 0,
       mortgageBalance: mtgB,
-      isPrimary,
-      sec121Exclusion: def.sec121Exclusion || 0,
-      caSourceDeferredGain: def.caSourceDeferredGain || 0,
+      isPrimary: prop.isPrimary,
+      sec121Exclusion: hold.sec121Exclusion || 0,
+      caSourceDeferredGain: hold.caSourceDeferredGain || 0,
       depreciationTaken: depTaken,
     };
-    const res = disposeAsset(propObj, def.mode, {
-      saleMode: def.saleMode,
-      cashBoot: def.cashBoot || 0,
+    const res = disposeAsset(propObj, hold.mode, {
+      saleMode: hold.saleMode,
+      cashBoot: hold.cashBoot || 0,
     });
-    return { ...res, year: def.year, mode: def.mode, caSourceDeferredGain: def.caSourceDeferredGain || 0 };
+    return { ...res, year: hold.year, quarter: hold.quarter, mode: hold.mode, caSourceDeferredGain: hold.caSourceDeferredGain || 0 };
   }
-  const dispoRes = {
-    // v3.4.0: 6th/15th payoffs follow the IO/recast schedule (flat balance through
-    // ~Jul 2031, then amortizing from the recast). NOTE: this closed form ignores
-    // any waterfall extra principal paid before the sale (payoff slightly
-    // overstated -> proceeds conservative). Lafayette keeps its amortizing form.
-    sixth:     computeDispo(dSixth,  BASE.primaryValue,
-                 yr=>mortgageBalanceClosed(MORTGAGE_DEFAULTS.sixth, mortgageMonthsSince(MORTGAGE_DEFAULTS.sixth, yr, 7)), true),
-    barberry:  computeDispo(dLaf,    BASE.lafayetteValue,
-                 yr=>remainBal(BASE.lafayetteMortgage, BASE.lafayetteRate, 30, 5+Math.max(0, yr-BASE.startYear)), false),
-    fifteenth: computeDispo(dDuplex, BASE.duplexValue,
-                 yr=>mortgageBalanceClosed(MORTGAGE_DEFAULTS.fifteenth, mortgageMonthsSince(MORTGAGE_DEFAULTS.fifteenth, yr, 7)), false),
-  };
+  const dispoRes = {};
+  for(const prop of properties) dispoRes[prop.id] = computeDispo(prop);
 
-  // CA $1.2M cap: applies across barberry + fifteenth in year order
+  // CA $1.2M cap: applies across all NON-primary (rental) properties in year order
   const caCap = p.caGainCap || 1_200_000;
-  const rentalDispos = [dispoRes.barberry, dispoRes.fifteenth]
+  const rentalDispos = properties.filter(pr=>!pr.isPrimary).map(pr=>dispoRes[pr.id])
     .filter(d => d.mode && d.mode!=='keep' && (d.recognizedGain||0)>0);
   rentalDispos.sort((a,b)=>a.year-b.year);
   let capUsed = 0;
@@ -560,33 +591,28 @@ export function buildScenario(p) {
     capUsed += cappedCaSlice;
   }
 
-  // v3.1.1: snapshot per-property results BEFORE settlement gain-offset and
-  // same-year bump -- the CPA sheet assumes no offset, so the Reconciliation-vs-CPA
-  // card must compare against these regardless of the gainOffsetPct slider.
-  const dispoResNoOffset = {
-    sixth:     { ...dispoRes.sixth },
-    barberry:  { ...dispoRes.barberry },
-    fifteenth: { ...dispoRes.fifteenth },
-  };
+  // v3.1.1 (carried): snapshot per-property results BEFORE the obligation's
+  // gain offset and same-year bump -- the CPA sheet assumes no offset, so the
+  // Reconciliation-vs-CPA card must compare against these regardless.
+  const dispoResNoOffset = Object.fromEntries(Object.entries(dispoRes).map(([k,v])=>[k,{...v}]));
 
-  // Settlement gain-offset (§4.4)
-  const settleYr      = p.settlementYear || BASE.startYear;
-  const settleNeed    = p.settlementNeed || 0;
-  const offsetPct     = (p.gainOffsetPct || 0) / 100;
-  const requireSameYr = p.requireSameYearForOffset !== false;
+  // One-Time Obligation (v4.0.0-A, was Settlement/§4.4). Assumed-100% gain
+  // offset: obligation.amount reduces recognized gain (capped at the year's
+  // gains pool) when offsetsCapitalGains is true -- no percentage slider.
+  // The offset only ever applies to the obligation's own year (single-year
+  // pooled model; there's no cross-year ambiguity to disambiguate anymore).
+  const obligation   = p.obligation || {};
+  const obligYr       = obligation.year || BASE.startYear;
+  const obligAmt      = obligation.amount || 0;
+  const offsetOn      = obligation.offsetsCapitalGains !== false;
 
-  const activeList = [dispoRes.sixth, dispoRes.barberry, dispoRes.fifteenth]
-    .filter(d => d.mode && d.mode!=='keep');
+  const activeList = properties.map(pr=>dispoRes[pr.id]).filter(d => d.mode && d.mode!=='keep');
 
-  if(offsetPct > 0){
-    const yrGroups = {};
-    for(const d of activeList){ (yrGroups[d.year] = yrGroups[d.year] || []).push(d); }
-    for(const [yStr, group] of Object.entries(yrGroups)){
-      const yr = +yStr;
-      if(requireSameYr && yr !== settleYr) continue;
-      const gainsPool = group.reduce((s,d)=>s+(d.recognizedGain||0), 0);
-      if(gainsPool <= 0) continue;
-      const applied = Math.min(settleNeed * offsetPct, gainsPool);
+  if(offsetOn && obligAmt > 0){
+    const group = activeList.filter(d=>d.year===obligYr);
+    const gainsPool = group.reduce((s,d)=>s+(d.recognizedGain||0), 0);
+    if(gainsPool > 0){
+      const applied = Math.min(obligAmt, gainsPool);
       const scale = 1 - applied/gainsPool;
       for(const d of group){
         if(d.recognizedGain <= 0) continue;
@@ -603,29 +629,30 @@ export function buildScenario(p) {
     }
   }
 
-  // Same-year-sale tax bump: only when all 3 sold in same calendar year
+  // Same-year-sale tax bump: only when ALL properties sold in the same calendar year
   const bumpOn  = p.sameYearSaleTaxBumpOn !== false;
   const bumpAmt = p.sameYearSaleTaxBump || 0;
-  if(bumpOn && bumpAmt > 0 && activeList.length === 3){
+  if(bumpOn && bumpAmt > 0 && activeList.length === properties.length && properties.length>0){
     const uniqueYrs = new Set(activeList.map(d=>d.year));
     if(uniqueYrs.size === 1){
       const totalT = activeList.reduce((s,d)=>s+(d.totalTax||0),0);
       for(const d of activeList){
-        const share = totalT>0 ? d.totalTax/totalT : 1/3;
+        const share = totalT>0 ? d.totalTax/totalT : 1/activeList.length;
         d.totalTax += bumpAmt * share;
         d.afterTaxNetProceeds -= bumpAmt * share;
       }
     }
   }
 
-  // Per-year cash inflows / outflows
-  const yearCashAdd = {};   // dispo year -> $ inflow (afterTaxNetProceeds sum)
-  const yearCashSub = {};   // year -> $ outflow (settlement)
+  // Per-year cash inflows / outflows -- pooled routing (§3.4): all same-year
+  // dispositions feed one pool; the obligation is a cash outflow from that pool.
+  const yearCashAdd = {};   // dispo year -> $ inflow (Σ afterTaxNetProceeds)
+  const yearCashSub = {};   // year -> $ outflow (one-time obligation)
   for(const d of activeList){
     yearCashAdd[d.year] = (yearCashAdd[d.year] || 0) + (d.afterTaxNetProceeds || 0);
   }
-  if(settleNeed > 0){
-    yearCashSub[settleYr] = (yearCashSub[settleYr] || 0) + settleNeed;
+  if(obligAmt > 0){
+    yearCashSub[obligYr] = (yearCashSub[obligYr] || 0) + obligAmt;
   }
   const paydownByYear = {}, drawByYear = {}, wfDebtByYear = {}, wfSavByYear = {};
   const paydownDetailByYear = {}, loanStartsByYear = {}, loanPayoffsByYear = {};
@@ -641,10 +668,19 @@ export function buildScenario(p) {
 
   for(let yr=0;yr<=20;yr++){
     const cal=BASE.startYear+yr;
-    const keepPrimary  = cal < sixthYr;
-    const keepLafOwned = cal < lafYr;
-    const keepDuplex   = cal < duplexYr;
-    const lafRenting   = p.lafRental && keepLafOwned && cal < lafStopYr;
+    // v4.0.0-A: "still owned this whole year" gate, generalized per property
+    // (same boolean convention as pre-v4: false for the sale year itself --
+    // NW/tax/maintenance drop out the year of sale, matching the disposition
+    // proceeds landing that same year). Income proration uses the finer
+    // per-quarter yearHeldFraction separately, below.
+    const keepMap = {};
+    for(const prop of properties){
+      const hold = prop.hold||{mode:'keep'};
+      keepMap[prop.id] = cal < (hold.mode==='keep' ? Infinity : (hold.year||2055));
+    }
+    const keepPrimary  = keepMap.sixth;
+    const keepDuplex   = keepMap.fifteenth;
+    const keepLafOwned = keepMap.barberry;
 
     // -- v3.2.0 residual routing at the sale-year boundary, via the SHARED
     //    helpers (splitResidual + planHiPaydown) so the monthly wfData block
@@ -659,7 +695,7 @@ export function buildScenario(p) {
       const hiBal = p.payOffHI ? 0 : ccBal + sophiaBal + nolanBal;
       const totalDebt = hiBal + loans.reduce((s,L)=>s+(L.includeInSweep?L.bal:0),0);
       const split = splitResidual(residual, {
-        lifestyleDraw: cal===settleYr ? (p.settleLifestyleDraw||0) : 0,
+        lifestyleDraw: cal===obligYr ? (p.settleLifestyleDraw||0) : 0,
         paydownPct: p.hiPaydownPct||0,
         totalDebt,
       });
@@ -690,8 +726,8 @@ export function buildScenario(p) {
       if(p.mtgPrincipalOn && survivor>0){
         const _cap = p.mtgPrincipalUncapped ? Infinity : (p.mtgPrincipalCap||0);
         const room = Math.min(_cap, survivor);
-        let paid = mtgExtraPrincipal(mtgSixthSt, cal, keepPrimary, room);
-        paid    += mtgExtraPrincipal(mtgDplxSt,  cal, keepDuplex,  room - paid);
+        let paid = 0;
+        for(const id of MTG_PRINCIPAL_ELIGIBLE_IDS) paid += mtgExtraPrincipal(mtgById[id], cal, keepMap[id], room - paid);
         survivor -= paid;
         mtgExtraBoundaryByYear[cal] = paid;
       }
@@ -714,42 +750,32 @@ export function buildScenario(p) {
     const pension =BASE.pensionMonthly*12;
     const workInc =workFromCurve(yr, p.workPts)*12*inf;
 
-    // -- Rental income (per-property, gated by ownership) --
+    // -- Rental income (v4.0.0-A: property/unit/segment model) --
+    // For each held property, for each unit, sum income across ALL covering
+    // segments (concurrent segments SUM), each netted by its kind's cost
+    // profile, prorated by quarters held in the sale year.
+    const costOpts = {
+      strPlatformPct: p.strPlatformPct||0, strCleanPct: p.strCleanPct||0, mgrPct: p.mgrPct||0,
+      ltrVacancyPct: p.ltrVacancyPct||0, mtrCleaningFlat: p.mtrCleaningFlat||0,
+    };
     let rental = 0;
-    if(keepDuplex){
-      rental += p.duplexBottomLTR*12*rg;
-      if(p.topUnit==="mtr"){
-        rental += p.duplexTopMTR*12*rg;
-      } else if(p.topUnit==="ltr"){
-        rental += p.duplexTopLTR*12*rg;
-      } else {
-        const schedEntry=(p.strSchedule||[]).find(s=>{
-          const f=s.yrFrom??s.yr; const t=s.yrTo??s.yr;
-          return cal>=f && cal<=t;
-        });
-        const strAnnual=schedEntry ? strScheduleIncome(schedEntry.segments) : p.duplexTopSTR*12;
-        rental += strAnnual*rg;
+    const propRentalYr = {};   // per-property annual $ this year (monthly mirror reuses this)
+    for(const prop of properties){
+      const heldFrac = yearHeldFraction(prop.hold, cal);
+      let propGross = 0;
+      if(heldFrac>0){
+        for(const unit of (prop.units||[])){
+          for(const seg of (unit.segments||[])){
+            const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
+            if(cal<f || cal>t) continue;
+            propGross += unitSegmentNet(seg, costOpts)*rg;
+          }
+        }
       }
+      const propAnnual = propGross*heldFrac;
+      propRentalYr[prop.id] = propAnnual;
+      rental += propAnnual;
     }
-    if(lafRenting) rental += BASE.lafayetteRent*12*rg;
-
-    // 6th St primary income -- v3.3.0 segments-only model: sixthIncomeSegments is
-    // the sole input (empty = no income), concurrent segments SUM, each netted by
-    // its kind's cost knobs (STR: platform+cleaning+mgr; MTR/LTR: gross here, mgr
-    // netted in the monthly cash-flow engine). Segment year ranges are the sole
-    // start/stop control (debt-clear auto-stop removed).
-    const sixthSegs = p.sixthIncomeSegments || [];
-    const strCostPct = (p.strPlatformPct||0) + (p.strCleanPct||0) + (p.mgrPct||0);
-    let sixthIncome = 0;   // annual $, summed across ALL segments covering this year
-    if(keepPrimary){
-      for(const seg of sixthSegs){
-        const f=seg.yrFrom??seg.yr; const t=seg.yrTo??seg.yr;
-        if(cal<f || cal>t) continue;
-        const gross = sixthSegmentGross(seg)*rg;
-        sixthIncome += seg.kind==='str' ? gross*(1-strCostPct) : gross;
-      }
-    }
-    rental += sixthIncome;
 
     // -- cashAst: rerun from y=0..yr. v3.2.0: sale proceeds no longer land in
     //    invested cash (direct-to-invested shortcut removed) -- they route
@@ -781,56 +807,54 @@ export function buildScenario(p) {
     const totalIncome=pension+workInc+(yourSs+brendaSs)*12+rental+drawInc;
 
     // -- NW pieces (per-property, gated) --
-    const dplxVal = keepDuplex   ? BASE.duplexValue*app    : 0;
-    const lafVal  = keepLafOwned ? BASE.lafayetteValue*app : 0;
-    const primVal = keepPrimary  ? BASE.primaryValue*app   : 0;
-    // v3.4.0: 6th/15th balances come from the IO/recast mortgage STATE (flat
-    // through IO absent extra principal, then amortizing from the recast).
-    const dplxBal = keepDuplex   ? mtgDplxSt.bal  : 0;
-    const lafBal  = keepLafOwned ? remainBal(BASE.lafayetteMortgage,BASE.lafayetteRate,30,5+yr) : 0;
-    const primBal = keepPrimary  ? mtgSixthSt.bal : 0;
-    const _mtgInt = dplxBal*mtgDplxSt.p.rate + lafBal*BASE.lafayetteRate + primBal*mtgSixthSt.p.rate;
+    const valById = {};
+    for(const prop of properties){
+      const appPct = prop.appreciationPct ?? p.reAppreciation;
+      valById[prop.id] = keepMap[prop.id] ? prop.value*Math.pow(1+appPct,yr) : 0;
+    }
+    const primVal = valById.sixth, dplxVal = valById.fifteenth, lafVal = valById.barberry;
+    // v4.0.0-A: balances come from the per-property mortgage STATE (flat through
+    // IO absent extra principal, then amortizing from the recast -- ioYears:0
+    // properties amortize from origination).
+    const balById = {};
+    for(const prop of properties) balById[prop.id] = keepMap[prop.id] ? mtgById[prop.id].bal : 0;
+    const primBal = balById.sixth, dplxBal = balById.fifteenth, lafBal = balById.barberry;
+    const _mtgInt = properties.reduce((s,prop)=>s+balById[prop.id]*mtgById[prop.id].p.rate, 0);
     const taxAnnual=estimateTax(p,pension,workInc,yourSs,brendaSs,rental,_mtgInt);
 
-    // -- Monthly mirror (same gating) --
-    const _rg0  = Math.pow(1+p.rentGrowth, yr);
+    // -- Monthly mirror (same gating): reuse the annual rental figure directly --
     const _inf0 = Math.pow(1+p.inflation, yr);
     const _pinf0= Math.pow(1+p.propInflation, yr);
-    let _rental0 = 0;
-    if(keepDuplex){
-      _rental0 += p.duplexBottomLTR*_rg0;
-      if(p.topUnit==="mtr")      _rental0+=p.duplexTopMTR*_rg0;
-      else if(p.topUnit==="ltr") _rental0+=p.duplexTopLTR*_rg0;
-      else                       _rental0+=p.duplexTopSTR*_rg0;
-    }
-    if(lafRenting) _rental0+=BASE.lafayetteRent*_rg0;
-    _rental0 += sixthIncome/12;   // v3.1.1: same annual figure as main loop (rg already applied)
+    const _rental0 = rental/12;
     const _ss0    = ((p.ssStartYear&&(BASE.startYear+yr)>=p.ssStartYear)?p.ssAmount:0)+((BASE.startYear+yr)>=BASE.brendaFraYear?BASE.brendaSsFRA:0);
     const _work0  = workFromCurve(yr, p.workPts)*_inf0;
     const _incMo  = BASE.pensionMonthly + _ss0 + _rental0 + _work0;
-    let _propC0 = 0;
-    if(keepDuplex)   _propC0 += (BASE.dplxTaxMo+BASE.dplxInsMo)*_pinf0;
-    if(keepPrimary)  _propC0 += (BASE.primTaxMo+BASE.primInsMo)*_pinf0;
-    if(keepLafOwned) _propC0 += (BASE.lafTaxMo+BASE.lafInsMo)*_pinf0;
-    let _maint0 = 0;
-    if(keepDuplex)   _maint0 += BASE.duplexValue*p.maintRate*_pinf0/12;
-    if(keepLafOwned) _maint0 += BASE.lafayetteValue*p.maintRate*_pinf0/12;
-    if(keepPrimary)  _maint0 += BASE.primaryValue*p.maintRate*_pinf0/12;
+    const _propC0 = (keepDuplex?(BASE.dplxTaxMo+BASE.dplxInsMo):0)
+                  + (keepPrimary?(BASE.primTaxMo+BASE.primInsMo):0)
+                  + (keepLafOwned?(BASE.lafTaxMo+BASE.lafInsMo):0);
+    const _pinf0perMo = _pinf0/12;
+    const _maint0 = properties.reduce((s,prop)=>s+(keepMap[prop.id]?prop.value*p.maintRate*_pinf0perMo:0), 0);
     const _core0  = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*_inf0;
     const _hlth0  = healthMonthly(BASE.startYear+yr, 99, p);
-    // v3.4.0: 6th/15th mortgage payments are state-driven per month (IO -> recast)
-    // inside the loop below; only Lafayette's flat P&I is static here.
-    const _fixedMo= (keepLafOwned?BASE.lafPnI:0) + _hlth0 + _propC0 + _core0 + _maint0 + taxAnnual/12;
+    // v4.0.0-A: mortgage payments are state-driven per month (IO -> recast)
+    // inside the loop below, for ALL properties (Lafayette/Barberry included).
+    const _fixedMo= _hlth0 + _propC0 + _core0 + _maint0 + taxAnnual/12;
 
     // Start-of-year loan balance (loans starting this year count at full amount)
     const loansBalPre = loans.reduce((s,L)=>s + (L.started ? L.bal : (L.startAbs < (yr+1)*12 ? L.amount : 0)), 0);
     let loanPmtYrTotal = 0, mtgPmtYrTotal = 0, mtgExtraYr = 0, mtgExtraFromSurplusYr = 0;
     for(let mo=0;mo<12;mo++){
       const absMo=yr*12+mo;
-      // -- v3.4.0 mortgages: step monthly (IO -> recast), regardless of HI state --
-      const _mtgMo = stepMtg(mtgSixthSt, cal, mo, keepPrimary)
-                   + stepMtg(mtgDplxSt,  cal, mo, keepDuplex)
-                   + (keepLafOwned ? BASE.lafPnI : 0);
+      // -- v4.0.0-A mortgages: step monthly (IO -> recast) for ALL properties,
+      //    regardless of HI state. Uses TRUE monthly ownership (not the coarse
+      //    annual keepMap) so a mid-year sale stops payments at the exact
+      //    quarter boundary -- this is what keeps the annual engine agreeing
+      //    with the monthly wfData mirror in the sale year. --
+      let _mtgMo = 0;
+      for(const prop of properties){
+        const ownedMo = unitOwnedThisMonth(prop.hold, cal, mo+1);
+        _mtgMo += stepMtg(mtgById[prop.id], cal, mo, ownedMo);
+      }
       mtgPmtYrTotal += _mtgMo;
       // -- v3.2.0 loans: step monthly regardless of HI debt state --
       let _loanMo = 0;
@@ -882,8 +906,11 @@ export function buildScenario(p) {
         const fromSurplus = loopDebt<=0;
         let room = Math.min(_cap, fromSurplus ? Math.max(0, _avail - _splitProtect) : Math.max(0, xtra));
         let paid = 0;
-        paid += mtgExtraPrincipal(mtgSixthSt, cal, keepPrimary, room - paid);
-        paid += mtgExtraPrincipal(mtgDplxSt,  cal, keepDuplex,  room - paid);
+        for(const id of MTG_PRINCIPAL_ELIGIBLE_IDS){
+          const prop = properties.find(pr=>pr.id===id);
+          const ownedMo = prop ? unitOwnedThisMonth(prop.hold, cal, mo+1) : false;
+          paid += mtgExtraPrincipal(mtgById[id], cal, ownedMo, room - paid);
+        }
         mtgExtraYr += paid;
         if(fromSurplus) mtgExtraFromSurplusYr += paid;
       }
@@ -912,10 +939,7 @@ export function buildScenario(p) {
     if(keepLafOwned) propCost += (BASE.lafTaxMo+BASE.lafInsMo)*12*pinf;
     if(keepPrimary)  propCost += (BASE.primTaxMo+BASE.primInsMo)*12*pinf;
     const core=(BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf*12;
-    let maint = 0;
-    if(keepDuplex)   maint += BASE.duplexValue*p.maintRate*pinf;
-    if(keepLafOwned) maint += BASE.lafayetteValue*p.maintRate*pinf;
-    if(keepPrimary)  maint += BASE.primaryValue*p.maintRate*pinf;
+    const maint = properties.reduce((s,prop)=>s+(keepMap[prop.id]?prop.value*p.maintRate*pinf:0), 0);
     const famLoanAnnual=loanPmtYrTotal;   // v3.2.0: all loan payments this year
     const minDebt=p.payOffHI?0:(
       (ccBal>0?ccMin:0)+(sophiaBal>0?sophiaMin:0)+
@@ -939,9 +963,7 @@ export function buildScenario(p) {
     const famLoanBal = Math.round(loansBalPre/1000);   // v3.2.0: all loans, start-of-year
 
     // Per-year disposition summary (nonzero only when a sale happens this year)
-    const dispoTaxYr = (dispoRes.sixth.year===cal    ? dispoRes.sixth.totalTax    : 0)
-                     + (dispoRes.barberry.year===cal ? dispoRes.barberry.totalTax : 0)
-                     + (dispoRes.fifteenth.year===cal? dispoRes.fifteenth.totalTax: 0);
+    const dispoTaxYr = properties.reduce((s,prop)=>s+(dispoRes[prop.id].year===cal ? dispoRes[prop.id].totalTax : 0), 0);
 
     rows.push({
       cal, yr,
@@ -980,9 +1002,8 @@ export function buildScenario(p) {
       ccBal:    Math.round(ccBal/1000),
       sophiaBal:Math.round(sophiaBal/1000),
       nolanBal: Math.round(nolanBal/1000),
-      // v3.4.0: ioMode = a held mortgage is still inside its contractual IO window
-      ioMode:   (keepPrimary && mtgSixthSt.recast==null && mtgSixthSt.bal>0)
-             || (keepDuplex  && mtgDplxSt.recast==null  && mtgDplxSt.bal>0),
+      // v4.0.0-A: ioMode = a held mortgage is still inside its contractual IO window
+      ioMode: properties.some(prop=>keepMap[prop.id] && mtgById[prop.id].recast==null && mtgById[prop.id].bal>0 && (prop.mortgage.ioYears||0)>0),
       // v3.1.0 dispo-year summary fields
       dispoTax: Math.round(dispoTaxYr),
       dispoNet: Math.round(yearCashAdd[cal] || 0),
@@ -1002,6 +1023,8 @@ export function buildScenario(p) {
       primBalRaw:     Math.round(primBal),
       dplxBalRaw:     Math.round(dplxBal),
       lafBalRaw:      Math.round(lafBal),
+      // v4.0.0-A: per-property annual rental $ (monthly-equivalent, /12 not applied)
+      propRentalYr:   Object.fromEntries(Object.entries(propRentalYr).map(([k,v])=>[k,Math.round(v)])),
     });
   }
   // Expose disposition details for reconciliation card / UI

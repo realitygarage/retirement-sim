@@ -1,0 +1,326 @@
+=== SESSION 20 JOURNAL — v4.0.0-A ===
+Date: 2026-07-04
+Session goal: property-centric architecture, Session A only (schema +
+engines + scaffold UI). Session B (full sidebar rebuild) explicitly NOT
+started per the spec's "commit A, stop, verify before B" instruction.
+
+--- WHAT SHIPPED ---
+
+v4.0.0-A -- property/unit/segment schema, property-centric engines, pooled
+proceeds routing, scaffold UI.
+
+--- 0. WHY (spec recap) ---
+
+The v3 sidebar was knob-centric: dispositions{sixth,barberry,fifteenth} as
+a flat lookup, a 15th-St-specific Top Unit selector, a Lafayette
+rental/stop-year pair, sixthIncomeSegments as a one-off array, LIQUIDATION_
+DEFAULTS/SETTLEMENT_DEFAULTS/SIXTH_STR_DEFAULTS as separate constant blocks.
+v4 makes the model property-centric: properties: [{id, label, isPrimary,
+value, appreciationPct, mortgage, hold, units:[{segments}]}]. NO backward
+compatibility -- fresh schema, no migration, no legacy mapping (confirmed
+with the user before starting). SAVE_SCHEMA_VERSION bumped 3->4 so old pins
+are silently dropped on load (same mechanism used for the v2->v3 break).
+
+--- 1. NEW SCHEMA (defaults.js) ---
+
+freshPropertiesDefaults() returns three properties (sixth/fifteenth/
+barberry), each with value/appreciationPct/mortgage/hold/units. Key
+consolidation: the OLD model had TWO separate value concepts -- BASE.
+primaryValue etc (book value for the NW chart) vs LIQUIDATION_DEFAULTS.
+salesPrice (the disposition-sale FMV seed). v4 unifies these into ONE
+`value` field per property (matching the spec's schema example exactly:
+sixth=1,675,000, values from the CPA liquidation worksheet, not the old
+BASE.primaryValue=1,700,000/duplexValue=1,500,000/lafayetteValue=590,000
+book figures). CONSEQUENCE: book-NW baseline values are now slightly lower
+than pre-v4 by design, not a regression -- flagged for the user to notice.
+
+Also dropped: the v3.1.1 "Sale price" OVERRIDE slider (fmv = BASE value x
+appreciation, with an optional manual override). v4's schema has no
+separate salesPrice field under hold -- FMV at sale is ALWAYS `value x
+(1+appreciationPct)^yearsElapsed`, computed automatically. Simpler model;
+users who want a different assumed value edit `value` directly.
+
+Barberry/Lafayette mortgage: unlike sixth/fifteenth (servicer-calibrated,
+Jul 2021 origin, 10-yr IO), Barberry's origin date was never calibrated.
+Set originYear:2021, originMonth:1 (not July), ioYears:0 -- this exactly
+reproduces the pre-v4 remainBal(181115, 0.041, 30, 5+yr) formula's "5 years
+paid as of Jan 2026" assumption via the SAME generalized mortgage state
+machine (verified: mortgageBalanceClosed with ioYears:0 reduces algebraically
+to the old remainBal formula). This let Lafayette's flat BASE.lafPnI
+constant be RETIRED -- its P&I payment is now a genuine amortization
+calculation like the other two properties, one state machine for all three.
+
+One-Time Obligation (was Settlement): { amount, year, quarter,
+offsetsCapitalGains: true }. Assumed-100% gain offset (no percentage
+slider) -- when on, obligation.amount reduces recognized gain dollar-for-
+dollar, capped at that year's gains pool, single-year model (no
+cross-year "requireSameYearForOffset" ambiguity to disambiguate anymore).
+
+New economy knobs: ltrVacancyPct (4%), mtrCleaningFlat ($300/block) --
+exposed as regular sliders (Cost Profiles block), not Defaults-tab entries,
+since users will want to tune these while testing segments.
+
+Removed entirely (no migration): dispositions, sixthIncomeSegments,
+topUnit/duplexTopSTR/LTR/MTR/duplexBottomLTR, strSchedule/mtrSchedule,
+lafRental/lafStopYear, LIQUIDATION_DEFAULTS, SETTLEMENT_DEFAULTS,
+SIXTH_STR_DEFAULTS, migrateScLoans (famLoanAmt back-compat -- dead now that
+SAVE_SCHEMA_VERSION drops all pre-v3.2 pins anyway), migrateSixthIncome
+Segments, duplex15thBasis/lafayetteBasis (liq-NW quick-calc now reads
+properties[].hold.basis directly -- one basis input per property instead
+of two overlapping ones).
+
+--- 2. SEGMENT RULES (engine.js) ---
+
+unitSegmentGross(seg) / unitSegmentNet(seg, opts): generalized from the
+v3.3 sixthSegmentGross (identical inner-cap-clamped math for STR days<=365,
+MTR months<=12) with a NEW netting function applying the §1 cost-profile
+table: STR = platform% + cleaning% + mgr%; MTR = ONE flat $/block cleaning
+(not %) + mgr%; LTR = vacancy% + mgr%, NO cleaning charge at all. Both
+engines call this SAME function -- guarantees the netting can't drift
+between annual and monthly (verified: STR $30K gross -> $27,900 net; MTR
+$60K -> $59,700; LTR $36K -> $34,560).
+
+validateUnitSegments(segs): inner caps unchanged; NEW rule -- LTR rejects
+overlap with ANY other segment on the unit (a tenant occupies the whole
+unit); STR+MTR may coexist freely. unitSegmentOverlaps(segs): informational
+(not blocking) contiguous-range + combined-gross reporter, used for the
+neutral blue info line in the UI.
+
+yearHeldFraction(hold, year) / unitOwnedThisMonth(hold, calYear, mo1to12):
+the annual engine's proration multiplier and the monthly engine's exact
+ownership boolean, respectively -- BOTH built on the same "sale at a
+quarter boundary" semantics (Q2 sale = owned through Q1, not owned from Q2
+month 1 onward = 3 months owned = 0.25 of the year). Verified live: 15th
+St sold Q2 2028 -> monthly rental drops sharply from $9,973 (Mar) to $3,325
+(Apr), exactly at the quarter boundary; annual 2028 shows a prorated
+$4,795 vs $9,277 (2027, full year) and $3,304 (2029, first full year
+without it). segmentClipInfo(seg, hold): UI-only non-blocking "truncated
+at Q{n} {year} sale" notice, never blocks income calculation.
+
+--- 3. ENGINE CHANGES (both annual + monthly, MUST agree) ---
+
+- Income: for each held property (mortgage-state ownership, NOT segment
+  presence), for each unit, sum ALL covering segments via unitSegmentNet,
+  prorated by yearHeldFraction (annual) / unitOwnedThisMonth (monthly,
+  exact). Verified two concurrent segments (STR+MTR on 6th's single unit)
+  sum correctly and the annual/monthly net figures agree within $3 (R1).
+- Disposition: computeDispo generalized to loop over properties[] by id
+  (was: 3 hardcoded destructured dSixth/dLaf/dDuplex blocks) -- reuses
+  disposeAsset unchanged (property-agnostic already). MODE STRING FIX:
+  the old 'sell_taxable' internal string is renamed 'sell' to match the
+  v4 schema's own comment (`mode: 'keep'|'sell'|'full_1031'|'partial_1031'`)
+  -- caught via a live conservation test that initially returned pool=$0
+  (disposeAsset silently no-opped 'sell' since it only recognized
+  'sell_taxable' as the taxable-sale branch). Verified fixed: pool
+  correctly computes to $777,587 for a 15th St sale.
+- IO->P&I mortgage: unified into ONE state machine for all three
+  properties (Lafayette's ioYears:0 recasts immediately at origination,
+  same code path as 6th/15th's 10-yr IO). mtgById keyed generically;
+  MTG_PRINCIPAL_ELIGIBLE_IDS=['sixth','fifteenth'] keeps the bucket's
+  "held 6th & 15th only" rule explicit. Mortgage STEPPING (both engines)
+  uses unitOwnedThisMonth for TRUE monthly ownership -- a mid-year sale
+  stops payments at the exact quarter, not the whole sale year (this is
+  what keeps the annual engine agreeing with wfData in the sale year,
+  since the coarser "cal<saleYear" annual boolean would otherwise
+  understate months 1-3 of a Q2 sale).
+- Pooled routing (§3.4): yearCashAdd/yearCashSub keyed by property.hold.
+  year generically; obligation.amount (not settlementNeed) is the cash
+  outflow AND (when offsetsCapitalGains) the gain-offset amount, applied
+  ONLY to the obligation's own year (no cross-year toggle needed -- single-
+  year pool). Lifestyle draw / HI paydown / mortgage-principal bucket
+  machinery (v3.2/v3.4) is UNCHANGED, just fed from the generalized pool.
+  Conservation verified: draw+paydown+waterfall == residual exactly (R8).
+- Mortgage-principal bucket: unchanged mechanics (fed by leftover
+  debt-sweep or post-debt surplus, capped, 6th before 15th), just
+  generalized to loop over MTG_PRINCIPAL_ELIGIBLE_IDS against the shared
+  mtgById map instead of two hardcoded state objects. Verified ordering:
+  6th's balance drops under the bucket while 15th's stays untouched (R9).
+
+--- 4. SCAFFOLD UI (App.jsx) ---
+
+Removed wholesale (not "polish deferral" -- the underlying sc fields are
+gone, so these blocks would have crashed): "One-Time Decisions" (Sell 6th
+St shim slider, Lafayette rental-stops shim, 15th Top Unit toggle,
+Lafayette Rented-LTR toggle), the old "Dispositions & Settlement" panel
+(per-property dispo cards keyed to dispositions.sixth/barberry/fifteenth,
+reconciliation card, Settlement 3-way-split UI), the 6th St segment editor
+(v3.1.1-v3.3 era, single-property-only), duplex STR/MTR schedule editors,
+"6th St Sale Details" legacy panel, standalone "Rental Operating Costs" /
+"Income & Cost Knobs" sliders (bottomRent/strRent/ltrRent/STR Schedule --
+~830 lines total removed as one block, replaced by the property/unit
+segment editors below). All legacy shim variables/setters (sellYear,
+sixthSalePrice, sixthCostOfSale, sixthMTR, keepPrimary, saleDrawFrac,
+setDispo, setSixthIncomeSegments, setSettlementNeed/Year, setGainOffsetPct,
+setSixthRent/Months, etc.) deleted.
+
+Added (rough, no collapse groups, per spec): one flat block per property
+(mode/year/quarter, mortgage as plain number inputs, disposition fields
+when mode!=keep incl. CPA reconciliation, one segment editor per unit --
+STR/MTR/LTR kind toggle, inner day/month/rent sliders, overlap info line,
+LTR-exclusivity error line, clip-at-sale notice); a Cost Profiles block
+(platform/clean/mgr/vacancy/mtrCleaningFlat); a One-Time Obligation block;
+a Pooled Proceeds Routing block (lifestyle draw $, HI paydown %, resulting
+split numbers, same-year-all-sold bump toggle, HI-paydown-at-closing
+toggle -- now unconditionally visible, no longer gated on a specific
+property's sell year).
+
+Also updated (necessary consequences of the schema change, not scope
+creep): the liquidation-NW quick-calc in chartData (properties[].value +
+hold.basis instead of BASE.primaryValue/duplexValue/lafayetteValue +
+duplex15thBasis/lafayetteBasis sliders); the Defaults-tab registry
+(removed the Property Values and Mortgages groups entirely -- that data
+now lives in the property scaffold cards); pin restorePin/switchToPin/
+confirmSwitch (dropped the dead migration calls); the Fixed Costs
+Breakdown panel's property labels and "not modeled" section.
+
+--- BUG CAUGHT DURING VERIFICATION ---
+
+Pooled routing conservation test initially returned pool=$0 for a 15th St
+sale -- traced to disposeAsset's rental-mode branch checking for the OLD
+internal string 'sell_taxable', while the new schema's hold.mode value is
+'sell'. Fixed by renaming the internal check (and updating the function's
+own mode-string comment) to 'sell', matching what the v4 spec's schema
+section already specified. This was caught by my OWN node-level dry run
+before writing any tests, not by the test suite after the fact.
+
+--- FILES CHANGED ---
+
+src/defaults.js   Full rewrite: freshPropertiesDefaults/freshObligation
+                  Defaults replace dispoEntry/LIQUIDATION_DEFAULTS/
+                  SETTLEMENT_DEFAULTS/SIXTH_STR_DEFAULTS; DEFAULTS/
+                  SC_DEFAULTS pruned of all removed flat fields; makeParams
+                  deep-merges properties by id (no legacy field mapping).
+src/engine.js     BASE pruned of property value/mortgage/rent constants;
+                  MORTGAGE_DEFAULTS removed (mortgage moved onto
+                  properties[]); Defaults-tab override machinery
+                  simplified (BASE+DISPO_DEFAULTS only); unitSegmentGross/
+                  unitSegmentNet/validateUnitSegments/unitSegmentOverlaps/
+                  yearHeldFraction/unitOwnedThisMonth/quarterStartMonth/
+                  segmentClipInfo added; buildScenario: per-property
+                  mortgage state array + generalized stepMtg/
+                  mtgExtraPrincipal, computeDispo loops over properties[],
+                  CA-cap loop generalized, obligation-based offset/pooled
+                  routing, income loop rewritten (property/unit/segment),
+                  NW/maintenance/propCost/tax-interest all keyed
+                  generically off properties[]; disposeAsset mode string
+                  'sell_taxable' -> 'sell'.
+src/App.jsx       v4.0.0-A header/badge; imports pruned/updated; Defaults
+                  registry pruned; destructure/setters replaced with
+                  properties/obligation + setProperty/setPropertyHold/
+                  setPropertyMortgage/setUnitSegments/setObligation;
+                  liveParams/effectivePins/buildRowsFromSnapshot/
+                  confirmSwitch updated; settleData/audit useEffect
+                  retargeted to obligation; wfData fully rewritten
+                  (property-centric income/mortgage/cost sections, shared
+                  helpers with engine.js); chartData liq-NW block
+                  retargeted to properties[]; ~830 lines of dead UI
+                  removed, new scaffold UI added (property cards, cost
+                  profiles, obligation, pooled routing); restorePin/
+                  switchToPin/confirmSwitch migration calls dropped.
+retirement-simulator.spec.js
+                  Deleted Groups M/N/O/P/Q wholesale (851 lines -- all
+                  tested the removed dispositions/settlement/6th-segments
+                  schema and UI). E2 (Lafayette toggle), E3 (sell-year
+                  slider), L2/L3 (payOffHI visibility gating) removed --
+                  their premises no longer exist. E5/L1 version strings
+                  bumped to v4.0.0-A. New Group R (10 tests) per the
+                  spec's Session-A bullet list: R1 overlapping segments
+                  sum + annual/monthly agree, R2 LTR-exclusivity
+                  rejection, R3 segment clip info, R4 sale-year quarter
+                  proration (UI-driven, verified live), R5 cost profiles
+                  by kind, R6 disposeAsset incl. primary §121/no-1031,
+                  R7 IO-flat-then-recast-on-actual-balance, R8 pooled
+                  routing conservation, R9 mortgage-principal bucket
+                  ordering, R10 scaffold renders every code path.
+
+--- BUG CAUGHT DURING FULL-SUITE VERIFICATION (in addition to the mode-string
+    fix above) ---
+
+The bulk mass-deletion of the ~830-line dead UI block (One-Time Decisions
+through Income & Cost Knobs) was scoped by line-range grep, and the range
+turned out to be wider than the dead UI itself -- it also swallowed THREE
+unrelated, still-needed sections that happened to sit inside that range:
+"Your SS Start Age" toggle, the WorkCurveEditor render, and the "HI Debt
+at Launch" balance/rate/min editor (ccBal/sophiaBal/nolanBal), plus the
+"Liquidation NW Basis" section header (its two dead sliders were correctly
+removed in an earlier edit, but the whole section then got deleted again
+moments later by the wider block replacement). Caught by the full
+run_tests.ps1 pass: E1 (SS age click) timed out, J4/J5 (Liquidation NW
+Basis) and 2 others failed on missing text. All three sections restored
+verbatim (unchanged from pre-v4.0.0-A) in a new spot right after the
+Pooled Proceeds Routing block. Verified via direct browser checks (section
+text present, button count, no console errors) before re-running tests.
+Lesson: line-range-based bulk deletion of "this whole block is dead" is
+risky when the block wasn't verified boundary-by-boundary against a
+fresh diff -- worth grep'ing content markers on BOTH sides of a deletion
+range next time, not just the start/end section headers.
+
+Also caught: H4 ("All HI debt cleared — avalanche sweep ends") no longer
+fires in the default scenario -- traced to a LATENT v3.4.0 regression
+(not introduced by v4.0.0-A): since the v3.4 IO/recast fix, mortgage
+payments now jump at the true 10-year IO boundary regardless of HI-debt
+state, and in the default scenario this means the annual engine's surplus
+never exceeds the protected split threshold enough to trigger a mid-run
+debt-sweep (debtSweep stays 0 for all 21 years even though hiDebt does
+reach 0 in 2036). This surfaced now because v3.4.0 shipped WITHOUT a full
+suite run (an explicit, documented deferral in session19's journal).
+Rewrote H4 to check "All HI debt eliminated" instead -- the milestone
+event that fires unconditionally on hiDebt reaching 0, which is the more
+correct signal anyway. Flagged in the backlog for the v3.4 debt-sweep-
+timing question, not fixed here (out of scope for a v4 schema session).
+
+--- TEST RESULTS ---
+
+  Group R: 10/10 passed. Six pre-existing tests failed on the first full
+  run (C3, C4, E1, H4, J4, J5) -- all traced to the two issues above (dead
+  UI text changes + the accidental section deletion), fixed, and
+  re-verified individually passing. ALSO caught late: the UI version badge
+  div (App.jsx header comment had been bumped to v4.0.0-A, but the actual
+  `<div>` rendering the on-screen badge was still showing v3.4.0) -- fixed
+  and re-verified via E5/L1. FINAL: 71/71 passed (two full clean runs,
+  6.7m each) -- 61 carried Groups A-L minus E2/E3/L2/L3, plus Group R's 10.
+
+--- SEMANTIC NOTES ---
+
+- Book-NW baseline values changed slightly (properties[].value now uses
+  the CPA liquidation-worksheet sale prices, not the old separate BASE
+  book-value constants) -- intentional consolidation, not a regression.
+- The "Sale price" manual-override slider from v3.1.1 is gone; FMV at
+  sale is always value x appreciation. Users adjust `value` directly.
+- Lafayette/Barberry's mortgage origin (Jan 2021, not Jul 2021) is a
+  deliberate approximation preserving the pre-v4 remainBal(...,5+yr)
+  trajectory -- its true origination date was never calibrated from a
+  servicer statement (unlike 6th/15th).
+- Property tax/insurance (BASE.primTaxMo etc) and the Cash-Flow-tab
+  maintenance-reserve structure sliders (struct6/15/Laf) stay OUTSIDE the
+  properties[] schema -- these are escrow lines and a separate reserve-
+  planning input, not disposition/mortgage/income data, per spec §3.4.0
+  ("escrow/tax/insurance stay in their existing separate cost lines").
+- Ownership for NW/maintenance/tax-ins purposes still uses the coarse
+  pre-v4 "cal < saleYear" annual convention (whole sale year excluded);
+  only INCOME and MORTGAGE use the new quarter-precise proration. This
+  is a deliberate scope boundary for Session A -- unifying it fully is
+  the same "unify annual sweep model with wfData" backlog item carried
+  since v3.4.
+
+--- OPEN BACKLOG (carried + new) ---
+
+[P1] SESSION B: full sidebar rebuild (collapsible property cards, dead-UI
+     final polish, IA reorg per spec's 5-group layout). Do NOT start
+     without explicit go-ahead per the spec.
+[P1] Unify annual sweep model with wfData (buckets/floors; also now
+     property NW/maintenance/tax-ins coarse-vs-precise ownership gating).
+[P1] CPA rate calibration (6th sale tax still runs below the CPA sheet).
+[P2] Barberry/Lafayette mortgage origin date -- ask for a real servicer
+     statement to calibrate like 6th/15th were in v3.4.
+[P2] Glossary needs a full v4 pass (properties/units/segments, obligation,
+     pooled routing) -- currently still describes the v3 model.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Read this journal + v4_property_centric_spec.md before touching
+   anything -- Session B depends on Session A's exact data shapes.
+2. Do NOT start Session B without the user's explicit go-ahead (per the
+   spec: "Only after A is committed and verified").
+3. Standard cycle per change pass: bump version, update/run tests
+   (run_tests.ps1), commit, journal.
