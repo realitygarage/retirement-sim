@@ -654,7 +654,7 @@ export function buildScenario(p) {
   if(obligAmt > 0){
     yearCashSub[obligYr] = (yearCashSub[obligYr] || 0) + obligAmt;
   }
-  const paydownByYear = {}, drawByYear = {}, wfDebtByYear = {}, wfSavByYear = {};
+  const drawByYear = {}, wfDebtByYear = {}, wfSavByYear = {};
   const paydownDetailByYear = {}, loanStartsByYear = {}, loanPayoffsByYear = {};
   const mtgExtraBoundaryByYear = {};
 
@@ -682,22 +682,22 @@ export function buildScenario(p) {
     const keepDuplex   = keepMap.fifteenth;
     const keepLafOwned = keepMap.barberry;
 
-    // -- v3.2.0 residual routing at the sale-year boundary, via the SHARED
+    // -- v4.0.0-B residual routing at the sale-year boundary, via the SHARED
     //    helpers (splitResidual + planHiPaydown) so the monthly wfData block
-    //    applies the identical plan: (a) lifestyle draw, (b) HI paydown
-    //    avalanche (Nolan included -- his 5-month payment grace delays
-    //    minimums, not lump-sum payoff), (c) remainder -> waterfall.
-    //    Annual approximation of (c): reserve buckets aren't modeled here, so
-    //    the one-time inflow goes straight to the debt sweep; what debt
-    //    doesn't absorb becomes sweep savings (chartData compounds it). --
+    //    applies the identical plan: (a) one-time draw, (b) the FULL post-draw
+    //    remainder cascades debt-first (avalanche) then the mortgage-principal
+    //    bucket then sweep savings. (Pre-v4.0.0-B this had a dedicated
+    //    hiPaydownPct pre-split before the avalanche; removed as redundant --
+    //    the avalanche already puts every dollar of the remainder against debt
+    //    before any of it reaches savings, so a separate "% to debt" dial
+    //    changed nothing except which bucket a dollar was logged under.)
+    //    Annual approximation: reserve buckets aren't modeled here, so the
+    //    one-time inflow goes straight to the debt sweep; what debt doesn't
+    //    absorb becomes sweep savings (chartData compounds it). --
     if(yearCashAdd[cal] != null){
       const residual = Math.max(0, (yearCashAdd[cal] - (yearCashSub[cal]||0)));
-      const hiBal = p.payOffHI ? 0 : ccBal + sophiaBal + nolanBal;
-      const totalDebt = hiBal + loans.reduce((s,L)=>s+(L.includeInSweep?L.bal:0),0);
       const split = splitResidual(residual, {
         lifestyleDraw: cal===obligYr ? (p.settleLifestyleDraw||0) : 0,
-        paydownPct: p.hiPaydownPct||0,
-        totalDebt,
       });
       const mkDebts = ()=>[
         ...(!p.payOffHI ? [
@@ -716,13 +716,11 @@ export function buildScenario(p) {
           else { const L=loans.find(l=>'loan:'+l.label===key); if(L) L.bal=Math.max(0,L.bal-pay); }
         }
       };
-      const plan = planHiPaydown(split.paydownBudget, mkDebts());
+      const plan = planHiPaydown(split.remainder, mkDebts());
       applyPlan(plan);
-      const plan2 = planHiPaydown(split.remainder, mkDebts());
-      applyPlan(plan2);
       // v3.4.0: the waterfall remainder passes through the mortgage-principal
       // bucket (capped per month) before landing in sweep savings.
-      let survivor = split.remainder - plan2.total;
+      let survivor = split.remainder - plan.total;
       if(p.mtgPrincipalOn && survivor>0){
         const _cap = p.mtgPrincipalUncapped ? Infinity : (p.mtgPrincipalCap||0);
         const room = Math.min(_cap, survivor);
@@ -732,8 +730,7 @@ export function buildScenario(p) {
         mtgExtraBoundaryByYear[cal] = paid;
       }
       drawByYear[cal]          = split.draw;
-      paydownByYear[cal]       = plan.total;
-      wfDebtByYear[cal]        = plan2.total;
+      wfDebtByYear[cal]        = plan.total;
       wfSavByYear[cal]         = survivor;
       paydownDetailByYear[cal] = plan.perDebt;
     }
@@ -1008,8 +1005,7 @@ export function buildScenario(p) {
       dispoTax: Math.round(dispoTaxYr),
       dispoNet: Math.round(yearCashAdd[cal] || 0),
       settlementOut: Math.round(yearCashSub[cal] || 0),
-      hiPaydown: Math.round(paydownByYear[cal] || 0),
-      // v3.2.0 residual 3-way split + loan event fields
+      // v4.0.0-B residual routing fields (draw -> debt-first avalanche -> savings)
       settleDraw:   Math.round(drawByYear[cal] || 0),
       wfDebtPaid:   Math.round(wfDebtByYear[cal] || 0),
       wfToSavings:  Math.round(wfSavByYear[cal] || 0),

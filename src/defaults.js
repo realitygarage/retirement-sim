@@ -132,8 +132,8 @@ export const DEFAULTS = {
   // v4.0.0-A property-centric schema
   properties: freshPropertiesDefaults(),
   obligation: freshObligationDefaults(),
-  settleLifestyleDraw:      0,     // pooled-routing (a) one-time lifestyle draw, $
-  hiPaydownPct:           100,     // pooled-routing (b) % of (pool - obligation - draw)
+  settleLifestyleDraw:      0,     // pooled-routing (a) one-time draw, $
+  settleDrawLabel:         '',     // pooled-routing (a) optional label -- lifestyle vs. other use
   caGainCap:        1_200_000,     // CA $1.2M prior-1031 gain cap (§4.6, unchanged)
   sameYearSaleTaxBump:   50_000,   // +tax if ALL properties sold same calendar year
   sameYearSaleTaxBumpOn:  true,
@@ -201,7 +201,7 @@ export const SC_DEFAULTS = {
   properties: freshPropertiesDefaults(),
   obligation: freshObligationDefaults(),
   settleLifestyleDraw:      0,
-  hiPaydownPct:           100,
+  settleDrawLabel:         '',
   caGainCap:        1_200_000,
   sameYearSaleTaxBump:   50_000,
   sameYearSaleTaxBumpOn:  true,

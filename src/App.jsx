@@ -1,4 +1,4 @@
-// v4.0.0-A -- property/unit/segment schema, property-centric engines, pooled proceeds routing, scaffold UI
+// v4.0.0-B -- property-centric sidebar: collapsible property cards, relocated obligation/loans/economy groups, dead-UI removal
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -137,7 +137,7 @@ export default function App(){
     // v4.0.0-A property-centric schema
     properties=freshPropertiesDefaults(),
     obligation=freshObligationDefaults(),
-    hiPaydownPct=100, caGainCap=1_200_000, settleLifestyleDraw=0,
+    caGainCap=1_200_000, settleLifestyleDraw=0, settleDrawLabel='',
     sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true,
     mtgPrincipalOn=false, mtgPrincipalCap=2000, mtgPrincipalUncapped=false,
   } = sc;
@@ -169,7 +169,6 @@ export default function App(){
   const setPayOffHI       = v=>setSc(s=>({...s,payOffHI:v}));
   const setSameYearSaleTaxBumpOn = v=>setSc(s=>({...s,sameYearSaleTaxBumpOn:v}));
   const setSameYearSaleTaxBump   = v=>setSc(s=>({...s,sameYearSaleTaxBump:v}));
-  const setHiPaydownPct    = v=>setSc(s=>({...s,hiPaydownPct:v}));
   const setSsAge          = v=>setSc(s=>({...s,ssAge:v}));
   const setWorkPts        = v=>setSc(s=>({...s,workPts:typeof v==="function"?v(s.workPts):v}));
   const setLifestyleSplit = v=>setSc(s=>({...s,lifestyleSplit:v}));
@@ -192,6 +191,7 @@ export default function App(){
   const setNolanMin       = v=>setSc(s=>({...s,nolanMin:v}));
   const setLoans          = v=>setSc(s=>({...s,loans:typeof v==="function"?v(s.loans||DEFAULT_LOANS_SC):v}));
   const setSettleLifestyleDraw = v=>setSc(s=>({...s,settleLifestyleDraw:v}));
+  const setSettleDrawLabel     = v=>setSc(s=>({...s,settleDrawLabel:v}));
   const setMtgPrincipalOn       = v=>setSc(s=>({...s,mtgPrincipalOn:v}));
   const setMtgPrincipalCap      = v=>setSc(s=>({...s,mtgPrincipalCap:v}));
   const setMtgPrincipalUncapped = v=>setSc(s=>({...s,mtgPrincipalUncapped:v}));
@@ -261,7 +261,8 @@ export default function App(){
   const [showLive, setShowLive] = useState(true);       // show live scenario on charts
   const [expandedChart, setExpandedChart] = useState(null); // which chart is drilled into
   const [nwMode,        setNwMode]        = useState('book'); // 'book' | 'liq'
-  const [settleOpen,    setSettleOpen]    = useState({});     // v3.1.2 per-property disclosure in settlement breakdown
+  const [propCardOpen,  setPropCardOpen]  = useState({});     // v4.0.0-B per-property collapse (default open)
+  const [loansDebtOpen, setLoansDebtOpen] = useState(true);   // v4.0.0-B Loans & Debt group collapse
   // CF waterfall state now in sc object (see setSc setters above)
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
   const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Fixed-cost columns in month table
@@ -372,12 +373,12 @@ export default function App(){
     }
     if(Math.abs(settleData.residual - Math.max(0, settleData.totalProceeds - (obligation.amount||0))) > 1)
       console.warn(`[obligation audit] residual ($${Math.round(settleData.residual)}) != max(0, Σ afterTaxNetProceeds - obligation.amount)`);
-    // v3.2.0 conservation: draw + paydown + waterfall === residual
+    // v4.0.0-B conservation: draw + debt paydown + savings === residual
     const rSet = liveRows.find(r=>r.cal===obligation.year);
     if(rSet && settleData.sellers.length>0){
-      const splitSum = (rSet.settleDraw||0)+(rSet.hiPaydown||0)+(rSet.wfDebtPaid||0)+(rSet.wfToSavings||0);
+      const splitSum = (rSet.settleDraw||0)+(rSet.wfDebtPaid||0)+(rSet.wfToSavings||0);
       if(Math.abs(splitSum - settleData.residual) > 2)
-        console.warn(`[obligation audit] 3-way split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
+        console.warn(`[obligation audit] draw+paydown+savings split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
     }
   },[settleData,obligation.amount,liveRows,obligation.year]);
 
@@ -495,22 +496,22 @@ export default function App(){
       const rg     = Math.pow(1+liveParams.rentGrowth,  mo/12);
       const pinf   = Math.pow(1+(liveParams.propCpi||liveParams.propInflation), mo/12);
 
-      // -- v4.0.0-A pooled routing, applied once at the start of the pool year
-      //    via the SHARED helpers (identical plan to the annual engine):
-      //    (a) lifestyle draw, (b) HI paydown avalanche (Nolan included --
-      //    his 5-month grace delays minimum payments, not lump-sum payoff),
-      //    (c) remainder -> waterfall: reserves to caps, then sweep/savings. --
-      let _oneTimeSweep = 0;      // (c) survivor joining this month's sweep
-      let _settleDrawMo = 0;      // (a) one-time lifestyle draw
+      // -- v4.0.0-B pooled routing, applied once at the start of the pool year:
+      //    (a) one-time draw, (b) FULL post-draw remainder pays HI debt first
+      //    (avalanche, Nolan included -- his 5-month grace delays minimum
+      //    payments, not lump-sum payoff), (c) then reserves/buckets fill to
+      //    caps, (d) survivor joins this month's sweep/savings. This debt-
+      //    first-then-buffers order is scoped to THIS one-time sale-proceeds
+      //    inflow only -- the ordinary recurring monthly waterfall (buffers
+      //    before the debt sweep) is unchanged below.
+      let _oneTimeSweep = 0;      // (d) survivor joining this month's sweep
+      let _settleDrawMo = 0;      // (a) one-time draw
+      let _oneTimeReserveFill = 0; // (c) total landed in reserve/buffer caps
       let _payDetailMo  = null;   // (b) per-debt plan, for tests/audit
       if((_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
         const residual = Math.max(0, (_yearCashAdd[calYear] - (_yearCashSub[calYear]||0)));
-        const hiBal_ = payOffHI ? 0 : ccBal+sophiaBal+nolanBal;
-        const totalDebt_ = hiBal_ + _loans.reduce((s,L)=>s+(L.includeInSweep?L.bal:0),0);
         const split = splitResidual(residual, {
           lifestyleDraw: calYear===((liveParams.obligation||{}).year||2026) ? (liveParams.settleLifestyleDraw||0) : 0,
-          paydownPct: liveParams.hiPaydownPct||0,
-          totalDebt: totalDebt_,
         });
         const mkDebts = ()=>[
           ...(!payOffHI ? [
@@ -529,18 +530,20 @@ export default function App(){
             else { const L=_loans.find(l=>'loan:'+l.label===key); if(L) L.bal=Math.max(0,L.bal-pay); }
           }
         };
-        const plan = planHiPaydown(split.paydownBudget, mkDebts());
+        // (b) debt-first: avalanche-pay the FULL remainder against HI debt/loans
+        const plan = planHiPaydown(split.remainder, mkDebts());
         applyPlan(plan);
         _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
-        // (c) fill reserves/buckets to caps, in existing waterfall order
-        let rem = split.remainder;
+        // (c) whatever debt didn't absorb fills reserves/buckets to caps
+        let rem = split.remainder - plan.total;
         const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
-        res6   += _fill(res6,   maint6Cap);
-        res15  += _fill(res15,  maint15Cap);
-        resLaf += _fill(resLaf, maintLafCap);
-        rdBal  += _fill(rdBal,  rdCap);
-        obBal  += _fill(obBal,  obCap);
-        _oneTimeSweep = rem;    // joins debt sweep if debt remains, else savings
+        const _res6Fill   = _fill(res6,   maint6Cap);   res6   += _res6Fill;
+        const _res15Fill  = _fill(res15,  maint15Cap);  res15  += _res15Fill;
+        const _resLafFill = _fill(resLaf, maintLafCap); resLaf += _resLafFill;
+        const _rdFill     = _fill(rdBal,  rdCap);       rdBal  += _rdFill;
+        const _obFill     = _fill(obBal,  obCap);       obBal  += _obFill;
+        _oneTimeReserveFill = _res6Fill+_res15Fill+_resLafFill+_rdFill+_obFill;
+        _oneTimeSweep = rem;    // (d) joins debt sweep if debt remains, else savings
         _settleDrawMo = split.draw;
         _paidYears.add(calYear);
       }
@@ -754,9 +757,10 @@ export default function App(){
         }
       }
       // v4.0.0-A pooled-routing residual events
-      if(_settleDrawMo>0) events.push(`Obligation-year lifestyle draw $${Math.round(_settleDrawMo/1000)}K`);
-      if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche)`);
-      if(_payDetailMo && _payDetailMo.remainder>0) events.push(`$${Math.round(_payDetailMo.remainder/1000)}K residual into waterfall`);
+      if(_settleDrawMo>0) events.push(`Obligation-year one-time draw $${Math.round(_settleDrawMo/1000)}K`);
+      if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche, debt-first)`);
+      if(_oneTimeReserveFill>0) events.push(`$${Math.round(_oneTimeReserveFill/1000)}K sale proceeds into reserve/buffer caps`);
+      if(_oneTimeSweep>0) events.push(`$${Math.round(_oneTimeSweep/1000)}K sale proceeds into savings sweep`);
       if(rdBal>=rdCap&&rdBal-rdAdd<rdCap) events.push("Rainy day fund FULL -- redirecting to sweep");
       if(obBal>=obCap&&obBal-obAdd<obCap) events.push("Operating buffer FULL -- redirecting to sweep");
       if(debtClearedMo===mo && mo>0) events.push("ALL HI DEBT CLEARED! 🎉");
@@ -778,9 +782,11 @@ export default function App(){
         interestPaid:Math.round(interestPaid), minPmt:Math.round(minPmt),
         res6:Math.round(res6), res15:Math.round(res15), resLaf:Math.round(resLaf),
         sweepToSavings:Math.round(sweepToSavings), savingsAcc:Math.round(savingsAcc),
-        // v3.2.0 residual routing + loans (for tests/audit and the annual-engine parity check)
+        // v4.0.0-B residual routing + loans (for tests/audit and the annual-engine parity check)
         settleDraw: Math.round(_settleDrawMo),
         paydownDetail: _payDetailMo ? _payDetailMo.perDebt : null,
+        oneTimePaydown: Math.round(_payDetailMo ? _payDetailMo.total : 0),
+        oneTimeReserveFill: Math.round(_oneTimeReserveFill),
         oneTimeSweep: Math.round(_oneTimeSweep),
         loansBal: Math.round(_loans.reduce((s,L)=>s+L.bal,0)),
         // v3.4.0 mortgage-principal bucket + balances
@@ -1157,6 +1163,15 @@ export default function App(){
 
   const sect=(label)=>(
     <div style={{fontSize:9,color:dim,fontWeight:"bold",letterSpacing:2,textTransform:"uppercase",marginBottom:8,marginTop:14}}>{label}</div>
+  );
+
+  // v4.0.0-B: collapsible group header (Properties cards + Loans & Debt use this)
+  const collapsibleSect=(label,isOpen,onToggle)=>(
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:isOpen?8:0,marginTop:14}}>
+      <span style={{fontSize:9,color:dim,fontWeight:"bold",letterSpacing:2,textTransform:"uppercase"}}>{label}</span>
+      <button onClick={onToggle} style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,cursor:"pointer",
+        background:"transparent",border:`1px solid ${bdr}`,color:dim}}>{isOpen?"▲ collapse":"▼ expand"}</button>
+    </div>
   );
 
   const toggle=(val,setVal,opts)=>(
@@ -1585,7 +1600,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.0.0-A</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.0.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1666,14 +1681,14 @@ export default function App(){
             )}
 
             {/* ============================================================
-                v4.0.0-A SCAFFOLD UI -- property-centric. Rough/minimal by
-                design (Session A): no collapse groups, no polish. Exposes
-                every code path: per property mode/year/quarter, mortgage,
-                disposition fields, unit segment editors; the One-Time
-                Obligation block; the pooled routing chain. Session B
-                rebuilds this into the full collapsible sidebar IA.
+                v4.0.0-B property-centric sidebar. Each property is a
+                collapsible card: mode/year/quarter, then unit segment
+                editors, then the disposition block (mode != keep only),
+                then a per-property proceeds summary. Cost Profiles, One-
+                Time Obligation, Loans & Debt, Cash-Flow Engine, and
+                Economy follow as their own groups below.
                 ============================================================ */}
-            {sect("Properties (v4.0.0-A scaffold)")}
+            {sect("Properties")}
             <div style={{fontSize:9,color:dim,marginBottom:10,lineHeight:1.5}}>
               Each property owns its hold/sell decision, its units, each unit's income
               segments, and its disposition tax block. Sale timing granularity is the
@@ -1685,58 +1700,31 @@ export default function App(){
               const hold = prop.hold||{};
               const isSold = hold.mode && hold.mode!=='keep';
               const engineRes = liveRows.dispoResults?.[prop.id];
+              const isOpen = propCardOpen[prop.id] !== false;
               const modeOpts = prop.isPrimary
                 ? [{v:'keep',l:'Keep',c:dim},{v:'sell',l:'Sell',c:red}]
                 : [{v:'keep',l:'Keep',c:dim},{v:'sell',l:'Sell',c:red},
                    {v:'full_1031',l:'Full 1031',c:blue},{v:'partial_1031',l:'Partial 1031',c:blue}];
               return (
                 <div key={prop.id} data-testid={`property-${prop.id}-card`} style={{background:bg2,border:`1px solid ${bdr}`,borderRadius:6,padding:10,marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <span style={{fontSize:11,color:bright,fontWeight:"bold"}}>{prop.label}{prop.isPrimary?" (primary -- §121, no 1031)":""}</span>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:isOpen?8:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <button data-testid={`property-${prop.id}-collapse`}
+                        onClick={()=>setPropCardOpen(o=>({...o,[prop.id]:!isOpen}))}
+                        style={{fontSize:9,padding:"2px 7px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                          background:"transparent",border:`1px solid ${bdr}`,color:dim}}>
+                        {isOpen?"▾":"▸"}
+                      </button>
+                      <span style={{fontSize:11,color:bright,fontWeight:"bold"}}>{prop.label}{prop.isPrimary?" (primary -- §121, no 1031)":""}</span>
+                    </div>
                     {isSold && <span data-testid={`sold-badge-${prop.id}`} style={{fontSize:9,color:red,fontFamily:mono,fontWeight:"bold"}}>SOLD {hold.mode} · Q{hold.quarter||1} {hold.year}</span>}
                   </div>
 
-                  {/* Value + appreciation override */}
+                  {isOpen && (<>
+                  {/* Value + mortgage -- basic property attributes */}
                   {slider("Property value",prop.value||0,v=>setProperty(prop.id,{value:v}),
                     Math.round((prop.value||500000)*0.5),Math.round((prop.value||500000)*2),5000,v=>"$"+Math.round(v/1000)+"K")}
-
-                  {/* Mode / year / quarter */}
-                  <div data-testid={`mode-toggle-${prop.id}`} style={{marginBottom:8}}>
-                    {toggle(hold.mode||'keep', v=>setPropertyHold(prop.id,{mode:v}), modeOpts)}
-                  </div>
-                  {isSold && (<>
-                    <div data-testid={`sale-year-slider-${prop.id}`}>
-                      {slider("Sale year",hold.year||2026,v=>setPropertyHold(prop.id,{year:v}),2026,2046,1,v=>v+"")}
-                    </div>
-                    <div style={{marginBottom:10}}>
-                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale quarter (assumed at quarter boundary)</div>
-                      <div data-testid={`sale-quarter-toggle-${prop.id}`}>
-                        {toggle(hold.quarter||1, v=>setPropertyHold(prop.id,{quarter:v}), [1,2,3,4].map(q=>({v:q,l:'Q'+q})))}
-                      </div>
-                    </div>
-                    <div style={{marginBottom:8}}>
-                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale mode</div>
-                      {toggle(hold.saleMode||'market', v=>setPropertyHold(prop.id,{saleMode:v}), [
-                        {v:'market',l:'Market'},{v:'forced',l:'Forced (-15%)',c:red}
-                      ])}
-                    </div>
-                    {slider("Adjusted basis",hold.basis||0,v=>setPropertyHold(prop.id,{basis:v}),
-                      Math.round((hold.basis||400000)*0.5),Math.round((hold.basis||400000)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
-                    {prop.isPrimary && slider("§121 exclusion",hold.sec121Exclusion||0,v=>setPropertyHold(prop.id,{sec121Exclusion:v}),0,500000,10000,v=>"$"+Math.round(v/1000)+"K")}
-                    {!prop.isPrimary && slider("CA-source deferred gain",hold.caSourceDeferredGain||0,v=>setPropertyHold(prop.id,{caSourceDeferredGain:v}),0,Math.max(10000,(hold.caSourceDeferredGain||0)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
-                    {!prop.isPrimary && slider("Depreciation recapture $",hold.depreciationRecapture||0,v=>setPropertyHold(prop.id,{depreciationRecapture:v}),0,Math.max(60000,(hold.depreciationRecapture||0)*1.5),1000,v=>"$"+Math.round(v/1000)+"K")}
-                    {hold.mode==='partial_1031' && slider("Cash boot",hold.cashBoot||0,v=>setPropertyHold(prop.id,{cashBoot:v}),0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
-                    {engineRes && engineRes.mode && engineRes.mode!=='keep' && (
-                      <div style={{marginTop:8,padding:8,background:bg1,borderRadius:4,fontSize:9}}>
-                        <div style={{color:dim,marginBottom:3}}>Reconciliation vs CPA sheet:</div>
-                        <div style={{color:muted}}>Tax: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.totalTax||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaEstTax||0)/1000)}K</div>
-                        <div style={{color:muted}}>Net: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.afterTaxNetProceeds||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaNetProceedsAfterTax||0)/1000)}K</div>
-                      </div>
-                    )}
-                  </>)}
-
-                  {/* Mortgage (plain number inputs -- calibration constants, rarely touched) */}
-                  <div style={{marginTop:8,paddingTop:8,borderTop:`1px dashed ${bdr}`}}>
+                  <div style={{marginBottom:8}}>
                     <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6}}>Mortgage</div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
                       {[
@@ -1757,6 +1745,24 @@ export default function App(){
                         </div>
                       ))}
                     </div>
+                  </div>
+
+                  {/* Hold/sell: mode + year + quarter */}
+                  <div style={{marginTop:8,paddingTop:8,borderTop:`1px dashed ${bdr}`}}>
+                    <div data-testid={`mode-toggle-${prop.id}`} style={{marginBottom:8}}>
+                      {toggle(hold.mode||'keep', v=>setPropertyHold(prop.id,{mode:v}), modeOpts)}
+                    </div>
+                    {isSold && (<>
+                      <div data-testid={`sale-year-slider-${prop.id}`}>
+                        {slider("Sale year",hold.year||2026,v=>setPropertyHold(prop.id,{year:v}),2026,2046,1,v=>v+"")}
+                      </div>
+                      <div>
+                        <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale quarter (assumed at quarter boundary)</div>
+                        <div data-testid={`sale-quarter-toggle-${prop.id}`}>
+                          {toggle(hold.quarter||1, v=>setPropertyHold(prop.id,{quarter:v}), [1,2,3,4].map(q=>({v:q,l:'Q'+q})))}
+                        </div>
+                      </div>
+                    </>)}
                   </div>
 
                   {/* Units + segment editors */}
@@ -1790,6 +1796,11 @@ export default function App(){
                             const kColor = seg.kind==='str'?amber:seg.kind==='mtr'?blue:green;
                             const gross = unitSegmentGross(seg);
                             const clip = segmentClipInfo(seg, hold);
+                            const costNote = seg.kind==='str'
+                              ? `${strPlatformPct}% platform + ${strCleanPct}% cleaning${mgrPct>0?` + ${mgrPct}% mgmt`:''}`
+                              : seg.kind==='mtr'
+                              ? `$${mtrCleaningFlat}/block cleaning${mgrPct>0?` + ${mgrPct}% mgmt`:''}`
+                              : `${ltrVacancyPct}% vacancy${mgrPct>0?` + ${mgrPct}% mgmt`:''}, no cleaning charge`;
                             return (
                               <div key={ei} data-testid={`seg-${unit.id}-${ei}`} style={{background:bg2,border:`1px solid ${kColor}55`,borderRadius:6,padding:8,marginBottom:6}}>
                                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
@@ -1812,11 +1823,12 @@ export default function App(){
                                       style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
                                   </div>
                                 </div>
-                                <div style={{marginBottom:6}}>
+                                <div style={{marginBottom:4}}>
                                   {toggle(seg.kind,v=>updSeg(ei,{kind:v}),[
                                     {v:'str',l:'STR',c:amber},{v:'mtr',l:'MTR',c:blue},{v:'ltr',l:'LTR',c:green}
                                   ])}
                                 </div>
+                                <div style={{fontSize:8,color:dim,fontStyle:"italic",marginBottom:6}}>Cost profile: {costNote}</div>
                                 {seg.kind==='str' && (seg.str||[]).map((g,si)=>(
                                   <div key={si} style={{marginBottom:6}}>
                                     <div style={{display:"flex",justifyContent:"space-between"}}>
@@ -1886,11 +1898,40 @@ export default function App(){
                       );
                     })}
                   </div>
+
+                  {/* Disposition block -- only when mode != keep */}
+                  {isSold && (
+                    <div style={{marginTop:10,paddingTop:8,borderTop:`1px dashed ${bdr}`}}>
+                      <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6}}>Disposition</div>
+                      <div style={{marginBottom:8}}>
+                        <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale mode</div>
+                        {toggle(hold.saleMode||'market', v=>setPropertyHold(prop.id,{saleMode:v}), [
+                          {v:'market',l:'Market'},{v:'forced',l:'Forced (-15%)',c:red}
+                        ])}
+                      </div>
+                      {slider("Adjusted basis",hold.basis||0,v=>setPropertyHold(prop.id,{basis:v}),
+                        Math.round((hold.basis||400000)*0.5),Math.round((hold.basis||400000)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
+                      {prop.isPrimary && slider("§121 exclusion",hold.sec121Exclusion||0,v=>setPropertyHold(prop.id,{sec121Exclusion:v}),0,500000,10000,v=>"$"+Math.round(v/1000)+"K")}
+                      {!prop.isPrimary && slider("CA-source deferred gain",hold.caSourceDeferredGain||0,v=>setPropertyHold(prop.id,{caSourceDeferredGain:v}),0,Math.max(10000,(hold.caSourceDeferredGain||0)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
+                      {!prop.isPrimary && slider("Depreciation recapture $",hold.depreciationRecapture||0,v=>setPropertyHold(prop.id,{depreciationRecapture:v}),0,Math.max(60000,(hold.depreciationRecapture||0)*1.5),1000,v=>"$"+Math.round(v/1000)+"K")}
+                      {hold.mode==='partial_1031' && slider("Cash boot",hold.cashBoot||0,v=>setPropertyHold(prop.id,{cashBoot:v}),0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+                    </div>
+                  )}
+
+                  {/* Per-property proceeds summary */}
+                  {isSold && engineRes && engineRes.mode && engineRes.mode!=='keep' && (
+                    <div style={{marginTop:8,padding:8,background:bg1,borderRadius:4,fontSize:9}}>
+                      <div style={{color:dim,marginBottom:3,fontWeight:"bold"}}>Proceeds summary (vs CPA sheet):</div>
+                      <div style={{color:muted}}>Tax: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.totalTax||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaEstTax||0)/1000)}K</div>
+                      <div style={{color:muted}}>Net: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.afterTaxNetProceeds||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaNetProceedsAfterTax||0)/1000)}K</div>
+                    </div>
+                  )}
+                  </>)}
                 </div>
               );
             })}
 
-            {/* Cost profiles -- applied automatically by segment kind (§1 table) */}
+            {/* Cost profiles -- applied automatically by segment kind (§1 table), trailer of the Properties group */}
             {sect("Cost Profiles")}
             <div style={{fontSize:8,color:dim,marginBottom:8}}>Applied automatically by segment kind: STR = platform% + cleaning%; MTR = flat $/block cleaning; LTR = vacancy%. Mgmt fee applies to all three.</div>
             {slider("STR platform fee",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%")}
@@ -1921,50 +1962,9 @@ export default function App(){
               ])}
             </div>
 
-            {/* Pooled proceeds routing (§3.4) */}
-            {sect("Pooled Proceeds Routing")}
-            <div style={{fontSize:8,color:dim,marginBottom:8}}>All same-year dispositions feed ONE pool: obligation → lifestyle draw → HI paydown → remainder into the monthly waterfall.</div>
-            {slider("(a) Lifestyle draw (one-time $)",settleLifestyleDraw,setSettleLifestyleDraw,0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
-            {slider("(b) HI paydown % of remaining pool",hiPaydownPct,setHiPaydownPct,0,100,5,v=>v+"%")}
-            {(()=>{
-              const rSettle = liveRows.find(r=>r.cal===obligation.year) || {};
-              const fmtK = v=>"$"+Math.round((v||0)/1000)+"K";
-              return (
-                <div data-testid="pooled-routing-result" style={{fontSize:9,color:muted,padding:8,background:bg2,borderRadius:4,marginTop:4}}>
-                  {fmtK(rSettle.settleDraw)} lifestyle, {fmtK(rSettle.hiPaydown)} to HI debt, {fmtK((rSettle.wfDebtPaid||0)+(rSettle.wfToSavings||0))} into waterfall
-                </div>
-              );
-            })()}
-            <div style={{marginTop:10}}>
-              <div style={{fontSize:10,color:muted,marginBottom:5}}>HI Debt at Closing</div>
-              {toggle(payOffHI,setPayOffHI,[
-                {v:false,l:"Sweep over time",c:amber},{v:true,l:"Pay off at closing",c:green}
-              ])}
-            </div>
-
-            {/* Restored v4.0.0-A: these three blocks are unrelated to the property
-                schema and were inadvertently swept up in the old-UI removal --
-                put back here, unchanged from pre-v4.0.0-A. */}
-            <div style={{marginBottom:10,marginTop:14}}>
-              <div style={{fontSize:10,color:muted,marginBottom:5}}>Your SS Start Age</div>
-              {toggle(ssAge,setSsAge,
-                [65,66,67,68,69,70].map(a=>({v:a,l:`${a}`,c:a>=67?green:amber}))
-              )}
-              <div style={{fontSize:9,color:dim,marginTop:4}}>
-                {ssAge===65&&`$${BASE.yourSsEarly.toLocaleString()}/mo early`}
-                {ssAge===67&&`$${BASE.yourSsFRA.toLocaleString()}/mo FRA`}
-                {ssAge>67&&`~$${Math.round(BASE.yourSsFRA*(1+(ssAge-67)*0.08)).toLocaleString()}/mo delayed`}
-                {ssAge===66&&`~$${Math.round(BASE.yourSsEarly+(BASE.yourSsFRA-BASE.yourSsEarly)/2).toLocaleString()}/mo`}
-              </div>
-            </div>
-
-            <div style={{marginBottom:14}}>
-              <WorkCurveEditor
-                pts={workPts}
-                onChange={setWorkPts}
-              />
-            </div>
-
+            {/* Loans & Debt (collapsible): HI debts + generalized loan segments (v3.2) */}
+            {collapsibleSect("Loans & Debt", loansDebtOpen, ()=>setLoansDebtOpen(o=>!o))}
+            {loansDebtOpen && (<>
             <div style={{marginBottom:10}}>
               <div style={{fontSize:10,color:muted,marginBottom:5}}>HI Debt Balances</div>
               <div style={{
@@ -2015,9 +2015,6 @@ export default function App(){
                 </div>
               </div>
             </div>
-
-            {sect("Liquidation NW Basis")}
-            <div style={{fontSize:8,color:dim,marginBottom:8}}>Cost basis for the "liq" toggle on the NW chart now comes directly from each property's disposition basis (above) -- 5% selling costs + 28.2% cap gains on taxable gain; rentals get no exclusion, 6th St gets the $500K married exclusion.</div>
 
             {/* -- Loans (v3.2.0 generalized segments, replaces family-loan params) -- */}
             <div style={{marginTop:12,marginBottom:4}}>
@@ -2074,33 +2071,37 @@ export default function App(){
                 );
               })}
             </div>
+            </>)}
 
-            {/* MARKET ASSUMPTIONS */}
-            {sect("Market Assumptions")}
-
-            {slider("RE Appreciation",reApp,setReApp,2,6,0.25,v=>`${v.toFixed(2)}%/yr`)}
-            {slider("Rent Growth",rentGr,setRentGr,1.5,4.5,0.25,v=>`${v.toFixed(2)}%/yr`)}
-            <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6,marginTop:8}}>Inflation Rates</div>
-            {slider("Core CPI (living costs)",cpi,setCpi,1.4,4.2,0.2,v=>`${v.toFixed(1)}%/yr`)}
-            {slider("Health ins inflation",healthCpi,setHealthCpi,2.0,8.0,0.5,v=>`${v.toFixed(1)}%/yr`)}
-            {slider("Prop tax/ins inflation",propCpi,setPropCpi,1.5,5.0,0.5,v=>`${v.toFixed(1)}%/yr`)}
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:8,marginBottom:4}}>
-              <span style={{fontSize:10,color:muted}}>Income tax estimate</span>
-              <button onClick={()=>setTaxEnabled(v=>!v)} style={{
-                background:taxEnabled?"#f59e0b22":"transparent",
-                border:`1px solid ${taxEnabled?"#f59e0b":dim}`,borderRadius:4,
-                color:taxEnabled?amber:dim,cursor:"pointer",fontSize:9,
-                padding:"2px 8px",fontFamily:font
-              }}>{taxEnabled?"on":"off"}</button>
+            {/* Cash-Flow Engine: pooled proceeds routing chain + lifestyle draws */}
+            {sect("Cash-Flow Engine")}
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>All same-year dispositions feed ONE pool: proceeds → obligation → one-time draw → the dispersement waterfall (HI debt first, then reserves/buffers, then savings).</div>
+            {slider("One-time draw ($, at sale)",settleLifestyleDraw,setSettleLifestyleDraw,0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:9,color:muted,marginBottom:3}}>Draw label (optional -- lifestyle vs. other use)</div>
+              <input type="text" data-testid="settle-draw-label" value={settleDrawLabel} onChange={e=>setSettleDrawLabel(e.target.value)}
+                placeholder="e.g. Lifestyle, renovation, gift..."
+                style={{width:"100%",background:bg1,border:`1px solid ${bdr}`,borderRadius:4,
+                  color:bright,fontFamily:font,fontSize:10,padding:"4px 8px",outline:"none",boxSizing:"border-box"}}/>
             </div>
-            {taxEnabled&&<div style={{fontSize:9,color:dim,fontStyle:"italic"}}>
-              Est. {liveRows[0]?`$${Math.round(liveRows[0].tax/100)*100}/mo`:"..."} in 2026, {liveRows[4]?`$${Math.round(liveRows[4].tax/100)*100}/mo`:"..."} in 2030
-            </div>}
-            {!payOffHI&&slider("Investment Return",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
-            {payOffHI&&slider("Investment Return (SB proceeds)",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
+            {(()=>{
+              const rSettle = liveRows.find(r=>r.cal===obligation.year) || {};
+              const fmtK = v=>"$"+Math.round((v||0)/1000)+"K";
+              return (
+                <div data-testid="pooled-routing-result" style={{fontSize:9,color:muted,padding:8,background:bg2,borderRadius:4,marginTop:4}}>
+                  proceeds → obligation {fmtK(obligation.amount)} → draw {fmtK(rSettle.settleDraw)}{settleDrawLabel?` (${settleDrawLabel})`:""} → cascade: {fmtK(rSettle.wfDebtPaid)} to HI debt, {fmtK(rSettle.wfToSavings)} to savings
+                </div>
+              );
+            })()}
+            <div style={{marginTop:10,marginBottom:14}}>
+              <div style={{fontSize:10,color:muted,marginBottom:5}}>HI Debt at Closing</div>
+              {toggle(payOffHI,setPayOffHI,[
+                {v:false,l:"Sweep over time",c:amber},{v:true,l:"Pay off at closing",c:green}
+              ])}
+            </div>
 
             {/* -- Lifestyle Draws -- */}
-            <div style={{marginTop:14}}>
+            <div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                 <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Lifestyle Draws</span>
                 <button
@@ -2172,6 +2173,55 @@ export default function App(){
                 </div>
               ))}
             </div>
+
+            {/* ECONOMY */}
+            {sect("Economy")}
+
+            {slider("RE Appreciation",reApp,setReApp,2,6,0.25,v=>`${v.toFixed(2)}%/yr`)}
+            {slider("Rent Growth",rentGr,setRentGr,1.5,4.5,0.25,v=>`${v.toFixed(2)}%/yr`)}
+            <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6,marginTop:8}}>Inflation Rates</div>
+            {slider("Core CPI (living costs)",cpi,setCpi,1.4,4.2,0.2,v=>`${v.toFixed(1)}%/yr`)}
+            {slider("Health ins inflation",healthCpi,setHealthCpi,2.0,8.0,0.5,v=>`${v.toFixed(1)}%/yr`)}
+            {slider("Prop tax/ins inflation",propCpi,setPropCpi,1.5,5.0,0.5,v=>`${v.toFixed(1)}%/yr`)}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:8,marginBottom:4}}>
+              <span style={{fontSize:10,color:muted}}>Income tax estimate</span>
+              <button onClick={()=>setTaxEnabled(v=>!v)} style={{
+                background:taxEnabled?"#f59e0b22":"transparent",
+                border:`1px solid ${taxEnabled?"#f59e0b":dim}`,borderRadius:4,
+                color:taxEnabled?amber:dim,cursor:"pointer",fontSize:9,
+                padding:"2px 8px",fontFamily:font
+              }}>{taxEnabled?"on":"off"}</button>
+            </div>
+            {taxEnabled&&<div style={{fontSize:9,color:dim,fontStyle:"italic"}}>
+              Est. {liveRows[0]?`$${Math.round(liveRows[0].tax/100)*100}/mo`:"..."} in 2026, {liveRows[4]?`$${Math.round(liveRows[4].tax/100)*100}/mo`:"..."} in 2030
+            </div>}
+            {!payOffHI&&slider("Investment Return",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
+            {payOffHI&&slider("Investment Return (SB proceeds)",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
+
+            {/* Restored v4.0.0-A: unrelated to the 5-group IA above -- SS timing,
+                work curve, and the liq-NW basis note stay here at the end. */}
+            <div style={{marginBottom:10,marginTop:14}}>
+              <div style={{fontSize:10,color:muted,marginBottom:5}}>Your SS Start Age</div>
+              {toggle(ssAge,setSsAge,
+                [65,66,67,68,69,70].map(a=>({v:a,l:`${a}`,c:a>=67?green:amber}))
+              )}
+              <div style={{fontSize:9,color:dim,marginTop:4}}>
+                {ssAge===65&&`$${BASE.yourSsEarly.toLocaleString()}/mo early`}
+                {ssAge===67&&`$${BASE.yourSsFRA.toLocaleString()}/mo FRA`}
+                {ssAge>67&&`~$${Math.round(BASE.yourSsFRA*(1+(ssAge-67)*0.08)).toLocaleString()}/mo delayed`}
+                {ssAge===66&&`~$${Math.round(BASE.yourSsEarly+(BASE.yourSsFRA-BASE.yourSsEarly)/2).toLocaleString()}/mo`}
+              </div>
+            </div>
+
+            <div style={{marginBottom:14}}>
+              <WorkCurveEditor
+                pts={workPts}
+                onChange={setWorkPts}
+              />
+            </div>
+
+            {sect("Liquidation NW Basis")}
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>Cost basis for the "liq" toggle on the NW chart now comes directly from each property's disposition basis (above) -- 5% selling costs + 28.2% cap gains on taxable gain; rentals get no exclusion, 6th St gets the $500K married exclusion.</div>
 
           </div>
         </div>
@@ -2493,11 +2543,11 @@ export default function App(){
                   evts.push({cat:"cost", icon:"HL", desc:"Brenda → Medicare", delta:0, note:"Ericsson → Medicare premium"});
               }
 
-              // v3.2.0 settlement residual events (from engine row fields)
+              // v4.0.0-B pooled-routing residual events (from engine row fields)
               if((r.settleDraw||0)>0)
-                evts.push({cat:"income", icon:"DR", desc:"Settlement lifestyle draw (one-time)", delta:Math.round(r.settleDraw/12), note:`$${r.settleDraw.toLocaleString()} from sale residual`});
-              if((r.hiPaydown||0)>0)
-                evts.push({cat:"cost", icon:"HI", desc:"Sale-proceeds HI paydown (avalanche)", delta:0, note:`$${Math.round(r.hiPaydown/1000)}K lump-sum${(r.wfDebtPaid||0)>0?` + $${Math.round(r.wfDebtPaid/1000)}K via waterfall`:""}`});
+                evts.push({cat:"income", icon:"DR", desc:"One-time draw at sale", delta:Math.round(r.settleDraw/12), note:`$${r.settleDraw.toLocaleString()} from sale residual`});
+              if((r.wfDebtPaid||0)>0)
+                evts.push({cat:"cost", icon:"HI", desc:"Sale-proceeds HI paydown (avalanche, debt-first)", delta:0, note:`$${Math.round(r.wfDebtPaid/1000)}K lump-sum`});
 
               // Milestone events
               if(r.hiDebt===0 && (!prev||prev.hiDebt>0))

@@ -499,10 +499,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.0.0-A"', async ({ page }) => {
+  test('E5 — Version header shows "v4.0.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.0.0-A').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.0.0-A');
+    await expect(page.locator('text=v4.0.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.0.0');
   });
 
 });
@@ -958,10 +958,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.0.0-A', async ({ page }) => {
+  test('L1 — Version header shows v4.0.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.0.0-A').first()).toBeVisible();
-    console.log('  L1 — Version v4.0.0-A confirmed');
+    await expect(page.locator('text=v4.0.0').first()).toBeVisible();
+    console.log('  L1 — Version v4.0.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1197,23 +1197,24 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     expect(result.d1).toBeLessThan(result.d0);              // extra principal lowers the recast
   });
 
-  test('R8 — pooled routing conservation (draw + paydown + waterfall === residual)', async ({ page }) => {
+  test('R8 — pooled routing conservation (draw + debt-first paydown + savings === residual)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
       const { buildScenario, makeParams } = window.__engine;
       const rows = buildScenario(makeParams({
         properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2026, quarter: 2 } }],
         obligation: { amount: 400000, year: 2026, quarter: 2, offsetsCapitalGains: true },
-        settleLifestyleDraw: 20000, hiPaydownPct: 50,
+        settleLifestyleDraw: 20000,
       }));
       const pool = rows.dispoResults.fifteenth.afterTaxNetProceeds;
       const residual = Math.max(0, pool - 400000);
       const r26 = rows.find(r => r.cal === 2026);
-      const sum = (r26.settleDraw || 0) + (r26.hiPaydown || 0) + (r26.wfDebtPaid || 0) + (r26.wfToSavings || 0);
-      return { pool: Math.round(pool), residual: Math.round(residual), sum: Math.round(sum), draw: r26.settleDraw };
+      const sum = (r26.settleDraw || 0) + (r26.wfDebtPaid || 0) + (r26.wfToSavings || 0);
+      return { pool: Math.round(pool), residual: Math.round(residual), sum: Math.round(sum), draw: r26.settleDraw, wfDebtPaid: r26.wfDebtPaid };
     });
-    console.log('  R8 — pool=$' + result.pool + ' residual=$' + result.residual + ' sum=$' + result.sum);
+    console.log('  R8 — pool=$' + result.pool + ' residual=$' + result.residual + ' sum=$' + result.sum + ' debtPaid=$' + result.wfDebtPaid);
     expect(result.draw).toBe(20000);
+    expect(result.wfDebtPaid).toBeGreaterThan(0);   // full post-draw remainder cascades debt-first, no separate % dial
     expect(Math.abs(result.sum - result.residual)).toBeLessThanOrEqual(2);
   });
 
@@ -1242,9 +1243,37 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     await expect(page.locator('[data-testid="unit-fifteenth-bottom"]')).toBeVisible();
     await expect(page.locator('[data-testid="unit-barberry-main"]')).toBeVisible();
     await expect(page.getByText('One-Time Obligation')).toBeVisible();
-    await expect(page.getByText('Pooled Proceeds Routing')).toBeVisible();
+    await expect(page.getByText('Cash-Flow Engine')).toBeVisible();
     await expect(page.locator('[data-testid="pooled-routing-result"]')).toBeVisible();
     console.log('  R10 — all property/unit cards + obligation + routing blocks render');
+  });
+
+  test('R11 — monthly engine: one-time sale inflow pays HI debt before filling reserve buckets', async ({ page }) => {
+    await loadApp(page);
+    // Sell 15th St away from the default obligation's year (2026) so the obligation
+    // doesn't shrink this year's residual -- isolates the debt-first cascade itself.
+    // 2030 also gives ~4yr of the regular monthly avalanche a head start, so the
+    // remaining HI debt at the sale month is LESS than the $259,174 launch balance --
+    // the test reads the actual balance at that row rather than assuming launch figures.
+    await sellProperty(page, 'fifteenth', 2030, 2);
+    await page.waitForTimeout(300);
+    const result = await page.evaluate(() => {
+      const wf = window.__wfData || [];
+      const idx = wf.findIndex(r =>
+        (r.oneTimePaydown||0) > 0 || (r.oneTimeReserveFill||0) > 0 || (r.oneTimeSweep||0) > 0);
+      if (idx < 0) return null;
+      return {
+        paydown: wf[idx].oneTimePaydown || 0,
+        reserveFill: wf[idx].oneTimeReserveFill || 0,
+        sweep: wf[idx].oneTimeSweep || 0,
+        hiDebtAfter: wf[idx].hiDebt || 0,       // $K, post-inflow balance
+      };
+    });
+    console.log('  R11 — one-time inflow: ' + JSON.stringify(result));
+    expect(result).toBeTruthy();
+    expect(result.paydown).toBeGreaterThan(0);              // debt absorbed first
+    expect(result.hiDebtAfter).toBe(0);                     // debt-first paydown was enough to fully clear it
+    expect(result.reserveFill).toBeGreaterThan(0);          // only THEN does the leftover fill reserve buckets
   });
 
 });
