@@ -1,0 +1,261 @@
+=== SESSION 21 JOURNAL — v4.0.0-B ===
+Date: 2026-07-06
+Session goal: property-centric sidebar (Session B per the v4 spec) -- collapsible
+property cards, relocated One-Time Obligation/Loans & Debt/Cash-Flow Engine/Economy
+groups, dead-UI verification. Session A (v4.0.0-A, schema+engines+scaffold UI) was
+committed and verified in session20.
+
+--- WHAT SHIPPED ---
+
+v4.0.0-B -- property-centric sidebar: collapsible property cards, relocated
+obligation/loans/economy groups, dead-UI removal.
+
+--- 0. SCOPE NEGOTIATED WITH THE USER BEFORE STARTING ---
+
+Three points in the spec were genuinely ambiguous and were resolved with the user
+via AskUserQuestion before any code was touched (all three answers changed what
+got built vs. a literal reading of the spec):
+
+1. Spec's "Cash-Flow Engine" group says "waterfall caps, lifestyle split, sweep
+   settings, pooled routing chain" -- wording that could mean pulling the separate
+   Cash Flow TAB's Tier 1-5 waterfall editor (maintenance reserves/rainy day/op
+   buffer/lifestyle floor/sweep dial) into the sidebar. User's call: do LESS --
+   the sidebar's "Cash-Flow Engine" group is just a rename/regroup of what already
+   lived there (Pooled Proceeds Routing + HI-paydown-at-closing toggle + Lifestyle
+   Draws). The separate Cash Flow tab is explicitly NOT touched this session and
+   should stay supplemental/non-duplicating going forward -- "adjust as necessary
+   after we get the basics working" (user's words).
+2. Defaults-tab surfacing of ltrVacancyPct/mtrCleaningFlat (called for in the
+   ORIGINAL v4 spec's §1, but Session A deliberately deviated and made them live
+   sliders instead). Investigating the actual mechanism revealed the Defaults tab
+   is architecturally for BASE/DISPO_DEFAULTS constants with NO other control --
+   making it "count" for these two would mean rewiring the %-vs-decimal fallback
+   chain in ~6 places (engine.js + 5 spots in App.jsx) for values that already have
+   fully-functional live sliders. User's call: skip it entirely -- live sliders are
+   sufficient, zero engine.js risk. NOT done.
+3. Biggest one -- the "HI paydown %" pooled-routing control. Mid-session the user
+   asked to remove "the HI-paydown-at-closing toggle" and replace the routing logic
+   with draw -> debt-first cascade. This phrase collided with TWO different existing
+   controls (hiPaydownPct slider vs. the payOffHI "Sweep over time/Pay off at
+   closing" toggle) -- confirmed via AskUserQuestion it meant ONLY hiPaydownPct
+   (the redundant "% of remaining pool" dial); payOffHI (a separate, much bigger
+   v3.2 global assumption used in ~10 places) stays untouched. Then, tracing the
+   monthly engine's actual code revealed its one-time-inflow handling was
+   buffers-first-then-debt (opposite of "debt first" as described) -- confirmed via
+   a second AskUserQuestion to reorder the monthly engine's ONE-TIME sale-inflow
+   block specifically (not the ordinary recurring monthly waterfall, which stays
+   buffers-first as designed).
+
+--- 1. ENGINE ROUTING CHANGE (engine.js + App.jsx wfData mirror) ---
+
+Removed hiPaydownPct entirely (SC_DEFAULTS/DEFAULTS in defaults.js, the sc
+destructure/setter/slider in App.jsx, the paydownByYear tracking in engine.js).
+The old mechanism split the post-draw remainder into a "dedicated paydown budget"
+(hiPaydownPct% avalanche) THEN a second "remainder" avalanche against the SAME
+debts -- mathematically redundant (both stages hit the same debts in the same
+avalanche order; splitting them only changed which bucket a dollar was logged
+under). New mechanism: splitResidual() is called without paydownPct/totalDebt
+(paydownBudget resolves to 0, remainder = pool - draw), and the FULL remainder
+goes through ONE planHiPaydown() avalanche call.
+
+Annual engine (already effectively debt-first pre-change, just needlessly split):
+draw -> avalanche(full remainder) -> mortgage-principal bucket -> sweep savings.
+wfDebtByYear now holds the TOTAL debt paydown (was previously just the "extra"
+second-stage amount); hiPaydown/paydownByYear fields removed from row output.
+
+Monthly engine (genuine behavior change, confirmed with user): was
+draw -> dedicated-avalanche(paydownBudget) -> fill reserve buckets to caps with
+remainder -> leftover joins the regular monthly sweep-or-savings decision. Now:
+draw -> avalanche(FULL remainder) -> fill reserve buckets with whatever's left ->
+leftover joins sweep-or-savings. This reorder is SCOPED to the one-time sale-year
+inflow block only; the ordinary recurring monthly waterfall (Fixed Costs ->
+Maintenance Reserves -> Rainy Day/Op Buffer -> FCF Floor -> Surplus sweep) is
+UNCHANGED. New row fields: oneTimePaydown, oneTimeReserveFill (alongside the
+existing oneTimeSweep/settleDraw).
+
+Added settleDrawLabel (optional free-text, default '') alongside the existing
+settleLifestyleDraw $ amount -- "lifestyle vs. other use" per spec §4. Cosmetic
+only, doesn't touch engine math.
+
+New conservation invariant: draw + debt-first paydown + reserve-fills + savings
+=== pool (was: draw + dedicated-paydown + waterfall-debt + waterfall-savings ===
+residual). Verified live (R8: pool=$777,587, debtPaid=$259,174 fully clears
+launch-balance HI debt when the sale happens in the obligation's own year 2026;
+R11: selling in 2030 instead -- after ~4yr of ordinary avalanche has already
+reduced the balance below $259,174 -- shows paydown correctly tracks the ACTUAL
+balance at sale time ($179,738), fully zeroes hiDebt, THEN $58,505 flows to
+reserve buckets. This is the debt-first-then-buffers proof.)
+
+kept UNCHANGED (explicitly, per user): payOffHI ("HI Debt at Closing: Sweep over
+time / Pay off at closing" toggle -- a separate v3.2 global "debt already paid
+off" assumption used in ~10 places, not a duplicate of the routing chain); the
+Cash Flow tab's lifestyleSplit ("% of surplus above floor to keep" sweep dial) --
+the ongoing monthly rate lever, untouched.
+
+--- 2. SIDEBAR IA RESTRUCTURE (App.jsx, simulator tab only) ---
+
+Property cards are now individually collapsible (repurposed the dead v3.1.2
+settleOpen/setSettleOpen state -- unused since Session A removed the old
+Dispositions & Settlement panel -- into propCardOpen, an id-keyed collapse map,
+default open). Card internals reordered to match the spec exactly: mode/year/
+quarter (hold/sell decision) -> unit segment editors (now with an inline
+"Cost profile: X% platform + Y% cleaning" style note per segment, computed live
+from the existing Cost Profiles sliders) -> disposition block (basis/§121
+exclusion/CA-source deferred gain/depreciation recapture/cash boot -- ONLY
+rendered when mode != keep) -> per-property "Proceeds summary" (renamed from
+"Reconciliation vs CPA sheet", same content). Property value + Mortgage inputs
+moved to the top of each card as basic attributes, ahead of the hold/sell
+decision. All existing data-testids preserved exactly (property-*-card,
+mode-toggle-*, sale-year-slider-*, sale-quarter-toggle-*, mtg-*-*, unit-*,
+seg-*-*, seg-overlap-info-*, seg-errors-*, sold-badge-*) -- only DOM order and
+collapse wrapping changed, so no test needed testid changes.
+
+New 5-group IA, top to bottom: Properties (cards + a Cost Profiles trailer,
+unchanged content) -> One-Time Obligation (unchanged) -> Loans & Debt
+[NEW collapsible group, via a new collapsibleSect() header helper + loansDebtOpen
+state -- wraps the existing HI Debt Balances block + the existing v3.2 Loans
+segment editor, both previously loose in the sidebar] -> Cash-Flow Engine
+[renamed from "Pooled Proceeds Routing" -- wraps the existing routing-chain
+display (now updated text: "proceeds -> obligation -> draw -> cascade") + the
+HI-paydown-at-closing toggle + the Lifestyle Draws block, all pre-existing
+content just regrouped] -> Economy [renamed from "Market Assumptions", same
+content: RE appreciation, rent growth, CPI x3, tax toggle+estimate, invest
+return]. SS Start Age / WorkCurveEditor / Liquidation NW Basis (restored in
+session20 after an accidental sweep) sit at the very end, unrelated to the
+5-group IA -- confirmed with the user rather than guessed.
+
+No dead UI found to remove -- Session A already fully removed the "One-Time
+Decisions" block, 15th Top Unit selector, Lafayette toggles, loose Income & Cost
+Knobs, and standalone STR Schedule block (verified via grep before starting;
+zero hits for any of those strings or their backing state).
+
+--- 3. DEFAULTS.JS ORPHAN AUDIT ---
+
+Removed: hiPaydownPct from both DEFAULTS and SC_DEFAULTS (dead now that the
+dedicated-paydown split is gone). Added: settleDrawLabel to both (new field).
+No other v4-migration orphans found -- Session A's removal of dispositions/
+sixthIncomeSegments/topUnit/etc. was already clean.
+
+Found but NOT touched: investedCash (DEFAULTS/SC_DEFAULTS) -- genuinely unused
+anywhere in engine.js or App.jsx, but predates this session (referenced in the
+Relationships-tab diagram data and old v3 spec/journal docs, not part of the
+property-centric migration). Flagged to the user rather than removed --
+touching it risked the Relationships diagram and was orthogonal to this
+session's actual scope.
+
+--- 4. TEST CHANGES (retirement-simulator.spec.js) ---
+
+R8 rewritten: dropped hiPaydownPct from the scenario and the hiPaydown term from
+the conservation sum; added an assertion that wfDebtPaid > 0 (full remainder
+cascades debt-first, no separate % dial needed).
+R11 added: drives a REAL UI sale (sellProperty helper, 15th St, 2030 Q2 -- offset
+from the default obligation's 2026 year so the obligation doesn't shrink the
+residual) and reads window.__wfData for the one-time-inflow month. Asserts
+paydown>0, hiDebtAfter===0 (fully cleared), reserveFill>0 (buffers only fill
+AFTER debt) -- this is the actual proof of the monthly engine's reordered
+cascade, since that reorder lives in App.jsx's wfData, not engine.js (a bare
+buildScenario() call can't exercise it).
+R10: "Pooled Proceeds Routing" text check -> "Cash-Flow Engine" (section renamed).
+E5/L1: version string checks v4.0.0-A -> v4.0.0.
+
+--- BUGS CAUGHT DURING VERIFICATION ---
+
+My own first draft of R11 asserted paydown ≈ $259,174 (the default LAUNCH HI-debt
+balance). Failed: actual paydown was $179,738. Root cause -- selling in 2030
+(deliberately chosen to dodge the 2026 obligation) also gives ~4 years of the
+ORDINARY monthly avalanche sweep a head start, so the balance AT the sale month is
+already below the launch figure. Rewrote to assert against hiDebtAfter===0 (the
+real invariant -- debt fully cleared, not "cleared by a specific dollar amount")
+instead of hardcoding a balance that drifts with unrelated sweep dynamics.
+
+Test-runner tooling glitch (not app-related): run_tests.ps1's Start-Transcript
+mechanism failed twice in a row to capture the headed Playwright run's output --
+the transcript showed only a stray "check on the tests" line and a truncated
+timestamp gap matching the real ~6-7min run duration, with no actual test output
+captured. Worked around by invoking `npx playwright test --headed --reporter=list`
+directly (bypassing the transcript wrapper) and reading the tool's own captured
+stdout -- this worked cleanly across three separate runs. Flagging for whoever
+picks up next: run_tests.ps1's transcript capture may not be reliable in this
+environment for long headed runs; the direct npx invocation is the more trustworthy
+fallback if run_tests.ps1's own transcript looks suspiciously short/garbled again.
+
+--- TEST RESULTS ---
+
+72/72 passed (5.6m), verified twice consecutively (once after fixing R11, once as
+a clean final confirmation run). 71 carried from session20 (Groups A-L minus
+E2/E3/L2/L3, plus Group R's original 10) + the new R11.
+
+--- FILES CHANGED ---
+
+src/engine.js      buildScenario's pooled-routing block: removed hiBal/totalDebt/
+                   paydownByYear, single planHiPaydown() call against the full
+                   remainder instead of a two-stage paydownBudget+remainder split;
+                   row output drops hiPaydown, wfDebtByYear now the total (not
+                   just the second-stage) debt paydown.
+src/App.jsx        wfData's one-time-inflow block reordered (debt avalanche on
+                   the full remainder BEFORE reserve-bucket filling, was after);
+                   new oneTimePaydown/oneTimeReserveFill row fields; hiPaydownPct
+                   state/setter/slider removed; settleDrawLabel state/setter/
+                   text-input added; dev-mode conservation console.warn and the
+                   Financial Events Table entries updated to match; property
+                   cards made collapsible (propCardOpen, repurposed from dead
+                   settleOpen) and reordered per spec; new collapsibleSect()
+                   helper + loansDebtOpen state; sidebar reorganized into the
+                   5-group IA (Properties/Obligation/Loans & Debt/Cash-Flow
+                   Engine/Economy); header comment + on-screen badge -> v4.0.0.
+src/defaults.js    hiPaydownPct removed (DEFAULTS + SC_DEFAULTS); settleDrawLabel
+                   added (both).
+retirement-simulator.spec.js
+                   R8 rewritten (conservation formula, no hiPaydownPct); R11
+                   added (debt-first-then-buffers proof via live UI + wfData);
+                   R10/E5/L1 text updated for the section rename + version bump.
+
+--- SEMANTIC NOTES ---
+
+- The pooled-routing chain is now strictly: proceeds -> obligation -> one-time
+  draw -> dispersement cascade (debt-first, then reserves/buffers, then savings).
+  There is no longer any "% of pool to debt" dial -- the cascade always sends
+  every dollar of the post-draw remainder against HI debt first, by construction,
+  in both engines.
+- payOffHI is a DIFFERENT, unrelated lever (global "debt already paid off at
+  launch" assumption) and was never part of this redesign.
+- The monthly engine's one-time-sale-inflow debt-first reorder does NOT change
+  the ordinary month-to-month waterfall (still Fixed Costs -> Maintenance
+  Reserves -> Rainy Day/Op Buffer -> FCF Floor -> Surplus sweep, buffers before
+  the debt sweep, as designed) -- the reorder is scoped narrowly to the one-time
+  lump sum a property sale generates.
+- The separate Cash Flow tab (Tier 1-5 waterfall editor) is functionally
+  UNTOUCHED this session and remains a distinct, non-duplicating supplemental
+  detail screen per the user's explicit direction.
+
+--- OPEN BACKLOG (carried + new) ---
+
+[P1] Unify annual sweep model with wfData (buckets/floors; property NW/
+     maintenance/tax-ins coarse-vs-precise ownership gating) -- carried from
+     session20, untouched this session.
+[P1] CPA rate calibration (6th sale tax still runs below the CPA sheet) --
+     carried, untouched.
+[P2] Barberry/Lafayette mortgage origin date -- still needs a real servicer
+     statement -- carried, untouched.
+[P2] Glossary needs a full v4 pass (properties/units/segments, obligation,
+     pooled routing -- now also the debt-first cascade language) -- carried,
+     now slightly more stale than before given the routing-chain rewording.
+[P3] investedCash in defaults.js -- genuinely orphaned (no engine.js/App.jsx
+     consumer), but tied to the Relationships-tab diagram; a real cleanup pass
+     would need to check whether that diagram node should also go, or whether
+     this field was meant for a feature that never shipped.
+[P3] run_tests.ps1's Start-Transcript capture was unreliable for headed runs
+     this session (see BUGS section) -- worth a quick look if it recurs; direct
+     `npx playwright test --headed --reporter=list` is the known-good fallback.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. v4.0.0 (both A and B) is now fully committed and test-green. The
+   property-centric model + its full sidebar IA are the baseline going forward.
+2. If asked to touch the Cash Flow tab's waterfall config, remember it's
+   deliberately separate from the sidebar's Cash-Flow Engine group (routing
+   chain) -- the user wants these to stay non-duplicating, supplemental-detail
+   siblings, not merged.
+3. Standard cycle per change pass: bump version, update/run tests
+   (prefer direct `npx playwright test --headed --reporter=list` over
+   run_tests.ps1 if the transcript looks garbled), commit, journal.
