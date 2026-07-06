@@ -499,10 +499,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.1.0"', async ({ page }) => {
+  test('E5 — Version header shows "v4.1.2"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.1.0');
+    await expect(page.locator('text=v4.1.2').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.1.2');
   });
 
 });
@@ -958,10 +958,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.1.0', async ({ page }) => {
+  test('L1 — Version header shows v4.1.2', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.0').first()).toBeVisible();
-    console.log('  L1 — Version v4.1.0 confirmed');
+    await expect(page.locator('text=v4.1.2').first()).toBeVisible();
+    console.log('  L1 — Version v4.1.2 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1402,6 +1402,80 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     // ...but Free Cash Flow (disc) must not include it -- no spike vs. neighbors
     expect(result.disc).toBeLessThan(result.settleDraw);
     expect(Math.abs(result.disc - result.neighborAvg)).toBeLessThan(result.settleDraw);
+  });
+
+  test('S4 — non-FCF chart tooltip shows the series name, not a blank label', async ({ page }) => {
+    await loadApp(page);
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Tooltip Test');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    // Net Worth was the chart from the bug report -- tooltip formatter used to
+    // short-circuit to an empty name for every chart except FCF (App.jsx ~1372).
+    const card = page.locator('text=Net Worth ($M)').first().locator('xpath=ancestor::div[3]');
+    const chartArea = card.locator('.recharts-wrapper').first();
+    await chartArea.scrollIntoViewIfNeeded();
+    const box = await chartArea.boundingBox();
+    await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.5);
+    await page.waitForTimeout(200);
+
+    const nameEls = card.locator('.recharts-tooltip-item-name');
+    const names = (await nameEls.allInnerTexts()).map(t => t.trim());
+    console.log('  S4 — Net Worth tooltip series names: ' + JSON.stringify(names));
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.every(n => n.length > 0)).toBe(true);   // no blank-name tooltip rows
+    expect(names).toContain('Tooltip Test');             // pinned scenario labeled by name
+    expect(names).toContain('Live');                     // live series labeled too
+  });
+
+  test('S5 — "debt clear" marker matches the HI Debt Balance chart\'s own zero-crossing, distinct from "sweep -> savings"', async ({ page }) => {
+    await loadApp(page);
+
+    // debtClearYear must equal the first year the ANNUAL engine's hiDebt (the
+    // same series the HI Debt Balance chart plots) reaches zero -- not a proxy
+    // off the monthly engine's sweepToSavings (that was the pre-v4.1.2 bug).
+    const check1 = await page.evaluate(() => {
+      const liveRows = window.__liveRows || [];
+      const expectedDebtClearYear = liveRows.find(r => (r.hiDebt||0) <= 0)?.cal ?? null;
+      return { markers: window.__chartMarkers, expectedDebtClearYear };
+    });
+    console.log('  S5 — default scenario: ' + JSON.stringify(check1));
+    expect(check1.markers).toBeTruthy();
+    expect(check1.markers.debtClearYear).toBe(check1.expectedDebtClearYear);
+
+    // The default scenario already diverges (grace period > 0 by default) --
+    // confirm the DOM shows both distinct labels in that case.
+    const sweepLabelCountDefault = await page.locator('text=sweep → savings').count();
+    const debtClearLabelCountDefault = await page.locator('text=debt clear').count();
+    console.log('  S5 — default label counts: sweep=' + sweepLabelCountDefault + ' debtClear=' + debtClearLabelCountDefault);
+    if (check1.markers.sweepToSavingsYear != null && check1.markers.sweepToSavingsYear !== check1.markers.debtClearYear) {
+      expect(sweepLabelCountDefault).toBeGreaterThan(0);
+    }
+    expect(debtClearLabelCountDefault).toBeGreaterThan(0);
+
+    // Bump the grace period and re-check the same contract holds either way.
+    await clickTab(page, 'Cash Flow');
+    const graceLabel = page.getByText('Grace period', { exact: false }).first();
+    await graceLabel.scrollIntoViewIfNeeded();
+    const graceSlider = graceLabel.locator('xpath=ancestor::div[2]//input[@type="range"]').first();
+    await graceSlider.evaluate((el) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, '18');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForTimeout(300);
+
+    const check2 = await page.evaluate(() => window.__chartMarkers);
+    console.log('  S5 — grace=18 markers: ' + JSON.stringify(check2));
+
+    await clickTab(page, 'Simulator');
+    const sweepLabelCount = await page.locator('text=sweep → savings').count();
+    if (check2.sweepToSavingsYear != null && check2.sweepToSavingsYear !== check2.debtClearYear) {
+      expect(sweepLabelCount).toBeGreaterThan(0);
+    } else {
+      expect(sweepLabelCount).toBe(0);
+    }
   });
 
 });

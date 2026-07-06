@@ -1,4 +1,4 @@
-// v4.1.0 -- chart legends on every comparison chart, per-scenario pin colors, FCF/mo excludes one-time draw
+// v4.1.2 -- FCF chart splits "debt clear" (matches HI Debt Balance chart) from "sweep -> savings" (grace-period end) into two distinct reference lines
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -992,10 +992,22 @@ export default function App(){
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
     return Math.ceil(raw/mag)*mag;
   },[chartData]);
-  // Year when HI debt clears and sweep redirects to savings (first year sweepToSavings > 0)
+  // True debt-clear year -- matches the HI Debt Balance chart's own zero-crossing
+  // (same hiDebt series it plots), independent of the grace-period delay below.
   const debtClearYear = useMemo(()=>
+    (chartData||[]).find(r=>(r.hiDebt||0)<=0)?.year ?? null,
+  [chartData]);
+  // Year the surplus sweep actually redirects to savings -- this lags debtClearYear
+  // by the "Grace period (whoop it up first)" slider (sweepDelay), so it is NOT
+  // the same event as debt clearing and must not share its label.
+  const sweepToSavingsYear = useMemo(()=>
     (chartData||[]).find(r=>(r.sweepToSavings||0)>0)?.year ?? null,
   [chartData]);
+  // v4.1.2: expose the two FCF-chart reference-line years for Playwright --
+  // same test-scaffolding pattern as window.__wfData/__liveRows above.
+  useEffect(()=>{
+    if(typeof window !== 'undefined'){ window.__chartMarkers = {debtClearYear, sweepToSavingsYear}; }
+  },[debtClearYear, sweepToSavingsYear]);
   const reqWorkMax = useMemo(()=>{
     const raw = Math.max(...liveRows.map(r=>r.reqWork||0), 1000);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -1371,12 +1383,14 @@ export default function App(){
             <YAxis {...axP} tickFormatter={fmt} width={42} domain={axisDomain} allowDecimals={false}/>
             <Tooltip {...ttP} formatter={(v,name)=>{
               const fmtV = yFmt?yFmt(v):(unit||"$")+Math.round(v).toLocaleString();
-              if(!secondaryDataKey) return [fmtV, ""];
-              const secLabel = secondaryName||"→ Swept";
-              const terLabel = tertiaryName||"Surplus";
-              if(name===secLabel||name===secondaryDataKey||name.endsWith("_sweep")) return [fmtV, secLabel];
-              if(tertiaryDataKey&&(name===terLabel||name===tertiaryDataKey)) return [fmtV, terLabel];
-              return [fmtV, name==="Live"?"Free Cash":name];
+              if(secondaryDataKey){
+                const secLabel = secondaryName||"→ Swept";
+                const terLabel = tertiaryName||"Surplus";
+                if(name===secLabel||name===secondaryDataKey||name.endsWith("_sweep")) return [fmtV, secLabel];
+                if(tertiaryDataKey&&(name===terLabel||name===tertiaryDataKey)) return [fmtV, terLabel];
+                if(name==="Live") return [fmtV, "Free Cash"];
+              }
+              return [fmtV, name];
             }}/>
             {refLines&&refLines.map((rl,i)=><ReferenceLine key={i} {...rl}/>)}
             {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
@@ -1626,7 +1640,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.2</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2347,8 +2361,12 @@ export default function App(){
                   ? [{y:discFloor,stroke:dim,strokeDasharray:"2 4",label:{value:`$${discFloor.toLocaleString()} floor`,fill:dim,fontSize:8,position:"insideTopLeft"}}]
                   : []),
                 ...(debtClearYear!=null
-                  ? [{x:debtClearYear,stroke:blue,strokeOpacity:0.5,strokeDasharray:"3 3",
-                      label:{value:"debt clear",fill:blue,fontSize:7,position:"insideTopLeft"}}]
+                  ? [{x:debtClearYear,stroke:green,strokeOpacity:0.5,strokeDasharray:"3 3",
+                      label:{value:"debt clear",fill:green,fontSize:7,position:"insideTopLeft"}}]
+                  : []),
+                ...(sweepToSavingsYear!=null && sweepToSavingsYear!==debtClearYear
+                  ? [{x:sweepToSavingsYear,stroke:blue,strokeOpacity:0.5,strokeDasharray:"3 3",
+                      label:{value:"sweep → savings",fill:blue,fontSize:7,position:"insideTopRight"}}]
                   : []),
               ]}/>
             <Chart title="HI Debt Balance ($K)" dataKey="hiDebt" pinKey="debt" color={red} chartId="hiDebt"
