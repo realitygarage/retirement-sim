@@ -1,4 +1,4 @@
-// v4.0.0-B -- property-centric sidebar: collapsible property cards, relocated obligation/loans/economy groups, dead-UI removal
+// v4.1.0 -- chart legends on every comparison chart, per-scenario pin colors, FCF/mo excludes one-time draw
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -728,11 +728,13 @@ export default function App(){
       const hiDebtEnd = hiDebtNow;
       // disc = what you actually keep as Free Cash (floor + any kept margin above floor)
       // sweepToSavings gets the rest; they should always sum to afterBuckets.
-      // v3.2.0: the one-time settlement lifestyle draw lands here too.
-      const disc = (graceDone
+      // v4.1.0: the one-time settlement draw is NOT recurring free cash flow --
+      // it funds one-time uses (remodel/purchase/lifestyle draw) and is reported
+      // separately via row.settleDraw + its own event marker + the routing
+      // display, so it's excluded here to stop it spiking the FCF/mo chart.
+      const disc = graceDone
         ? cfSplitProtect   // floor + kept% of surplus; rest going to savings
-        : Math.max(effectiveFloor, afterBuckets - (sweep - _oneTimeSweep)))  // while in debt or grace period
-        + _settleDrawMo;
+        : Math.max(effectiveFloor, afterBuckets - (sweep - _oneTimeSweep));  // while in debt or grace period
 
       // Detect key events
       const events=[];
@@ -1031,6 +1033,12 @@ export default function App(){
     savePinsToStorage(newPins.map(p=>({...p,rows:undefined,stats:undefined})),newNextId);
   },[liveParams,pinName,nextId,pins,captureSnapshot,savePinsToStorage,
      rdTopUp,rdCap,obTopUp,obCap,discFloor,struct6,struct15,structLaf,maintStr,bufferMode,diCap,totalMaintAnnual]);
+
+  const setPinColor=useCallback((id,color)=>{
+    const newPins=pins.map(p=>p.id===id?{...p,color}:p);
+    setPins(newPins);
+    savePinsToStorage(newPins.map(p=>({...p,rows:undefined,stats:undefined})),nextId);
+  },[pins,nextId,savePinsToStorage]);
 
   const removePin=useCallback((id)=>{
     const newPins=pins.filter(p=>p.id!==id);
@@ -1337,6 +1345,24 @@ export default function App(){
           }}>{isExpanded?"collapse":"breakdown"}</button>
         </div>
 
+        {/* Scenario legend -- one entry per visible pin (+ Live), same swatch style
+            as the secondary/tertiary indicators above, so every comparison chart
+            (not just this one) identifies which line is which pinned scenario. */}
+        {(showLive || pins.some(pin=>visiblePins.has(pin.id))) && <span style={{
+          display:"flex",flexWrap:"wrap",gap:10,marginLeft:8,marginBottom:6,
+        }}>
+          {showLive && <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:9,color:dim}}>
+            <svg width="14" height="4"><line x1="0" y1="2" x2="14" y2="2" stroke={color} strokeWidth="2.5"/></svg>
+            <span>Live</span>
+          </span>}
+          {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
+            <span key={pin.id} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:9}}>
+              <svg width="14" height="4"><line x1="0" y1="2" x2="14" y2="2" stroke={pin.color} strokeWidth="1.5" strokeDasharray="4 3"/></svg>
+              <span style={{color:pin.color}}>{pin.name}</span>
+            </span>
+          ))}
+        </span>}
+
         {/* Main chart */}
         <ResponsiveContainer width="100%" height={175}>
           <LineChart data={chartData} margin={{top:4,right:12,left:0,bottom:0}}>
@@ -1600,7 +1626,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.0.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2717,7 +2743,14 @@ export default function App(){
                   padding:"9px 12px",display:"flex",alignItems:"center",gap:10,
                 }}>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:11,color:pin.color,fontWeight:"bold",marginBottom:5}}>{pin.name}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
+                      <input type="color" data-testid={`pin-color-${pin.id}`}
+                        value={pin.color} onChange={e=>setPinColor(pin.id,e.target.value)}
+                        title="Line color for this scenario"
+                        style={{width:16,height:16,padding:0,border:`1px solid ${bdr}`,
+                          borderRadius:3,cursor:"pointer",background:"transparent"}}/>
+                      <div style={{fontSize:11,color:pin.color,fontWeight:"bold"}}>{pin.name}</div>
+                    </div>
                     <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                       {[
                         ["Launch RW","$"+pin.stats.launchRW.toLocaleString()+"/mo"],

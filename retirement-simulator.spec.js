@@ -499,10 +499,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.0.0"', async ({ page }) => {
+  test('E5 — Version header shows "v4.1.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.0.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.0.0');
+    await expect(page.locator('text=v4.1.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.1.0');
   });
 
 });
@@ -958,10 +958,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.0.0', async ({ page }) => {
+  test('L1 — Version header shows v4.1.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.0.0').first()).toBeVisible();
-    console.log('  L1 — Version v4.0.0 confirmed');
+    await expect(page.locator('text=v4.1.0').first()).toBeVisible();
+    console.log('  L1 — Version v4.1.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1274,6 +1274,134 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     expect(result.paydown).toBeGreaterThan(0);              // debt absorbed first
     expect(result.hiDebtAfter).toBe(0);                     // debt-first paydown was enough to fully clear it
     expect(result.reserveFill).toBeGreaterThan(0);          // only THEN does the leftover fill reserve buckets
+  });
+
+});
+
+// ─── Group S: v4.1.0 Chart Legends, Per-Scenario Colors, FCF Draw Exclusion ──
+
+test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
+
+  const CHART_TITLES = [
+    'Total Work Income Required / mo',
+    'Free Cash Flow / mo',
+    'HI Debt Balance ($K)',
+    'Net Worth ($M)',
+    'Fixed Costs / mo',
+  ];
+
+  // Local copies -- Group R's sellProperty/setRange are scoped to that describe block.
+  async function setRange(locator, value) {
+    await locator.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(value));
+  }
+
+  async function sellProperty(page, propId, year, quarter) {
+    const card = page.locator(`[data-testid="property-${propId}-card"]`);
+    await card.scrollIntoViewIfNeeded();
+    await card.locator(`[data-testid="mode-toggle-${propId}"]`).getByRole('button', { name: 'Sell', exact: true }).click();
+    await page.waitForTimeout(200);
+    await setRange(page.locator(`[data-testid="sale-year-slider-${propId}"] input[type="range"]`), year);
+    await page.waitForTimeout(150);
+    if (quarter) {
+      await page.locator(`[data-testid="sale-quarter-toggle-${propId}"]`).getByRole('button', { name: 'Q' + quarter, exact: true }).click();
+      await page.waitForTimeout(150);
+    }
+  }
+
+  test('S1 — every comparison chart emits a legend entry per active pin (not just FCF)', async ({ page }) => {
+    await loadApp(page);
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Alpha Scenario');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+    await setSlider(page, '% of surplus above floor to keep', 100);
+    await page.waitForTimeout(300);
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Beta Scenario');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+    // Live mode off -- isolates the pinned-scenario legend entries per the bug report
+    await page.locator('button', { hasText: 'live on' }).click();
+    await page.waitForTimeout(300);
+
+    for (const title of CHART_TITLES) {
+      const card = page.locator('text=' + title).first().locator('xpath=ancestor::div[3]');
+      await expect(card, `${title} missing Alpha legend`).toContainText('Alpha Scenario');
+      await expect(card, `${title} missing Beta legend`).toContainText('Beta Scenario');
+    }
+    console.log('  S1 — legend entries for both pins confirmed on all ' + CHART_TITLES.length + ' comparison charts');
+  });
+
+  test('S2 — pin color picker updates the line + legend color on every chart', async ({ page }) => {
+    await loadApp(page);
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Color Test');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    const colorInput = page.locator('input[type="color"]').first();
+    await expect(colorInput).toBeVisible();
+    const NEW_COLOR = '#123456';
+    await colorInput.fill(NEW_COLOR);
+    await page.waitForTimeout(300);
+
+    // The picker itself reflects the new color
+    expect((await colorInput.inputValue()).toLowerCase()).toBe(NEW_COLOR);
+
+    // Every chart's legend swatch (our custom <svg><line stroke=.../></svg>) picks it up
+    const swatches = page.locator(`svg line[stroke="${NEW_COLOR}"]`);
+    const swatchCount = await swatches.count();
+    console.log('  S2 — swatches with new color: ' + swatchCount);
+    expect(swatchCount).toBeGreaterThanOrEqual(CHART_TITLES.length);
+
+    // The actual plotted line for the pin also uses the new color somewhere on the page
+    const linePaths = page.locator(`path[stroke="${NEW_COLOR}"]`);
+    expect(await linePaths.count()).toBeGreaterThanOrEqual(1);
+  });
+
+  test('S3 — Free Cash Flow (disc) excludes the one-time draw; draw still tracked separately', async ({ page }) => {
+    await loadApp(page);
+    // Sell 15th St in the SAME year as the default obligation (2026, Q2) so the
+    // one-time-inflow block fires AND the lifestyle draw (only applied in the
+    // obligation's own year) is nonzero -- isolates FCF-vs-draw in one month.
+    await sellProperty(page, 'fifteenth', 2026, 2);
+    // setSlider's proximity-based lookup can grab the wrong control this far down a long
+    // sidebar (it once matched a property-value slider instead) -- walk the DOM structure
+    // (label span -> row div -> sibling input) for a control that's guaranteed correct.
+    const drawSlider = page.locator('span', { hasText: 'One-time draw ($, at sale)' }).first()
+      .locator('xpath=ancestor::div[2]/input[@type="range"]');
+    await drawSlider.scrollIntoViewIfNeeded();
+    await drawSlider.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, '100000');
+    await page.waitForTimeout(300);
+
+    const result = await page.evaluate(() => {
+      const wf = window.__wfData || [];
+      const idx = wf.findIndex(r => (r.settleDraw || 0) > 0);
+      if (idx < 0) return null;
+      const drawRow = wf[idx];
+      const neighbors = [wf[idx - 1]?.disc, wf[idx + 1]?.disc, wf[idx + 2]?.disc].filter(v => v != null);
+      const neighborAvg = neighbors.reduce((a, b) => a + b, 0) / neighbors.length;
+      return {
+        settleDraw: drawRow.settleDraw,
+        disc: drawRow.disc,
+        neighborAvg,
+        hasDrawEvent: drawRow.events.some(e => /one-time draw/i.test(e)),
+      };
+    });
+    console.log('  S3 — ' + JSON.stringify(result));
+    expect(result).toBeTruthy();
+    expect(result.settleDraw).toBeGreaterThan(0);                 // draw still happened...
+    expect(result.hasDrawEvent).toBe(true);                       // ...and is tracked via its own event marker
+    // ...but Free Cash Flow (disc) must not include it -- no spike vs. neighbors
+    expect(result.disc).toBeLessThan(result.settleDraw);
+    expect(Math.abs(result.disc - result.neighborAvg)).toBeLessThan(result.settleDraw);
   });
 
 });
