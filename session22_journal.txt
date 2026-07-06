@@ -1,0 +1,193 @@
+=== SESSION 22 JOURNAL — v4.1.0 ===
+Date: 2026-07-06
+Session goal: chart legends on every comparison chart, per-scenario pin colors,
+Free Cash Flow / mo chart excludes the one-time sale draw. UI/chart layer only
+per the user's instruction -- no engine math or routing/waterfall changes.
+
+--- WHAT SHIPPED ---
+
+v4.1.0 -- chart legends, per-scenario colors, FCF excludes one-time draw.
+
+--- 1. PER-SCENARIO CHART LEGENDS (App.jsx, shared Chart component) ---
+
+Investigated the bug report ("only the Free Cash Flow chart shows scenario
+labels") by reading the shared `Chart` component (used by all 5 grid charts:
+Total Work Income Required, Free Cash Flow/mo, HI Debt Balance, Net Worth,
+Fixed Costs/mo). Finding: NONE of them actually rendered a per-pin legend --
+each `<Line>` had a `name={pin.name}` prop but there was no `<Recharts Legend>`
+or custom label anywhere in the component, on ANY of the 5 charts. (The
+separate "Cumulative Income vs Cost" chart, built independently below the
+grid, does have a working Recharts `<Legend>` with pin names -- that one was
+already fine and untouched.)
+
+Fix: added a small custom legend row (swatch + name, same visual style as the
+existing secondary/tertiary "Free Cash / -> Swept" header indicators) to the
+shared `Chart` component, right after the header and before the
+ResponsiveContainer. Renders one entry per visible pin plus "Live" when
+showLive is on. Since all 5 grid charts share this one component, this fixes
+all of them uniformly in one place.
+
+Bug caught during testing: the legend entries' outer wrapper was a `<div>`
+whose only text content was the pin's exact name (svg swatch contributes no
+text). This collided with an EXISTING test (D4) that does
+`page.locator('div').filter({hasText: /^PinName$/})` to find the pin card in
+the side panel -- with 5 new divs now also matching that exact-text pattern,
+`.first()` grabbed one of the new legend divs instead of the real pin card,
+and the test's downstream traversal broke. Fixed by using `<span>` instead of
+`<div>` for the legend row and each per-pin entry (flex layout works the same
+on span) -- Playwright's `locator('div')` no longer matches them. Re-ran D4 to
+confirm the fix; all other groups unaffected.
+
+--- 2. PER-SCENARIO PIN COLORS (App.jsx) ---
+
+pin.color already existed and already drove every chart's line color (set at
+creation time from PIN_COLORS[nextId % PIN_COLORS.length] -- a 6-color
+palette in defaults.js, already "sensible defaults for new pins" per spec).
+What was missing was any UI to CHANGE it after the fact.
+
+Added: a `setPinColor(id, color)` callback (mirrors removePin's shape --
+map/replace, setPins, persist via savePinsToStorage) and a small native
+`<input type="color">` swatch on each pinned-scenario card (Pinned Scenarios
+panel), wired to it. Because every chart's Line and the new legend both read
+pin.color directly and reactively, changing the swatch immediately repaints
+the line + legend on every comparison chart with no further plumbing needed.
+
+--- 3. FREE CASH FLOW CHART EXCLUDES THE ONE-TIME DRAW (App.jsx, wfData) ---
+
+Traced the FCF/mo chart's series: dataKey="surplus" -> chartData.surplus ->
+discByYear (annual avg of wfData's monthly `disc` field). Found the root
+cause at the `disc` computation in the monthly waterfall loop: `disc = (...)
++ _settleDrawMo` -- the one-time settlement draw was being added into the
+"what you keep as recurring Free Cash Flow" figure every month it occurred,
+spiking that month's average and blowing out the chart's Y-axis scale
+(surplusMax derives from max(chartData.surplus), so the whole chart's scale
+stretched to fit one lump-sum month).
+
+Fix: removed `+ _settleDrawMo` from `disc`. Confirmed via code trace that
+`disc` is a pure REPORTING value only -- it is pushed into the row output and
+consumed by chartData/the Month-by-Month table's "Free Cash" column, but
+never feeds back into ccBal/sophiaBal/nolanBal/savingsAcc or any other state
+carried to the next month's iteration -- so this is a display-only change,
+zero engine/waterfall impact. The draw itself is UNCHANGED in the pool ->
+obligation -> draw -> cascade routing (still leaves the pool via
+`split.draw` before planHiPaydown runs) and remains fully visible via:
+row.settleDraw (unchanged), its own event marker ("Obligation-year one-time
+draw $XXXK", unchanged), and the Cash-Flow Engine routing display (unchanged,
+reads rSettle.settleDraw from the annual engine separately).
+
+Note: engine.js's OWN annual "Free Cash Flow -- breakdown" table (liveRows,
+used only for the FCF chart's expandable breakdown panel) still includes
+drawInc inside its surplus/totalIncome, with drawInc also shown as its own
+labelled line item ("Lifestyle Draw"). Left this untouched -- it's the
+annual engine (out of scope per user's instruction), and unlike the monthly
+chart series it's an itemized accounting breakdown, not a single line that
+visually spikes.
+
+--- 4. TEST CHANGES (retirement-simulator.spec.js) ---
+
+E5/L1: version string checks v4.0.0 -> v4.1.0.
+
+New Group S (v4.1.0 Chart Legends / Colors / FCF Draw):
+- S1: pins two scenarios, turns live mode off, asserts BOTH pin names appear
+  inside each of the 5 chart cards' DOM subtree (title -> ancestor::div[3] is
+  the individual chart-card container, confirmed by re-reading the Chart
+  component's JSX nesting depth rather than copying the ancestor::div[4]/[5]
+  used by older, more loosely-scoped tests in this file).
+- S2: pins a scenario, sets its color swatch to a new hex value, asserts (a)
+  the input reflects it, (b) >=5 legend swatches (one per chart) now use that
+  stroke color, (c) at least one actual plotted line path uses it too.
+- S3: sells 15th St in the SAME year as the default obligation (2026 Q2 --
+  deliberately NOT offset like R11, because the lifestyle-draw eligibility
+  check in the monthly engine is gated on calYear===obligation.year) with a
+  $100K one-time draw set, then asserts: settleDraw>0 and its event marker
+  fired (draw still happened and is tracked), but disc (Free Cash Flow) for
+  that month is far below the draw amount and close to neighboring months'
+  average (no spike) -- proving the exclusion without hardcoding engine
+  internals.
+
+sellProperty/setRange helpers are scoped inside Group R's describe callback
+(not module-level) -- Group S needed its own local copies rather than
+reaching into Group R's closure.
+
+--- BUGS CAUGHT DURING TEST-WRITING (not app bugs, test-authoring pitfalls) ---
+
+- setSlider's proximity-based (`filter({near: ...})`) lookup grabbed the WRONG
+  control for "One-time draw ($, at sale)" -- it silently matched a property
+  VALUE slider (min/max 837500/3350000) instead, because that control sits
+  far down a long sidebar and the heuristic isn't reliable at that distance.
+  No error was thrown (a slider was found, just the wrong one), so this
+  produced a confusing "draw amount stayed 0" failure rather than an obvious
+  test-tooling error. Root-caused by dumping the located slider's min/max
+  before asserting anything else. Fixed by walking the actual DOM structure
+  (label span -> ancestor::div[2] -> sibling input[type=range]) instead of
+  relying on visual proximity -- deterministic regardless of scroll position
+  or sidebar length.
+- The D4 pre-existing-test regression above (legend divs colliding with
+  exact-text pin-name div lookups) -- see section 1.
+
+--- TEST RESULTS ---
+
+75/75 passed (3.3m), via direct `npx playwright test --reporter=list`
+(headless, not --headed -- ran faster and no transcript-capture concerns this
+session; run_tests.ps1 itself was not exercised this session). Verified
+twice: once mid-session after fixing D4/S3, once as a clean final run.
+
+--- FILES CHANGED ---
+
+src/App.jsx        disc no longer adds _settleDrawMo (monthly waterfall loop);
+                   new setPinColor callback + <input type="color"> swatch per
+                   pin card (Pinned Scenarios panel); new scenario-legend
+                   <span> row (swatch+name per visible pin, +"Live") added to
+                   the shared Chart component, applies to all 5 grid charts;
+                   header comment + on-screen badge -> v4.1.0.
+retirement-simulator.spec.js
+                   E5/L1 version string -> v4.1.0; new Group S (S1 legend-
+                   per-chart, S2 color propagation, S3 FCF draw exclusion)
+                   with local sellProperty/setRange helpers.
+
+--- SEMANTIC NOTES ---
+
+- pin.color was already fully plumbed through every chart's <Line> color
+  before this session -- the gap was purely the missing UI control to change
+  it and the missing legend to name what the color meant. Both are now fixed
+  by touching the color's single source of truth (pin.color) and the shared
+  Chart component (used by all 5 grid charts) -- no per-chart special-casing
+  needed.
+- `disc` (wfData row field) is now a pure ongoing-cash-flow number with no
+  one-time lump sums folded in, for BOTH the FCF/mo chart AND the Month-by-
+  Month table's "Free Cash" column (both read the same field) -- this was a
+  deliberate side effect of fixing at the source rather than special-casing
+  the chart's aggregation step, and is consistent with the semantic "Free
+  Cash Flow" is supposed to represent (recurring monthly draw-down capacity),
+  not "consistent with historical behavior."
+- The annual engine's (engine.js) own "surplus"/drawInc accounting is
+  UNCHANGED and untouched per the user's explicit engine-math boundary --
+  it's a different, itemized breakdown view (shows the draw as a separate
+  labelled row) rather than a single plotted line, so it wasn't in scope.
+
+--- OPEN BACKLOG (carried, untouched this session) ---
+
+[P1] Unify annual sweep model with wfData -- carried from session20/21.
+[P1] CPA rate calibration (6th sale tax still runs below the CPA sheet).
+[P2] Barberry/Lafayette mortgage origin date -- needs a real servicer stmt.
+[P2] Glossary needs a full v4 pass -- now also v4.1's legend/color additions.
+[P3] investedCash in defaults.js -- still orphaned, still flagged not fixed.
+[P3] run_tests.ps1 Start-Transcript reliability -- not re-tested this session
+     (used direct npx invocation throughout); worth checking next time
+     run_tests.ps1 itself is actually invoked.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. v4.1.0 is committed and test-green (75/75). Every comparison chart now
+   has a working legend + a user-adjustable per-scenario color; FCF/mo is
+   spike-free for sale-with-draw scenarios.
+2. If asked to touch the annual engine's own FCF breakdown table (drawInc
+   handling in engine.js), remember it's a DIFFERENT, itemized view from the
+   monthly chart's `disc` field fixed this session -- they're allowed to
+   disagree on whether the draw is folded in, since one is a single plotted
+   line (must not spike) and the other is a labelled itemized breakdown
+   (fine to show the draw as its own line AND in the total).
+3. When writing UI tests for sliders far down a long sidebar, prefer
+   structural DOM traversal (label -> parent -> sibling input) over
+   setSlider's proximity heuristic -- the heuristic silently picked the wrong
+   control this session with no thrown error.
