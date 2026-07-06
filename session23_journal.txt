@@ -1,0 +1,190 @@
+=== SESSION 23 JOURNAL — v4.1.1 / v4.1.2 ===
+Date: 2026-07-06
+Session goal: follow-up bug reports on the v4.1.0 chart legend/color work --
+(1) tooltip labels blank on non-FCF charts, (2) "debt clear" reference line on
+the FCF/mo chart not tracking the HI Debt Balance chart. Both reported via
+screenshots after the user found the v4.1.0 legend/color fix itself was
+working correctly (confirmed against the live app + Group S tests before
+touching anything, to avoid re-fixing something that wasn't broken).
+
+--- WHAT SHIPPED ---
+
+v4.1.1 -- fix tooltip labels on non-FCF comparison charts.
+v4.1.2 -- split the FCF chart's single "debt clear" marker into two distinct,
+correctly-labeled reference lines.
+
+--- 1. TOOLTIP LABELS BLANK ON NON-FCF CHARTS (v4.1.1, App.jsx) ---
+
+User's screenshots showed the v4.1.0 per-pin legend rendering correctly (pin
+names + colors visible at the top of Net Worth, HI Debt Balance, Fixed Costs)
+but hovering a point showed tooltip rows like ": $61" with no name before the
+colon -- only on the non-FCF charts.
+
+Root cause: the shared `Chart` component's `<Tooltip formatter>` had
+`if(!secondaryDataKey) return [fmtV, ""];` as its first line. `secondaryDataKey`
+is only ever set on the FCF/mo chart (the "Sweep" secondary line) -- so every
+other chart (Net Worth, HI Debt, Fixed Costs, Work Income Required) hit that
+line and got a hardcoded blank name for every series, Live or pinned, on
+every hover, regardless of the v4.1.0 legend fix.
+
+Fix: removed the blanket early return. The secondary/tertiary/"Free Cash"
+rename logic now only runs when `secondaryDataKey` exists (still FCF-only,
+unchanged behavior there); every other chart falls through to `return [fmtV,
+name]`, i.e. the actual `name` prop already set on each `<Line>` (`"Live"` or
+`pin.name`) -- the same value the legend already displays.
+
+New test: S4 -- pins a scenario named "Tooltip Test", hovers the Net Worth
+chart (the one from the bug report), reads every
+`.recharts-tooltip-item-name` element, asserts none are blank and that both
+"Live" and "Tooltip Test" appear.
+
+--- 2. "DEBT CLEAR" MARKER NOT TRACKING THE HI DEBT BALANCE CHART (v4.1.2) ---
+
+User's scenario: selling 6th St + paying down HI debt, deciding on SS start
+age. Reported two things:
+  (a) SS age 65->80 didn't move the FCF/mo chart at all.
+  (b) The FCF chart's "debt clear" vertical reference line didn't line up
+      with where the HI Debt Balance chart's line visually hit zero, and
+      moved in ways that didn't track that chart.
+
+Investigated (a) by driving both engines directly via a throwaway Playwright
+script against the running dev server (window.__wfData/__liveRows), rather
+than guessing from source:
+  - Confirmed disc (FCF/mo) is genuinely floor-clamped and IDENTICAL between
+    SS=65 and SS=70 while HI debt still has a balance -- everything above the
+    floor sweeps to debt regardless of SS timing, so disc pins at the floor
+    either way. This is by design, not a bug.
+  - Confirmed reqWork (Total Work Income Required) DOES move a lot with SS
+    age (e.g. $5,961/mo -> $8,498/mo in 2026 for SS 65 vs 70 in one test run)
+    -- required work income auto-compensates for delayed SS to keep the same
+    surplus/floor target, which is *why* FCF/mo doesn't move: the visible
+    effect of SS timing while debt is active is on the Work Income Required
+    chart, not FCF/mo. Reported this back to the user as expected behavior,
+    no code change.
+
+Investigated (b) and found a real bug: `debtClearYear` (App.jsx) was computed
+as "first year chartData.sweepToSavings > 0" -- but that's the year the
+surplus sweep REDIRECTS to savings, which lags the actual debt-zero moment by
+the "Grace period (whoop it up first)" slider (sweepDelay, 0-24 months,
+App.jsx ~3101) PLUS, in some parameter combinations, by the actual (separate)
+HI Debt Balance chart plotting the ANNUAL engine's hiDebt series while the old
+debtClearYear proxy was sourced from the MONTHLY engine's sweepToSavings --
+two different signals from two different engines, wearing the same label.
+
+Fix (per user's choice: "Both -- two markers", after I flagged the tradeoffs):
+  - `debtClearYear` now = first year `chartData.hiDebt <= 0` -- same series
+    the HI Debt Balance chart plots (annual engine, liveRows). Guaranteed to
+    align with that chart's own zero-crossing. Colored green (matches HI Debt
+    Balance chart's own $0 reference line).
+  - New `sweepToSavingsYear` = the OLD proxy computation, kept as-is but
+    correctly labeled "sweep -> savings" now that it's not masquerading as
+    debt-clear. Colored blue (matches the FCF chart's existing "Sweep"
+    legend color). Only rendered when it differs from debtClearYear.
+  - Exposed both as `window.__chartMarkers` (same test-scaffolding pattern as
+    __wfData/__liveRows) so tests can assert on the real computed values
+    instead of scraping chart pixel positions.
+
+IMPORTANT FINDING surfaced while stress-testing this fix, NOT fixed this
+session (user's explicit call: "ship the marker fix, defer this"):
+
+The annual engine (engine.js buildScenario, which drives liveRows / the HI
+Debt Balance chart) and the monthly engine (App.jsx wfData block, the
+doc-designated authoritative engine for HI-debt avalanche paydown) DISAGREE
+on when HI debt actually reaches zero -- by 2 years in one no-property-sale
+test case (annual: 2036, monthly: 2034, with sweepDelay=0 so grace period
+isn't the explanation). Both engines run their own month-by-month avalanche
+loop internally (annual engine's is at engine.js ~855-895, inside
+buildScenario's per-year loop; monthly engine's is the wfData block's own
+per-month avalanche) and they are not producing the same zero-crossing month
+for the same inputs -- a genuine violation of the "two engines must never
+disagree" invariant documented in CLAUDE.md, predating this session (not
+introduced by the v4.1.0/4.1.1/4.1.2 chart work).
+
+Practical consequence of shipping the "two markers" fix as-is: the two
+markers can render in a visually confusing order (a "sweep -> savings"
+marker appearing to the LEFT of "debt clear" on the calendar-year axis) in
+scenarios where the grace-period offset doesn't happen to counteract the
+annual/monthly gap. Confirmed via window.__chartMarkers with sweepDelay=0:
+sweepToSavingsYear=2034 < debtClearYear=2036. This is surfaced, not hidden --
+it's a real property of the underlying engine disagreement, and my fix
+correctly reflects each engine's own truth rather than picking a value that
+lies about one of them.
+
+New test: S5 -- confirms debtClearYear matches window.__liveRows' own hiDebt
+zero-crossing (the actual regression target), confirms both DOM labels
+render distinctly whenever the two computed years differ (true by default in
+this codebase's current param set: 2034 vs 2036), and re-checks the same
+contract holds after changing the grace-period slider.
+
+--- 3. TEST CHANGES (retirement-simulator.spec.js) ---
+
+E5/L1: version string checks v4.1.0 -> v4.1.1 -> v4.1.2 (two bumps this
+session, one per shipped fix).
+Group S gained S4 (tooltip labels) and S5 (debt-clear marker split).
+
+--- TEST RESULTS ---
+
+77/77 passed (3.4m), via direct `npx playwright test --reporter=list`.
+
+--- FILES CHANGED ---
+
+src/App.jsx          Tooltip formatter in the shared Chart component no
+                     longer blanks the series name on non-secondaryDataKey
+                     charts; debtClearYear retargeted to chartData.hiDebt<=0
+                     (annual engine, matches HI Debt Balance chart);
+                     new sweepToSavingsYear (old proxy, correctly labeled);
+                     FCF chart now renders both as separate reference lines
+                     (green "debt clear", blue "sweep -> savings", the
+                     latter only when it differs from the former); new
+                     window.__chartMarkers test-scaffolding export; header
+                     comment + on-screen badge -> v4.1.2 (via v4.1.1).
+retirement-simulator.spec.js
+                     E5/L1 version string -> v4.1.2; new S4 (tooltip name
+                     regression) and S5 (debt-clear marker split + parity
+                     contract) in Group S.
+
+--- OPEN BACKLOG ---
+
+[P1] ANNUAL VS MONTHLY ENGINE HI-DEBT-CLEAR DIVERGENCE (new, this session) --
+     buildScenario()'s per-year internal monthly avalanche loop (engine.js
+     ~855-895) and the wfData block's own per-month avalanche disagree on the
+     HI-debt zero-crossing month by ~2 years in at least one test case with
+     zero grace period, so it isn't explained by sweepDelay. Needs a
+     side-by-side month-by-month diff of the two loops' `_avail`/
+     `_splitProtect`/`xtra` (annual) vs `afterBuckets`/`cfSplitProtect`/`sweep`
+     (monthly) to find where they actually diverge -- candidates to check
+     first: whether the annual loop's `_avail` omits the same
+     reserve/buffer/maintenance top-up deductions that wfData's
+     `afterBuckets` includes before computing surplus-above-floor. User
+     explicitly deferred fixing this to a future session; the v4.1.2 marker
+     fix ships as-is (correct relative to each engine's own data) with this
+     known limitation.
+[P1] Unify annual sweep model with wfData -- carried from session20/21/22
+     (likely the SAME underlying issue as the new P1 above -- worth tackling
+     together next time).
+[P1] CPA rate calibration (6th sale tax still runs below the CPA sheet).
+[P2] Barberry/Lafayette mortgage origin date -- needs a real servicer stmt.
+[P2] Glossary needs a full v4 pass -- now also v4.1.1/4.1.2's tooltip/marker
+     changes.
+[P3] investedCash in defaults.js -- still orphaned, still flagged not fixed.
+[P3] run_tests.ps1 Start-Transcript reliability -- not re-tested this
+     session (used direct npx invocation throughout).
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. v4.1.2 is committed and test-green (77/77). Tooltips now name every
+   series on every comparison chart; the FCF chart's debt-clear marker
+   matches the HI Debt Balance chart's own zero-crossing, with a second
+   distinctly-labeled marker for when the sweep actually redirects to
+   savings.
+2. The annual/monthly HI-debt-clear divergence (P1 above) is the important
+   thing to pick up next -- it's likely the root cause behind more than just
+   this session's marker confusion (e.g. any stat or chart that mixes
+   liveRows-derived and wfData-derived debt timing could show similar
+   mismatches). Start by instrumenting both loops' month-by-month hiDebt
+   trajectory for the SAME scenario side by side (window.__liveRows vs
+   window.__wfData already expose both) before touching either engine's
+   code.
+3. window.__chartMarkers is new test scaffolding (debtClearYear,
+   sweepToSavingsYear) -- same category as __wfData/__liveRows, not a public
+   API, only for Playwright.
