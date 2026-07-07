@@ -1,4 +1,4 @@
-// v4.1.4 -- fix pinned-scenario FCF chart series leaking the one-time settlement draw (pinned path now excludes it via a shared helper, matching the live path's wfData disc field)
+// v4.1.5 -- fix pinned-scenario FCF chart running ~3x too high after HI debt clears (annual engine now computes a chart-only fcfChart field that applies the lifestyleSplit%/floor split regardless of debt state, superseding the v4.1.4 draw-only fix)
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -818,14 +818,15 @@ export default function App(){
     // Aggregate monthly wfData into annual averages for the FCF chart.
     // Use disc (monthly engine's actual kept FCF) instead of annual engine surplus —
     // this ensures lifestyleSplit slider and graceDone sweep logic are reflected correctly.
-    // v4.1.4: shared FCF-display helper for any place that falls back to the
-    // annual engine's raw `surplus` field (no wfData available for that row) --
-    // excludes the one-time settlement draw, same exclusion wfData's `disc`
-    // applies (the draw funds one-time uses, not recurring free cash flow).
-    // Used for both the live fallback below AND the pinned series, so the two
-    // can't drift apart on this again (pinned scenarios have no wfData at all,
-    // since pins only run the annual engine -- see addPin).
-    const annualFcfExDraw = (row) => Math.max(0, (row?.surplus||0) - (row?.settleDraw||0));
+    // v4.1.5: for any place that falls back to the annual engine (no wfData
+    // row for live, or any pinned scenario -- pins only ever run the annual
+    // engine, see addPin), use engine.js's `fcfChart` field instead of raw
+    // `surplus`. `surplus` reports full disposable income once HI debt
+    // clears (needed as-is for reqWork/NW elsewhere); `fcfChart` applies the
+    // same split%/floor-protected "kept FCF" logic regardless of debt state
+    // AND excludes the one-time settlement draw -- both computed once in
+    // engine.js so the live fallback and pinned series can't drift apart.
+    const annualFcfExDraw = (row) => Math.max(0, row?.fcfChart||0);
     const discByYear={}, sweepByYear={}, totalSweepByYr={}, cntByYear={}, savAccByYear={}, abByYear={}, floorByYear={};
     const fc_mtgByYr={}, fc_hlthByYr={}, fc_coreByYr={}, fc_famByYr={}, fc_hiMinsByYr={}, fc_ropByYr={}, fc_propByYr={}, fc_taxByYr={};
     (wfData||[]).forEach(r=>{
@@ -1013,7 +1014,7 @@ export default function App(){
   useEffect(()=>{
     if(typeof window !== 'undefined'){ window.__chartMarkers = {debtClearYear, sweepToSavingsYear}; }
   },[debtClearYear, sweepToSavingsYear]);
-  // v4.1.4: expose chartData itself (same test-scaffolding pattern) so tests
+  // v4.1.4/4.1.5: expose chartData itself (same test-scaffolding pattern) so tests
   // can assert on the actual per-pin FCF series (pin_<id>_di) instead of
   // scraping chart pixels/tooltips.
   useEffect(()=>{
@@ -1651,7 +1652,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.4</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.5</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>

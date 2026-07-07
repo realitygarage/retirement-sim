@@ -499,10 +499,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.1.4"', async ({ page }) => {
+  test('E5 — Version header shows "v4.1.5"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.4').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.1.4');
+    await expect(page.locator('text=v4.1.5').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.1.5');
   });
 
 });
@@ -958,10 +958,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.1.4', async ({ page }) => {
+  test('L1 — Version header shows v4.1.5', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.4').first()).toBeVisible();
-    console.log('  L1 — Version v4.1.4 confirmed');
+    await expect(page.locator('text=v4.1.5').first()).toBeVisible();
+    console.log('  L1 — Version v4.1.5 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1478,7 +1478,7 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     }
   });
 
-  test('S6 — pinned scenario\'s FCF series excludes the one-time draw, same contract as live (v4.1.4)', async ({ page }) => {
+  test('S6 — pinned scenario\'s FCF series excludes the one-time draw, same contract as live (v4.1.5)', async ({ page }) => {
     await loadApp(page);
     // Same setup as S3 (sale + draw land in the same year) -- pin it with NO
     // further changes, so the pin's paramSnapshot/rows are for the identical
@@ -1511,9 +1511,9 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
       // pin.rows is buildScenario(liveParams) captured at pin time with no
       // subsequent changes -- so window.__liveRows' own row for this year is
       // byte-identical to the pin's row, and gives the exact expected value
-      // straight from the fields the fix subtracts (surplus - settleDraw).
+      // straight from the field the v4.1.5 fix computes (engine.js's fcfChart).
       const annualRow = liveRows.find(r => r.cal === drawYear);
-      const expectedFixed = Math.max(0, (annualRow?.surplus || 0) - (annualRow?.settleDraw || 0));
+      const expectedFixed = Math.max(0, annualRow?.fcfChart || 0);
       return {
         settleDraw: wf[idx].settleDraw,
         pinKey,
@@ -1526,11 +1526,53 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     expect(result).toBeTruthy();
     expect(result.pinKey).toBeTruthy();
     expect(result.settleDraw).toBeGreaterThan(0);
-    // The pre-fix bug used Math.max(0, annualRawSurplus) directly, leaking the
-    // draw straight through -- assert the chart value matches the exclusion
-    // formula exactly, not the raw (leaked) annual surplus.
+    // The pre-v4.1.4 bug used Math.max(0, annualRawSurplus) directly, leaking
+    // the draw straight through -- assert the chart value matches engine.js's
+    // fcfChart field exactly, not the raw (leaked) annual surplus.
     expect(result.pinnedAtDrawYear).toBe(result.expectedFixed);
     expect(result.pinnedAtDrawYear).not.toBe(Math.max(0, result.annualRawSurplus));
+  });
+
+  test('S7 — pinned scenario\'s FCF stays close to live after HI debt clears (v4.1.5, post-debt-clear parity)', async ({ page }) => {
+    await loadApp(page);
+    // Sell 6th St (home) in 2027 -- proceeds clear HI debt in the sale year
+    // itself. Pre-v4.1.5, the annual engine reported the FULL disposable
+    // income as `surplus` once debt cleared (accel forced to 0), while the
+    // monthly engine's `disc` correctly kept only lifestyleSplit% of it --
+    // pins (annual-engine only) ran ~3x too high in every year after.
+    await sellProperty(page, 'sixth', 2027);
+
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Post-Clear Parity Test');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    const result = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      if (!cd.length) return null;
+      const pinKey = Object.keys(cd[0]).find(k => /^pin_.*_di$/.test(k));
+      const debtClearYr = cd.find(r => (r.hiDebt || 0) <= 0)?.year;
+      if (!debtClearYr) return { debtClearYr: null };
+      // Check several years after debt clears (skip the clear year itself --
+      // proration/rounding there is noisier -- and check a spread through the
+      // horizon so a reintroduced divergence anywhere can't hide).
+      const checkYears = [debtClearYr + 1, debtClearYr + 3, debtClearYr + 6, debtClearYr + 10]
+        .filter(y => cd.some(r => r.year === y));
+      const samples = checkYears.map(y => {
+        const row = cd.find(r => r.year === y);
+        return { year: y, live: row.surplus, pinned: row[pinKey], ratio: row[pinKey] / (row.surplus || 1) };
+      });
+      return { debtClearYr, pinKey, samples };
+    });
+    console.log('  S7 — ' + JSON.stringify(result));
+    expect(result).toBeTruthy();
+    expect(result.debtClearYr).toBeTruthy();
+    expect(result.pinKey).toBeTruthy();
+    expect(result.samples.length).toBeGreaterThan(0);
+    for (const s of result.samples) {
+      // Pre-fix this ratio ran ~3x (2.7-3.4) at every one of these years.
+      expect(s.ratio, `year ${s.year}: live=${s.live} pinned=${s.pinned}`).toBeGreaterThan(0.5);
+      expect(s.ratio, `year ${s.year}: live=${s.live} pinned=${s.pinned}`).toBeLessThan(1.5);
+    }
   });
 
 });

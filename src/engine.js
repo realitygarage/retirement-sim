@@ -960,6 +960,19 @@ export function buildScenario(p) {
     const annualSweepToSav = Math.max(0, (debtCleared ? surplusAboveProtect : 0) - mtgExtraFromSurplusYr) + (wfSavByYear[cal]||0);
     const totalOut=baseOut+accel;
     const surplus =totalIncome-totalOut;
+    // v4.1.5: chart-only FCF value that (a) excludes the one-time settlement
+    // draw and (b) applies the same lifestyleSplit%/diCap floor split to
+    // disposable income REGARDLESS of debt state -- `surplus` above only
+    // does this while HI debt is still active (accel absorbs the excess);
+    // once debt clears, accel is forced to 0 and `surplus` reports the FULL
+    // baseDI instead of the split-protected "kept" portion, which is what
+    // the monthly wfData engine's `disc` field has always done via
+    // cfSplitProtect. This mirrors that behavior in the annual engine
+    // WITHOUT touching `surplus`/`accel`/`reqWork`/`nw` (still needed
+    // elsewhere as-is) -- purely an additional read-only chart field.
+    const baseDIExDraw = baseDI - (drawByYear[cal]||0);
+    const splitProtectExDraw = Math.max(p.diCap*12, baseDIExDraw*(p.lifestyleSplit/100));
+    const fcfChart = Math.max(0, Math.min(baseDIExDraw, splitProtectExDraw));
     const passive =pension+(yourSs+brendaSs)*12+rental;
     const reqWork =Math.max(0,totalOut-passive);
     const nw      =Math.round((dplxVal+lafVal+primVal+cashAst-dplxBal-lafBal-primBal-hiDebt)/1000);
@@ -973,6 +986,7 @@ export function buildScenario(p) {
       cal, yr,
       cashAst,
       surplus:  Math.round(surplus/12),
+      fcfChart: Math.round(fcfChart/12),
       sweepToSavings: Math.round(annualSweepToSav/12),
       drawInc:  Math.round(drawInc/12),
       reqWork:  Math.round(reqWork/12),

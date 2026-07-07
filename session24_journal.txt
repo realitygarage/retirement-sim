@@ -1,4 +1,4 @@
-=== SESSION 24 JOURNAL — v4.1.4 ===
+=== SESSION 24 JOURNAL — v4.1.4 / v4.1.5 ===
 Date: 2026-07-07
 Session goal: bug report -- pinning a scenario with NO changes to live should
 produce an identical Free Cash Flow line, but the pinned line showed a ~$15K
@@ -10,6 +10,10 @@ settlement draw) was applied on the live path but not the pinned path.
 
 v4.1.4 -- pinned-scenario FCF chart series no longer leaks the one-time
 settlement draw into Free Cash Flow.
+v4.1.5 -- pinned-scenario FCF chart no longer runs ~3x too high in every
+year after HI debt clears (a second, larger, independent bug found while
+verifying v4.1.4 -- see section 4). Supersedes v4.1.4's fix with a more
+precise formula computed once in engine.js.
 
 --- 1. CONFIRMED THE DIAGNOSIS: TWO SEPARATE CODE PATHS (App.jsx) ---
 
@@ -25,13 +29,13 @@ annual engine (engine.js ~806-807) explicitly adds the draw into
 chart's pinned series (`pin_<id>_di`, App.jsx ~928) read
 `Math.max(0, pin.rows[i]?.surplus)` directly -- leaking the draw as a spike.
 
-Fix: added a shared helper in the `chartData` memo --
+v4.1.4 fix: added a helper in the `chartData` memo --
 `annualFcfExDraw(row) = Math.max(0, row.surplus - (row.settleDraw||0))` --
-used both for the pinned series and for live's own no-wfData fallback path
-(the `Math.max(0,r.surplus)` branch that only fires if `discByYear[r.cal]` is
-null), so the two paths can't drift apart on this again.
+used both for the pinned series and for live's own no-wfData fallback path,
+so the two paths can't drift apart on this again. (Superseded by v4.1.5,
+section 4 -- the helper's body changed but its call sites didn't.)
 
---- 2. VERIFICATION FOUND A SECOND, LARGER, PRE-EXISTING BUG (not fixed) ---
+--- 2. VERIFICATION FOUND A SECOND, LARGER, PRE-EXISTING BUG ---
 
 Before writing the closing test, drove the real app (sell 6th St 2027, later
 also a $100K one-time draw on 15th St 2026) and diffed live vs. pinned FCF
@@ -45,101 +49,140 @@ annual engine reports the FULL disposable income (`baseDI`) as `surplus`,
 while the monthly engine reports only `lifestyleSplit%` of it as `disc` (30%
 default -- the rest sweeps to savings by design). These two quantities happen
 to coincide while debt is still active (both effectively floor/split-
-protected) and permanently diverge once it clears. This is the same "annual
-vs monthly engines disagree" class of issue already flagged as open P1 in
-session 23 (there: HI-debt-clear TIMING; here: the FCF VALUE itself, once
-cleared) -- likely the same underlying architecture gap, not yet unified.
+protected) and permanently diverge once it clears.
 
 Flagged this to the user before proceeding rather than silently writing a
-test that overclaims live/pinned equality. User's call: ship the draw-leak
-fix only (as originally scoped -- "chart attribution only, don't touch pool
-math"), narrow the closing test to the draw-leak contract specifically, and
-log the post-debt-clear divergence as new backlog (see below) rather than
-attempt a fix this session.
+test that overclaims live/pinned equality. Shipped v4.1.4 (draw-leak fix
+only) first, with the divergence logged as new backlog and a narrowly-scoped
+closing test (S6) that deliberately did NOT compare pinned vs. live directly.
 
---- 3. TEST CHANGES (retirement-simulator.spec.js) ---
+--- 3. USER SAW THE BUG LIVE, SESSION CONTINUED (v4.1.5) ---
 
-E5/L1: version string v4.1.3 -> v4.1.4.
+User reported (via screenshot) that a pinned "sell 6th" scenario still showed
+a bump in the FCF chart after v4.1.4 shipped -- exactly the section-2
+divergence, visible in the wild on the very first real scenario tried after
+the "fix." Reproduced headlessly (sell 6th 2027, no draw at all, pin
+identical to live): pinned ran $6,193-$7,806/mo vs. live's $1,945-$2,376/mo
+in every year 2027-2046, confirming section 2's finding was not a corner case
+-- it fires on nearly any "sell + pay off debt" scenario, more visible in
+practice than the draw-leak v4.1.4 fixed. User's framing of the desired
+behavior: money that lets you pay off debt early (freed-up cash after a
+sale) should sweep to savings, not count as recurring take-home Free Cash
+Flow -- same principle as the one-time draw, just for the ongoing
+lifestyleSplit-vs-floor split rather than the one-time inflow.
 
-New S6 (Group S): pins the identical sale+draw scenario S3 already validates
-on the live path (sell 15th St 2026 Q2 + $100K one-time draw, same year as
-the default obligation so the draw actually fires), then asserts the pinned
-FCF value at the draw year equals `Math.max(0, surplus - settleDraw)` exactly
--- not the raw (leaked) `Math.max(0, surplus)`. Deliberately does NOT compare
-the pinned value directly against the live value's own number: the two
-engines are independently computed by design (CLAUDE.md), and the known
-post-debt-clear divergence (section 2) makes exact numeric parity an unsafe
-general assumption outside the specific window this test targets. Exposed
-`window.__chartData` as new test scaffolding (same pattern as
-__wfData/__liveRows/__chartMarkers) so the test can read the actual
-`pin_<id>_di` chart series instead of scraping tooltips/pixels.
+--- 4. v4.1.5 FIX: engine.js FIELD, NOT AN App.jsx PATCH ---
 
-Verified test discipline directly: reverted just the one-line fix (kept
-`window.__chartData` in place) and re-ran S6 -- failed as expected
-(pinnedAtDrawYear=2721 != expectedFixed=0). Restored the fix -- passed.
+Traced why `surplus` can't just be edited in place: `surplus` fields into
+`reqWork` and `nw` elsewhere in the same function (engine.js ~961-965) --
+changing its formula risks moving numbers used outside the FCF chart. Also
+the App.jsx-side "subtract settleDraw from surplus" approach from v4.1.4 is
+only a crude approximation of what the monthly engine actually does (the
+draw never touches `totalIncome`, so its ACTUAL effect on `disc` scales with
+whatever fraction of disposable income currently flows through
+lifestyleSplit%/floor, not a flat 1:1 subtraction) -- confirmed empirically:
+a $100K draw only moved the affected year's value by ~$2,700, not ~$100K.
+
+Fix: added ONE new, purely-additive, read-only field to buildScenario()'s row
+output -- `fcfChart` (engine.js ~962-975) -- computed as:
+  baseDIExDraw       = baseDI - drawByYear[cal]           (excl. the draw)
+  splitProtectExDraw = max(diCap*12, baseDIExDraw*lifestyleSplit%)
+  fcfChart           = max(0, min(baseDIExDraw, splitProtectExDraw))
+This reduces to the EXACT pre-existing `surplus` value whenever there's no
+draw and debt is still active (min(baseDI,splitProtect) is algebraically what
+`surplus` already equals in that branch -- see the derivation in code
+comments), and correctly applies the split-protected "kept" amount once debt
+clears (the actual fix), for ANY debt state, with the draw cleanly excluded
+throughout. `surplus`, `accel`, `reqWork`, `nw`, `totalOut` are completely
+untouched -- `fcfChart` is a new sibling field, not a replacement.
+
+App.jsx: `annualFcfExDraw()`'s body now just returns `row.fcfChart` (both
+call sites -- the pinned series and live's own no-wfData fallback --
+unchanged, so this is a one-line implementation swap, not a call-site
+rewrite).
+
+--- 5. TEST CHANGES (retirement-simulator.spec.js) ---
+
+E5/L1: version string v4.1.3 -> v4.1.4 -> v4.1.5.
+
+S6 (from v4.1.4, updated for v4.1.5): still pins the sale+draw scenario S3
+validates on the live path, but now asserts the pinned value equals
+`row.fcfChart` exactly (738, in this scenario) rather than the old crude
+`surplus - settleDraw` approximation (which would have asserted 0 -- wrong,
+per section 4's finding that the draw's real effect is partial, not 1:1).
+
+New S7 (Group S): pins "sell 6th St 2027" with NO draw at all -- the exact
+class of scenario from the user's screenshot -- and checks the pinned/live
+FCF ratio at 4 spread-out years after debt clears (clear+1, +3, +6, +10),
+asserting each stays within 0.5x-1.5x of live. Pre-fix this ratio was a
+consistent ~2.9-3.3x at every sampled year; post-fix it's ~0.86-0.99x.
+
+Verified test discipline directly for both fixes: reverted engine.js's
+`fcfChart` computation to the pre-v4.1.5 shape (`Math.max(0, surplus)`,
+i.e. what v4.1.4 shipped) and re-ran S6+S7 -- both failed as expected
+(S6: 2721 != 738; S7: ratios ~2.9-3.3 vs. required <1.5). Restored the real
+fix -- both passed. Also re-verified the original v4.1.4-only revert (S6
+alone) still fails/passes correctly at that step of the chain.
 
 --- TEST RESULTS ---
 
-78/78 passed (3.5m), via `npx playwright test --reporter=list` against the
-dev server. Includes the new S6.
+79/79 passed (3.5m), via `npx playwright test --reporter=list` against the
+dev server. Includes S6 (updated) and the new S7.
 
 --- FILES CHANGED ---
 
-src/App.jsx          New `annualFcfExDraw()` helper in the `chartData` memo;
-                     used by both the pinned series (`pin_<id>_di`) and live's
-                     no-wfData fallback branch. New `window.__chartData`
-                     export (test scaffolding only). Header comment + badge
-                     -> v4.1.4.
+src/engine.js         New `fcfChart` field on buildScenario()'s per-year row
+                     (baseDIExDraw/splitProtectExDraw/fcfChart, ~962-975) --
+                     purely additive, `surplus`/`accel`/`reqWork`/`nw`
+                     unchanged.
+src/App.jsx          `annualFcfExDraw()` helper (chartData memo) now reads
+                     `row.fcfChart` instead of computing its own
+                     `surplus - settleDraw` approximation; both call sites
+                     (pinned series, live no-wfData fallback) unchanged.
+                     `window.__chartData` export (test scaffolding, from
+                     v4.1.4) unchanged. Header comment + badge -> v4.1.5.
 retirement-simulator.spec.js
-                     E5/L1 version string -> v4.1.4; new S6 (pinned FCF
-                     draw-exclusion parity, Group S).
+                     E5/L1 version string -> v4.1.5; S6 updated to assert
+                     against `fcfChart` instead of the old approximation;
+                     new S7 (post-debt-clear pinned/live FCF ratio parity,
+                     Group S).
 
 --- OPEN BACKLOG ---
 
-[P1] ANNUAL VS MONTHLY POST-DEBT-CLEAR FCF DIVERGENCE (new, this session).
-     Once HI debt clears, engine.js's annual `surplus` = full baseDI, while
-     App.jsx's monthly `disc` = `lifestyleSplit%` of it (cfSplitProtect) --
-     the rest sweeps to savings. Confirmed ~3x gap in a real scenario (2028:
-     $7,806 pinned/annual vs $2,369 live/monthly), unrelated to any draw.
-     Since pins ONLY run the annual engine (no monthly wfData at all -- see
-     addPin), every pinned scenario's FCF chart line will run high vs. its
-     live counterpart in any year after debt clears, for any lifestyleSplit
-     < 100%. Likely overlaps with (is possibly the same root cause family as)
-     the existing "annual vs monthly HI-debt-clear timing" P1 from session 23
-     -- both are the annual engine's per-year approximation vs. the monthly
-     waterfall's tiered/split logic disagreeing on what happens after debt is
-     paid off. A real fix likely means either (a) making annual `surplus`
-     apply the same split logic post-clear (risk: `surplus` also feeds
-     reqWork/NW elsewhere in engine.js, needs care), or (b) the larger
-     "unify annual sweep model with wfData" project already on the backlog.
-     Start by checking whether fixing this also narrows or resolves the
-     session23 HI-debt-clear-timing gap, since both stem from the annual
-     engine's per-year surplus/accel math not mirroring the monthly tiers.
-[P1] ANNUAL VS MONTHLY ENGINE HI-DEBT-CLEAR DIVERGENCE -- carried from
-     session23 (~1yr gap, 2035 wfData vs 2036 annual in one scenario). Next
-     suspect per that journal: `_work0`/`_ss0`/`_rental0` in buildScenario
-     computed once per year and held flat across the internal per-month loop
-     (same shape as the already-fixed health-cost bug). See session23 journal
-     section 4 and "HOW TO PICK UP FROM HERE" for the concrete next check.
-[P1] Unify annual sweep model with wfData -- carried from session20/21/22/23,
-     likely the umbrella both P1s above eventually fold into.
+[P1] ANNUAL VS MONTHLY ENGINE HI-DEBT-CLEAR TIMING DIVERGENCE -- carried from
+     session23 (~1yr gap, 2035 wfData vs 2036 annual in one scenario). This
+     is a DIFFERENT divergence from the one fixed this session (that was the
+     FCF VALUE after clearing; this is WHEN clearing happens at all -- both
+     stem from the annual engine's per-year approximation vs. the monthly
+     waterfall's tiered logic, but are separate bugs). Next suspect per
+     session23: `_work0`/`_ss0`/`_rental0` in buildScenario computed once per
+     year and held flat across the internal per-month loop (same shape as
+     the already-fixed health-cost bug). See session23 journal section 4 and
+     "HOW TO PICK UP FROM HERE" for the concrete next check. Worth
+     re-checking whether this session's fcfChart work changes anything here
+     first (it shouldn't -- fcfChart doesn't touch hiDebt/ccBal/accel -- but
+     confirm empirically before assuming).
+[P1] Unify annual sweep model with wfData -- carried from session20/21/22/23.
+     This session's fcfChart fix narrows the practical gap (FCF chart values
+     now agree well) but the underlying "two engines, two independent
+     implementations of the same waterfall" architecture is still there --
+     fcfChart is a targeted patch, not the unification.
 [P1] CPA rate calibration (6th sale tax still runs below the CPA sheet).
 [P2] Barberry/Lafayette mortgage origin date -- needs a real servicer stmt.
-[P2] Glossary needs a full v4 pass -- now also v4.1.4's pinned-FCF fix.
+[P2] Glossary needs a full v4 pass -- now also v4.1.4/4.1.5's pinned-FCF fix.
 [P3] investedCash in defaults.js -- still orphaned, still flagged not fixed.
 [P3] run_tests.ps1 Start-Transcript reliability -- not re-tested this
      session (used direct npx invocation throughout, per session23 fallback).
 
 --- HOW TO PICK UP FROM HERE ---
 
-1. v4.1.4 is committed and test-green (78/78). Pinned scenarios' FCF chart
-   lines no longer spike from a leaked one-time draw.
-2. The bigger issue is the post-debt-clear FCF divergence above -- it means
-   pinned-vs-live FCF comparisons are still unreliable in any scenario where
-   HI debt clears within the modeled horizon (the majority of realistic
-   scenarios, eventually). This is a real limitation to be upfront about if
-   the user compares pinned scenarios' FCF chart post-debt-clear before it's
-   fixed.
-3. window.__chartData is now exposed test scaffolding, same category as
-   __wfData/__liveRows/__chartMarkers -- not a public API, only for
-   Playwright.
+1. v4.1.5 is committed and test-green (79/79). Pinned scenarios' FCF chart
+   lines no longer spike from a leaked one-time draw (v4.1.4) AND no longer
+   run ~3x high after HI debt clears (v4.1.5) -- both verified against a
+   real "sell 6th St" scenario, the same one from the user's bug screenshot.
+2. The remaining P1s above are about the annual/monthly engines' *timing*
+   disagreement (when debt clears) and the broader architectural duplication
+   -- not the FCF *value* divergence, which this session closed.
+3. window.__chartData is exposed test scaffolding (from v4.1.4), same
+   category as __wfData/__liveRows/__chartMarkers -- not a public API, only
+   for Playwright.
