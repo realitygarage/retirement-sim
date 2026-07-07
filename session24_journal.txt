@@ -1,4 +1,4 @@
-=== SESSION 24 JOURNAL — v4.1.4 / v4.1.5 ===
+=== SESSION 24 JOURNAL — v4.1.4 / v4.1.5 / v4.1.6 / v4.1.7 ===
 Date: 2026-07-07
 Session goal: bug report -- pinning a scenario with NO changes to live should
 produce an identical Free Cash Flow line, but the pinned line showed a ~$15K
@@ -14,6 +14,15 @@ v4.1.5 -- pinned-scenario FCF chart no longer runs ~3x too high in every
 year after HI debt clears (a second, larger, independent bug found while
 verifying v4.1.4 -- see section 4). Supersedes v4.1.4's fix with a more
 precise formula computed once in engine.js.
+v4.1.6 -- pinned-scenario Sweep line (the blue dashed secondary series) no
+longer badly overstated vs. live -- added a `sweepChart` field, the direct
+complement of `fcfChart`, instead of reusing raw `debtSweep+sweepToSavings`
+(see section 6).
+v4.1.7 -- fixed the actual root cause behind both the residual FCF gap and
+most of the Sweep gap: `fcfChart`'s floor term used `diCap` (a bundled
+discFloor+rdTopUp+obTopUp figure) instead of the bare `discFloor` the
+monthly engine actually compares against, double-counting the rainy-day/
+op-buffer top-ups (see section 7).
 
 --- 1. CONFIRMED THE DIAGNOSIS: TWO SEPARATE CODE PATHS (App.jsx) ---
 
@@ -124,28 +133,98 @@ i.e. what v4.1.4 shipped) and re-ran S6+S7 -- both failed as expected
 fix -- both passed. Also re-verified the original v4.1.4-only revert (S6
 alone) still fails/passes correctly at that step of the chain.
 
+--- 6. USER FOUND A RELATED GAP v4.1.5 MISSED: THE PINNED SWEEP LINE (v4.1.6) ---
+
+After v4.1.5 shipped, user pinned a fresh "easy st - 1" scenario with NO
+changes to live and spotted (via screenshot) that the FCF/di line was much
+closer now, but the chart's secondary "Sweep" series (blue dashed) was
+wildly off -- pinned $9,317/mo vs. live's $1,564/mo in a routine, non-sale,
+non-draw year. Root cause: `pin_<id>_sweep` (App.jsx ~930) still read the
+raw `debtSweep + sweepToSavings` fields directly, which is exactly the
+pre-fcfChart pattern v4.1.5 replaced for the FCF line -- `sweepToSavings`
+uses `baseDI` (not draw-excluded) and only turns on post-clear, inheriting
+both bugs v4.1.5 fixed for `surplus`/FCF.
+
+Fix: added `sweepChart = max(0, baseDIExDraw - fcfChart)` to
+buildScenario()'s row output -- the direct algebraic complement of
+`fcfChart`, purely additive (doesn't touch `debtSweep`/`sweepToSavings`,
+which are still correctly used elsewhere for pin NW/savings accumulation,
+where including the real draw amount is desired). Swapped
+`pin_<id>_sweep` to read `row.sweepChart`.
+
+--- 7. STILL OFF -- FOUND THE REAL ROOT CAUSE ONE LEVEL DOWN (v4.1.7) ---
+
+v4.1.6 improved the Sweep line (9,317 -> 360 vs. live's 1,564) but flipped
+it to badly UNDER-shooting instead, and the FCF line still didn't match
+either ($1,700 pinned vs. $800 live, same identical-params pin). Traced by
+reconstructing the arithmetic from the tooltip values rather than guessing:
+fcfChart(1700) + sweepChart(360) = baseDIExDraw(~2060/mo), and the annual
+model's `splitProtectExDraw` was hitting its floor branch at exactly 1700 --
+which is `discFloor(800) + rdTopUp(400) + obTopUp(500)` = `diCap`, the app's
+default values, confirming `fcfChart`/`sweepChart` were using `p.diCap` as
+the floor. But the monthly engine's own floor comparison (`cfSplitProtect`
+in the wfData block) uses `effectiveFloor` = bare `discFloor` (800) alone --
+rdTopUp/obTopUp are already subtracted from `available` earlier in the
+monthly waterfall as their own tiers, so folding them into the floor AGAIN
+via `diCap` double-counted them, inflating the annual model's "kept" amount
+by exactly the rd/ob top-up sum and starving the swept amount by the same.
+
+Fix: `splitProtectExDraw` now uses `p.discFloor*12` instead of `p.diCap*12`.
+Also added `discFloor: 800` to `DEFAULTS` in defaults.js (it previously only
+existed in the app-facing `SC_DEFAULTS`) so direct `buildScenario(makeParams
+({...}))` calls -- used by several existing tests that bypass the `sc`
+spread -- don't get `NaN` from `p.discFloor` being undefined.
+
+Result after v4.1.7: user confirmed "mostly fix, still a bit of difference,
+but only a few hundred dollars" -- explicitly deferred to a later
+refactor rather than chasing further now (see Open Backlog). The likely
+remaining cause is the deeper, pre-existing annual-vs-monthly total
+disagreement noted in the P1 "Unify annual sweep model with wfData" item:
+the annual model's `baseDI` doesn't subtract the ongoing monthly rd/ob
+top-up *contributions* the way the monthly engine's `available` does (only
+the floor-comparison threshold was fixed here, not the income total feeding
+into it) -- this was NOT chased further per the user's explicit call.
+
 --- TEST RESULTS ---
 
-79/79 passed (3.5m), via `npx playwright test --reporter=list` against the
-dev server. Includes S6 (updated) and the new S7.
+v4.1.6/v4.1.7 were NOT run against the Playwright suite this session --
+user said the remaining few-hundred-dollar gap is acceptable for now and to
+journal + push without further test changes. `retirement-simulator.spec.js`
+still asserts the v4.1.5 version string; it was not touched and will need
+its version-string assertions (E5/L1) and likely a new S-group test bumped
+to v4.1.7 and re-validated next time the suite runs.
+
+v4.1.4/v4.1.5 (this session, earlier): 79/79 passed (3.5m), via
+`npx playwright test --reporter=list` against the dev server. Includes S6
+(updated) and the new S7.
 
 --- FILES CHANGED ---
 
-src/engine.js         New `fcfChart` field on buildScenario()'s per-year row
-                     (baseDIExDraw/splitProtectExDraw/fcfChart, ~962-975) --
-                     purely additive, `surplus`/`accel`/`reqWork`/`nw`
-                     unchanged.
-src/App.jsx          `annualFcfExDraw()` helper (chartData memo) now reads
-                     `row.fcfChart` instead of computing its own
+src/engine.js         v4.1.5: new `fcfChart` field on buildScenario()'s
+                     per-year row (baseDIExDraw/splitProtectExDraw/fcfChart,
+                     ~962-975) -- purely additive, `surplus`/`accel`/
+                     `reqWork`/`nw` unchanged.
+                     v4.1.6: new `sweepChart` field, `= max(0,
+                     baseDIExDraw - fcfChart)` -- purely additive.
+                     v4.1.7: `splitProtectExDraw`'s floor term changed from
+                     `p.diCap*12` to `p.discFloor*12` (still feeds both
+                     fcfChart and sweepChart).
+src/defaults.js      v4.1.7: added `discFloor: 800` to `DEFAULTS` (engine-
+                     facing defaults) so bare `buildScenario(makeParams(...))`
+                     calls -- used by several tests -- have a value for the
+                     new floor term. Previously only lived in `SC_DEFAULTS`.
+src/App.jsx          v4.1.5: `annualFcfExDraw()` helper (chartData memo) now
+                     reads `row.fcfChart` instead of computing its own
                      `surplus - settleDraw` approximation; both call sites
                      (pinned series, live no-wfData fallback) unchanged.
+                     v4.1.6: `pin_<id>_sweep` now reads `row.sweepChart`
+                     instead of raw `debtSweep+sweepToSavings`.
                      `window.__chartData` export (test scaffolding, from
-                     v4.1.4) unchanged. Header comment + badge -> v4.1.5.
+                     v4.1.4) unchanged. Header comment + badge -> v4.1.7.
 retirement-simulator.spec.js
-                     E5/L1 version string -> v4.1.5; S6 updated to assert
-                     against `fcfChart` instead of the old approximation;
-                     new S7 (post-debt-clear pinned/live FCF ratio parity,
-                     Group S).
+                     UNCHANGED this session past v4.1.5 (E5/L1 version
+                     string still asserts v4.1.5) -- v4.1.6/v4.1.7 were not
+                     given test coverage; see Open Backlog.
 
 --- OPEN BACKLOG ---
 
@@ -163,10 +242,26 @@ retirement-simulator.spec.js
      first (it shouldn't -- fcfChart doesn't touch hiDebt/ccBal/accel -- but
      confirm empirically before assuming).
 [P1] Unify annual sweep model with wfData -- carried from session20/21/22/23.
-     This session's fcfChart fix narrows the practical gap (FCF chart values
-     now agree well) but the underlying "two engines, two independent
-     implementations of the same waterfall" architecture is still there --
-     fcfChart is a targeted patch, not the unification.
+     This session's fcfChart/sweepChart/discFloor fixes narrow the practical
+     gap further (FCF and Sweep chart values now agree closely) but the
+     underlying "two engines, two independent implementations of the same
+     waterfall" architecture is still there -- these are targeted patches,
+     not the unification. Residual gap after v4.1.7: user confirmed pinned
+     vs. live is now within "a few hundred dollars" on an identical-params
+     pin (down from ~$8K/mo pre-v4.1.6 and ~$900/mo pre-v4.1.7)  --
+     acceptable for now, EXPLICITLY DEFERRED by the user to whenever the
+     two-engine architecture gets unified/refactored, not to be chased as a
+     standalone bug. Prime suspect for the remainder: the annual model's
+     `baseDI` doesn't subtract the ongoing monthly rd/ob top-up
+     *contributions* (rdAdd/obAdd) from disposable income before the floor/
+     split comparison, the way the monthly engine's `available`/
+     `afterBuckets` does -- v4.1.7 only fixed the floor THRESHOLD
+     (diCap->discFloor), not this income-side gap. Worth checking first when
+     this is picked back up.
+[P2] retirement-simulator.spec.js has no coverage for `sweepChart` or the
+     v4.1.7 discFloor fix -- E5/L1 version string still says v4.1.5. Needs a
+     version bump to v4.1.7 and ideally a Sweep-line analog of S7 (pinned/
+     live Sweep ratio parity) before the next full test run.
 [P1] CPA rate calibration (6th sale tax still runs below the CPA sheet).
 [P2] Barberry/Lafayette mortgage origin date -- needs a real servicer stmt.
 [P2] Glossary needs a full v4 pass -- now also v4.1.4/4.1.5's pinned-FCF fix.
@@ -176,13 +271,19 @@ retirement-simulator.spec.js
 
 --- HOW TO PICK UP FROM HERE ---
 
-1. v4.1.5 is committed and test-green (79/79). Pinned scenarios' FCF chart
-   lines no longer spike from a leaked one-time draw (v4.1.4) AND no longer
-   run ~3x high after HI debt clears (v4.1.5) -- both verified against a
-   real "sell 6th St" scenario, the same one from the user's bug screenshot.
-2. The remaining P1s above are about the annual/monthly engines' *timing*
+1. v4.1.5 is test-green (79/79, from earlier in this session). v4.1.6/v4.1.7
+   are NOT yet covered by the test suite -- run/update
+   retirement-simulator.spec.js (version string + a Sweep-line parity test)
+   before trusting a green run to mean anything about these two fixes.
+2. Pinned scenarios' FCF and Sweep chart lines are now close to live (within
+   "a few hundred dollars" per the user, on an identical-params pin) but not
+   exact -- the user has explicitly deferred closing that last gap until the
+   annual/monthly engines get unified in a future refactor. Don't re-open
+   this as a standalone bug hunt without checking this journal first.
+3. The remaining P1s above are about the annual/monthly engines' *timing*
    disagreement (when debt clears) and the broader architectural duplication
-   -- not the FCF *value* divergence, which this session closed.
-3. window.__chartData is exposed test scaffolding (from v4.1.4), same
+   -- not the FCF/Sweep *value* divergence, which this session closed to
+   within the user's tolerance.
+4. window.__chartData is exposed test scaffolding (from v4.1.4), same
    category as __wfData/__liveRows/__chartMarkers -- not a public API, only
    for Playwright.

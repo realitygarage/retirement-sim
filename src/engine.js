@@ -961,7 +961,7 @@ export function buildScenario(p) {
     const totalOut=baseOut+accel;
     const surplus =totalIncome-totalOut;
     // v4.1.5: chart-only FCF value that (a) excludes the one-time settlement
-    // draw and (b) applies the same lifestyleSplit%/diCap floor split to
+    // draw and (b) applies the same lifestyleSplit%/floor split to
     // disposable income REGARDLESS of debt state -- `surplus` above only
     // does this while HI debt is still active (accel absorbs the excess);
     // once debt clears, accel is forced to 0 and `surplus` reports the FULL
@@ -970,9 +970,29 @@ export function buildScenario(p) {
     // cfSplitProtect. This mirrors that behavior in the annual engine
     // WITHOUT touching `surplus`/`accel`/`reqWork`/`nw` (still needed
     // elsewhere as-is) -- purely an additional read-only chart field.
+    // v4.1.7: the floor term uses `p.discFloor` (matching the monthly
+    // engine's `effectiveFloor`), NOT `p.diCap` (= discFloor+rdTopUp+obTopUp).
+    // diCap bundles the rainy-day/op-buffer top-ups into the floor because
+    // the real (non-chart) `splitProtect`/`accel` above are computed before
+    // those buckets exist as a separate concept in the annual model; but the
+    // monthly engine already subtracts rdAdd/obAdd from `available` before
+    // its own floor comparison, so reusing diCap here double-counted those
+    // buffers into the chart's "kept" floor and inflated fcfChart (and
+    // starved sweepChart) relative to what wfData actually shows.
     const baseDIExDraw = baseDI - (drawByYear[cal]||0);
-    const splitProtectExDraw = Math.max(p.diCap*12, baseDIExDraw*(p.lifestyleSplit/100));
+    const splitProtectExDraw = Math.max(p.discFloor*12, baseDIExDraw*(p.lifestyleSplit/100));
     const fcfChart = Math.max(0, Math.min(baseDIExDraw, splitProtectExDraw));
+    // v4.1.6: chart-only complement of fcfChart -- the recurring (non-draw)
+    // disposable income ABOVE the split-protected "kept" amount, i.e. whatever
+    // would get swept to debt paydown (while HI debt is active) or to savings
+    // (once it's clear). This mirrors the monthly wfData engine's
+    // afterBuckets-minus-disc relationship (its `sweep`/`sweepToSavings`
+    // fields), which the pinned-scenario chart previously approximated with
+    // the raw `debtSweep+sweepToSavings` fields -- fine while debt is active,
+    // but those inherit the same pre-fcfChart post-clear/draw-leak bugs this
+    // sibling field avoids, for the same reason fcfChart was added instead of
+    // reusing `surplus`.
+    const sweepChart = Math.max(0, baseDIExDraw - fcfChart);
     const passive =pension+(yourSs+brendaSs)*12+rental;
     const reqWork =Math.max(0,totalOut-passive);
     const nw      =Math.round((dplxVal+lafVal+primVal+cashAst-dplxBal-lafBal-primBal-hiDebt)/1000);
@@ -987,6 +1007,7 @@ export function buildScenario(p) {
       cashAst,
       surplus:  Math.round(surplus/12),
       fcfChart: Math.round(fcfChart/12),
+      sweepChart: Math.round(sweepChart/12),
       sweepToSavings: Math.round(annualSweepToSav/12),
       drawInc:  Math.round(drawInc/12),
       reqWork:  Math.round(reqWork/12),

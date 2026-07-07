@@ -1,4 +1,4 @@
-// v4.1.5 -- fix pinned-scenario FCF chart running ~3x too high after HI debt clears (annual engine now computes a chart-only fcfChart field that applies the lifestyleSplit%/floor split regardless of debt state, superseding the v4.1.4 draw-only fix)
+// v4.1.7 -- fix pinned-scenario FCF/Sweep chart fields overstating FCF and understating Sweep: fcfChart/sweepChart's floor term was using diCap (discFloor+rdTopUp+obTopUp) instead of discFloor alone, double-counting the rainy-day/op-buffer top-ups that the monthly engine already strips out separately before its own floor comparison
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -927,7 +927,7 @@ export default function App(){
         pt[`pin_${pin.id}_fc`]=Math.abs(pin.rows[i]?.mtg||0)+Math.abs(pin.rows[i]?.health||0)+Math.abs(pin.rows[i]?.core||0)+Math.abs(pin.rows[i]?.famLoan||0)+Math.abs(pin.rows[i]?.minDebt||0);
         pt[`pin_${pin.id}_rw`]=pin.rows[i]?.reqWork;
         pt[`pin_${pin.id}_di`]=annualFcfExDraw(pin.rows[i]);
-        pt[`pin_${pin.id}_sweep`]=Math.max(0,(pin.rows[i]?.debtSweep||0)+(pin.rows[i]?.sweepToSavings||0));
+        pt[`pin_${pin.id}_sweep`]=Math.max(0,pin.rows[i]?.sweepChart||0);
         pt[`pin_${pin.id}_debt`]=pin.rows[i]?.hiDebt;
         // NW for pin: annual engine nw + accumulated sweep savings (compounded annually)
         let pinSavAcc=0;
@@ -1652,7 +1652,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.5</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.7</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>

@@ -104,6 +104,7 @@ export const DEFAULTS = {
   workPts: [{yr:0,val:5417},{yr:2,val:3000},{yr:5,val:1000},{yr:8,val:0}],
   lifestyleSplit: 30,
   diCap:         1200,
+  discFloor:     800,   // v4.1.7: fcfChart/sweepChart's floor term -- matches SC_DEFAULTS.discFloor
   // v4.0.0-A cost profiles (economy knobs, applied automatically by segment kind)
   strPlatformPct: 0.03,
   strCleanPct:    0.04,
