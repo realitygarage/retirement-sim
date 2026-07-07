@@ -107,7 +107,10 @@ export function remainBal(p,r,origYrs,yrsPaid){
 export function healthMonthly(calYear, calMonth, p){
   const hcpi = p?.healthCpi || BASE.healthMedicareInflation;
   const youMedInf=Math.pow(1+hcpi,Math.max(0,calYear-2026));
-  const you=(calMonth!==undefined&&calMonth<5)?BASE.healthYouEricsson:Math.round(BASE.healthYouMedicare*youMedInf);
+  // You -> Medicare is Nov 2026 (real transition date, confirmed) -- Ericsson
+  // through Oct 2026, Medicare from Nov 2026 on. calYear<2026 is unreachable
+  // in practice (sim starts 2026) but kept for a well-defined pre-2026 case.
+  const you=(calYear<2026||(calYear===2026&&calMonth<11))?BASE.healthYouEricsson:Math.round(BASE.healthYouMedicare*youMedInf);
   let brenda;
   if(calYear>=BASE.brendaMedYear){
     brenda=Math.round(BASE.healthBrendaMedicare*Math.pow(1+hcpi,calYear-BASE.brendaMedYear));
@@ -832,10 +835,12 @@ export function buildScenario(p) {
     const _pinf0perMo = _pinf0/12;
     const _maint0 = properties.reduce((s,prop)=>s+(keepMap[prop.id]?prop.value*p.maintRate*_pinf0perMo:0), 0);
     const _core0  = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*_inf0;
-    const _hlth0  = healthMonthly(BASE.startYear+yr, 99, p);
+    // v4.1.3: health is no longer flattened to a single per-year figure here --
+    // it varies within the year (You -> Medicare, Nov 2026), computed per exact
+    // month inside the loop below via healthMonthly(cal, mo+1, p).
     // v4.0.0-A: mortgage payments are state-driven per month (IO -> recast)
     // inside the loop below, for ALL properties (Lafayette/Barberry included).
-    const _fixedMo= _hlth0 + _propC0 + _core0 + _maint0 + taxAnnual/12;
+    const _fixedMoNoHealth = _propC0 + _core0 + _maint0 + taxAnnual/12;
 
     // Start-of-year loan balance (loans starting this year count at full amount)
     const loansBalPre = loans.reduce((s,L)=>s + (L.started ? L.bal : (L.startAbs < (yr+1)*12 ? L.amount : 0)), 0);
@@ -869,6 +874,7 @@ export function buildScenario(p) {
         }
       }
       loanPmtYrTotal += _loanMo;
+      const _hlthMo = healthMonthly(cal, mo+1, p);
       let _minsMo = 0, loopDebt = 0, xtra = 0;
       if(!p.payOffHI){
         if(absMo<5){ nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)); }
@@ -882,7 +888,7 @@ export function buildScenario(p) {
         if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
         loopDebt=ccBal+sophiaBal+nolanBal;
       }
-      const _avail = (_incMo - _fixedMo - _mtgMo) - _minsMo - _loanMo;
+      const _avail = (_incMo - _fixedMoNoHealth - _hlthMo - _mtgMo) - _minsMo - _loanMo;
       const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
       if(!p.payOffHI){
         xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
@@ -927,9 +933,10 @@ export function buildScenario(p) {
     // not a strategy toggle). Accumulated from the state stepping above.
     const mtgPmt   = mtgPmtYrTotal;
 
-    const healthAnnual=yr===0
-      ?(5*BASE.healthYouEricsson+7*BASE.healthYouMedicare+12*BASE.healthBrendaEricsson+12*BASE.healthKids)
-      :healthMonthly(cal,99,p)*12;
+    // v4.1.3: sum real per-month figures (was a hardcoded yr===0 5mo/7mo split
+    // that assumed a June 2026 Medicare transition -- the real date is Nov 2026).
+    let healthAnnual=0;
+    for(let hm=1; hm<=12; hm++) healthAnnual += healthMonthly(cal, hm, p);
     const irmaaAdd = irmaaYears.has(cal) ? BASE.irmaaSurge*2*12 : 0;
     let propCost = 0;
     if(keepDuplex)   propCost += (BASE.dplxTaxMo+BASE.dplxInsMo)*12*pinf;

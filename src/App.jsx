@@ -1,11 +1,11 @@
-// v4.1.2 -- FCF chart splits "debt clear" (matches HI Debt Balance chart) from "sweep -> savings" (grace-period end) into two distinct reference lines
+// v4.1.3 -- fix You->Medicare health-cost transition month (Nov 2026, not May/June); unify duplicated health-cost calc between annual and monthly engines
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode } from "./engine.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly } from "./engine.js";
 import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS_SC, freshPropertiesDefaults, freshObligationDefaults } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
@@ -576,13 +576,10 @@ export default function App(){
       const totalInc  = pension+yourSsMo+brendaSsMo+rentalMo+wkInc-rentalOpCost;
 
       // -- TIER 1: FIXED COSTS --
-      const _hcpi  = liveParams.healthCpi || BASE.healthMedicareInflation;
-      const hiMo   = mo < 5 ? BASE.healthYouEricsson : Math.round(BASE.healthYouMedicare*Math.pow(1+_hcpi,Math.max(0,calYear-2026)));
-      const brendaHlth = calYear>=BASE.brendaMedYear
-        ? Math.round(BASE.healthBrendaMedicare*Math.pow(1+_hcpi,calYear-BASE.brendaMedYear))
-        : Math.round(BASE.healthBrendaEricsson*Math.pow(1+BASE.ericssonInflation,calYear-2026));
-      const kidsHlth  = (calYear<BASE.sophiaOff||calYear<BASE.nolanOff)?BASE.healthKids:0;
-      const health    = hiMo+brendaHlth+kidsHlth;
+      // v4.1.3: use the shared engine.js healthMonthly() instead of a duplicate
+      // inline calc, so both engines agree on the You -> Medicare transition
+      // (Nov 2026) instead of drifting on two separately-maintained versions.
+      const health = healthMonthly(calYear, d.getMonth()+1, liveParams);
       const hiDebtNow = ccBal+sophiaBal+nolanBal;
       // v4.0.0-A: contractual IO -> recast P&I, ALL properties via the same
       // state machine (Lafayette/Barberry included -- no more flat BASE.lafPnI).
@@ -1640,7 +1637,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.2</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.3</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>

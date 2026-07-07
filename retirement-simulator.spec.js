@@ -499,10 +499,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.1.2"', async ({ page }) => {
+  test('E5 — Version header shows "v4.1.3"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.2').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.1.2');
+    await expect(page.locator('text=v4.1.3').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.1.3');
   });
 
 });
@@ -958,10 +958,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.1.2', async ({ page }) => {
+  test('L1 — Version header shows v4.1.3', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.2').first()).toBeVisible();
-    console.log('  L1 — Version v4.1.2 confirmed');
+    await expect(page.locator('text=v4.1.3').first()).toBeVisible();
+    console.log('  L1 — Version v4.1.3 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
