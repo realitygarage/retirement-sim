@@ -499,10 +499,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.1.3"', async ({ page }) => {
+  test('E5 — Version header shows "v4.1.4"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.3').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.1.3');
+    await expect(page.locator('text=v4.1.4').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.1.4');
   });
 
 });
@@ -958,10 +958,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.1.3', async ({ page }) => {
+  test('L1 — Version header shows v4.1.4', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.3').first()).toBeVisible();
-    console.log('  L1 — Version v4.1.3 confirmed');
+    await expect(page.locator('text=v4.1.4').first()).toBeVisible();
+    console.log('  L1 — Version v4.1.4 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1476,6 +1476,61 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     } else {
       expect(sweepLabelCount).toBe(0);
     }
+  });
+
+  test('S6 — pinned scenario\'s FCF series excludes the one-time draw, same contract as live (v4.1.4)', async ({ page }) => {
+    await loadApp(page);
+    // Same setup as S3 (sale + draw land in the same year) -- pin it with NO
+    // further changes, so the pin's paramSnapshot/rows are for the identical
+    // scenario S3 already proved is leak-free on the live path.
+    await sellProperty(page, 'fifteenth', 2026, 2);
+    const drawSlider = page.locator('span', { hasText: 'One-time draw ($, at sale)' }).first()
+      .locator('xpath=ancestor::div[2]/input[@type="range"]');
+    await drawSlider.scrollIntoViewIfNeeded();
+    await drawSlider.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, '100000');
+    await page.waitForTimeout(300);
+
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Draw Parity Test');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    const result = await page.evaluate(() => {
+      const wf = window.__wfData || [];
+      const cd = window.__chartData || [];
+      const liveRows = window.__liveRows || [];
+      const idx = wf.findIndex(r => (r.settleDraw || 0) > 0);
+      if (idx < 0 || !cd.length) return null;
+      const drawYear = 2026 + Math.floor(wf[idx].mo / 12);
+      const pinKey = Object.keys(cd[0]).find(k => /^pin_.*_di$/.test(k));
+      const yi = cd.findIndex(r => r.year === drawYear);
+      // pin.rows is buildScenario(liveParams) captured at pin time with no
+      // subsequent changes -- so window.__liveRows' own row for this year is
+      // byte-identical to the pin's row, and gives the exact expected value
+      // straight from the fields the fix subtracts (surplus - settleDraw).
+      const annualRow = liveRows.find(r => r.cal === drawYear);
+      const expectedFixed = Math.max(0, (annualRow?.surplus || 0) - (annualRow?.settleDraw || 0));
+      return {
+        settleDraw: wf[idx].settleDraw,
+        pinKey,
+        pinnedAtDrawYear: cd[yi]?.[pinKey],
+        annualRawSurplus: annualRow?.surplus,
+        expectedFixed,
+      };
+    });
+    console.log('  S6 — ' + JSON.stringify(result));
+    expect(result).toBeTruthy();
+    expect(result.pinKey).toBeTruthy();
+    expect(result.settleDraw).toBeGreaterThan(0);
+    // The pre-fix bug used Math.max(0, annualRawSurplus) directly, leaking the
+    // draw straight through -- assert the chart value matches the exclusion
+    // formula exactly, not the raw (leaked) annual surplus.
+    expect(result.pinnedAtDrawYear).toBe(result.expectedFixed);
+    expect(result.pinnedAtDrawYear).not.toBe(Math.max(0, result.annualRawSurplus));
   });
 
 });

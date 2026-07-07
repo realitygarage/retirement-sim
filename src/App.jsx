@@ -1,4 +1,4 @@
-// v4.1.3 -- fix You->Medicare health-cost transition month (Nov 2026, not May/June); unify duplicated health-cost calc between annual and monthly engines
+// v4.1.4 -- fix pinned-scenario FCF chart series leaking the one-time settlement draw (pinned path now excludes it via a shared helper, matching the live path's wfData disc field)
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -818,6 +818,14 @@ export default function App(){
     // Aggregate monthly wfData into annual averages for the FCF chart.
     // Use disc (monthly engine's actual kept FCF) instead of annual engine surplus —
     // this ensures lifestyleSplit slider and graceDone sweep logic are reflected correctly.
+    // v4.1.4: shared FCF-display helper for any place that falls back to the
+    // annual engine's raw `surplus` field (no wfData available for that row) --
+    // excludes the one-time settlement draw, same exclusion wfData's `disc`
+    // applies (the draw funds one-time uses, not recurring free cash flow).
+    // Used for both the live fallback below AND the pinned series, so the two
+    // can't drift apart on this again (pinned scenarios have no wfData at all,
+    // since pins only run the annual engine -- see addPin).
+    const annualFcfExDraw = (row) => Math.max(0, (row?.surplus||0) - (row?.settleDraw||0));
     const discByYear={}, sweepByYear={}, totalSweepByYr={}, cntByYear={}, savAccByYear={}, abByYear={}, floorByYear={};
     const fc_mtgByYr={}, fc_hlthByYr={}, fc_coreByYr={}, fc_famByYr={}, fc_hiMinsByYr={}, fc_ropByYr={}, fc_propByYr={}, fc_taxByYr={};
     (wfData||[]).forEach(r=>{
@@ -852,7 +860,7 @@ export default function App(){
 
     return liveRows.map((r,i)=>{
       const cnt=cntByYear[r.cal]||12;
-      const disc=discByYear[r.cal]!=null ? Math.round(discByYear[r.cal]/cnt) : Math.max(0,r.surplus);
+      const disc=discByYear[r.cal]!=null ? Math.round(discByYear[r.cal]/cnt) : annualFcfExDraw(r);
       const sweep=Math.round((sweepByYear[r.cal]||0)/cnt);
       // Add sweep savings accumulation to NW — savingsAcc grows at investReturn inside wfData,
       // but wfData doesn't compound it after each month, so add it as a separate component.
@@ -917,7 +925,7 @@ export default function App(){
       pins.forEach(pin=>{
         pt[`pin_${pin.id}_fc`]=Math.abs(pin.rows[i]?.mtg||0)+Math.abs(pin.rows[i]?.health||0)+Math.abs(pin.rows[i]?.core||0)+Math.abs(pin.rows[i]?.famLoan||0)+Math.abs(pin.rows[i]?.minDebt||0);
         pt[`pin_${pin.id}_rw`]=pin.rows[i]?.reqWork;
-        pt[`pin_${pin.id}_di`]=Math.max(0,pin.rows[i]?.surplus);
+        pt[`pin_${pin.id}_di`]=annualFcfExDraw(pin.rows[i]);
         pt[`pin_${pin.id}_sweep`]=Math.max(0,(pin.rows[i]?.debtSweep||0)+(pin.rows[i]?.sweepToSavings||0));
         pt[`pin_${pin.id}_debt`]=pin.rows[i]?.hiDebt;
         // NW for pin: annual engine nw + accumulated sweep savings (compounded annually)
@@ -1005,6 +1013,12 @@ export default function App(){
   useEffect(()=>{
     if(typeof window !== 'undefined'){ window.__chartMarkers = {debtClearYear, sweepToSavingsYear}; }
   },[debtClearYear, sweepToSavingsYear]);
+  // v4.1.4: expose chartData itself (same test-scaffolding pattern) so tests
+  // can assert on the actual per-pin FCF series (pin_<id>_di) instead of
+  // scraping chart pixels/tooltips.
+  useEffect(()=>{
+    if(typeof window !== 'undefined'){ window.__chartData = chartData; }
+  },[chartData]);
   const reqWorkMax = useMemo(()=>{
     const raw = Math.max(...liveRows.map(r=>r.reqWork||0), 1000);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -1637,7 +1651,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.3</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.4</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
