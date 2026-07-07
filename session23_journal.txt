@@ -1,17 +1,23 @@
-=== SESSION 23 JOURNAL — v4.1.1 / v4.1.2 ===
+=== SESSION 23 JOURNAL — v4.1.1 / v4.1.2 / v4.1.3 ===
 Date: 2026-07-06
 Session goal: follow-up bug reports on the v4.1.0 chart legend/color work --
 (1) tooltip labels blank on non-FCF charts, (2) "debt clear" reference line on
 the FCF/mo chart not tracking the HI Debt Balance chart. Both reported via
 screenshots after the user found the v4.1.0 legend/color fix itself was
 working correctly (confirmed against the live app + Group S tests before
-touching anything, to avoid re-fixing something that wasn't broken).
+touching anything, to avoid re-fixing something that wasn't broken). Later in
+the same session, at the user's request, investigated the annual/monthly
+HI-debt-clear divergence that (2) had surfaced and deferred -- see section 4.
 
 --- WHAT SHIPPED ---
 
 v4.1.1 -- fix tooltip labels on non-FCF comparison charts.
 v4.1.2 -- split the FCF chart's single "debt clear" marker into two distinct,
 correctly-labeled reference lines.
+v4.1.3 -- fix the You->Medicare health-cost transition month (real date: Nov
+2026) and eliminate a duplicated health-cost implementation between the two
+engines. See section 4 for why this was scoped narrowly and what it did NOT
+fix.
 
 --- 1. TOOLTIP LABELS BLANK ON NON-FCF CHARTS (v4.1.1, App.jsx) ---
 
@@ -116,15 +122,95 @@ render distinctly whenever the two computed years differ (true by default in
 this codebase's current param set: 2034 vs 2036), and re-checks the same
 contract holds after changing the grace-period slider.
 
---- 3. TEST CHANGES (retirement-simulator.spec.js) ---
+--- 3. TEST CHANGES FOR SECTIONS 1-2 (retirement-simulator.spec.js) ---
 
 E5/L1: version string checks v4.1.0 -> v4.1.1 -> v4.1.2 (two bumps this
 session, one per shipped fix).
 Group S gained S4 (tooltip labels) and S5 (debt-clear marker split).
 
+--- 4. ANNUAL/MONTHLY HI-DEBT-CLEAR DIVERGENCE: INVESTIGATED (v4.1.3) ---
+
+User asked to look into the divergence deferred in section 2. First finding
+was a CORRECTION to that section's own numbers, not a new app bug:
+
+CORRECTION to section 2's "~2 year gap (2036 vs 2034)": that comparison came
+from a throwaway diagnostic script (not committed, scratchpad-only) that
+assumed wfData's month index starts at January 2026. It actually starts at
+`new Date(2026, 5)` -- JUNE 2026 (App.jsx ~489, matching this session's real-
+world "today"). Re-running the comparison with the correct month mapping
+showed mortgage balances (primBalRaw/dplxBalRaw vs mtgBal6/mtgBal15) match
+EXACTLY, to the dollar, every year -- the mortgage recast timing and amount
+are byte-identical between engines; that part of the architecture is fine.
+The REAL remaining gap, once measured correctly, is ~1 year (HI debt clears
+2035 in wfData vs 2036 in the annual engine), not 2.
+
+Root-caused the real ~1yr gap: buildScenario()'s internal per-month
+sub-loop LOOKS like a true monthly simulation but several inputs
+(_hlth0/_work0/_ss0/_rental0) are computed ONCE PER YEAR and held flat across
+all 12 iterations, unlike wfData which recomputes exact per-month values
+(including exact mid-year transition timing). Health specifically had a
+concrete, confirmable bug: the shared `healthMonthly(calYear, calMonth, p)`
+compares `calMonth<5` for the You->Medicare Ericsson cutover, but engine.js's
+two call sites BOTH passed a sentinel `calMonth=99` (dead code -- the
+branch was never actually exercised), while a separate hardcoded
+`healthAnnual` yr===0 special case used `5*Ericsson+7*Medicare` (implying a
+JUNE 2026 transition), and wfData's own separately-maintained inline health
+calc used `mo<5` relative to ITS Jun-2026 epoch (correctly landing on NOVEMBER
+2026, matching the on-screen Financial Events Timeline's "(Nov 2026)" label).
+Three different implementations, three different implied transition dates
+(May-ish dead code / June hardcoded / November actual), none of them talking
+to each other. Confirmed with the user that November 2026 is the real date
+before touching any code (this is a real fact about the household's health
+insurance, not an arbitrary constant).
+
+Fix (user chose "fix health-cost duplication first," the narrowest of three
+options offered -- the other two were "leave it, treat wfData as
+authoritative" and "full parity refactor of work/rental/SS too"):
+  - `healthMonthly()`'s "you" branch corrected to the real Nov 2026 cutover
+    (calYear<2026 || (calYear===2026 && calMonth<11) -- Ericsson; else
+    Medicare).
+  - engine.js's per-month loop now calls `healthMonthly(cal, mo+1, p)` for
+    the ACTUAL month each iteration (was a flat `_hlth0` computed once,
+    outside the loop, via the sentinel).
+  - `healthAnnual`'s hardcoded yr===0 special case removed; now sums 12 real
+    `healthMonthly(cal, hm, p)` calls, which naturally produces the correct
+    10mo-Ericsson/2mo-Medicare split for 2026 without a special case.
+  - App.jsx's wfData block's duplicated inline health calc (hiMo/brendaHlth/
+    kidsHlth, ~5 lines) removed; now calls the same shared `healthMonthly()`.
+    healthMonthly needed adding to App.jsx's engine.js import list.
+
+Verified impact: all 77 tests still pass. Numbers moved in the expected
+direction (e.g. default-scenario reqWork $5,961/mo -> $6,171/mo; the 2027
+timeline event now reads "Health insurance drops $2,008 -> $1,618/mo" instead
+of the previously understated "$1,798 -> ..." -- the annual engine had been
+using the cheaper Medicare rate too early in 2026).
+
+IMPORTANT: re-checked the annual-vs-monthly hiDebt trajectory after the fix,
+same test scenario as before -- BYTE-IDENTICAL to pre-fix (still 2035 vs
+2036). The health-cost fix is correct and worth having (real duplicated-logic
+risk removed, real wrong date corrected) but did NOT move this specific
+divergence at all: the annual engine's own `debtSweep`/avalanche-extra field
+was already $0 for years 2028-2034 straight in this scenario (confirmed via
+row inspection) -- its HI debt declines purely from minimum payments,
+unaffected by a few hundred dollars/month of health cost either way, because
+`_avail` never crosses the `_splitProtect` threshold regardless. So the real
+driver of the ~1yr gap is the SAME once-per-year-flattening pattern applied
+to `_work0`/`_ss0`/`_rental0` (not touched this round -- out of the
+"health-cost duplication only" scope the user approved).
+
+--- TEST CHANGES FOR SECTION 4 (retirement-simulator.spec.js) ---
+
+E5/L1: version string v4.1.2 -> v4.1.3. No new Group S test added for the
+health-cost fix itself (it doesn't change chart legend/color/marker
+behavior, which is what Group S covers) -- the existing Group A/G/H/I/R
+suites already exercise health-cost-dependent figures (reqWork, timeline
+event text, FCF breakdown) and all still pass with the corrected numbers.
+
 --- TEST RESULTS ---
 
-77/77 passed (3.4m), via direct `npx playwright test --reporter=list`.
+77/77 passed (3.4m most recent run), via direct `npx playwright test
+--reporter=list`. Run after both the v4.1.1/4.1.2 changes and again after the
+v4.1.3 health-cost fix.
 
 --- FILES CHANGED ---
 
@@ -136,55 +222,68 @@ src/App.jsx          Tooltip formatter in the shared Chart component no
                      FCF chart now renders both as separate reference lines
                      (green "debt clear", blue "sweep -> savings", the
                      latter only when it differs from the former); new
-                     window.__chartMarkers test-scaffolding export; header
-                     comment + on-screen badge -> v4.1.2 (via v4.1.1).
+                     window.__chartMarkers test-scaffolding export;
+                     duplicated inline health-cost calc in wfData replaced
+                     with a call to engine.js's healthMonthly(); header
+                     comment + on-screen badge -> v4.1.3 (via v4.1.1/4.1.2).
+src/engine.js        healthMonthly()'s You->Medicare cutover corrected to
+                     Nov 2026 (was unreachable dead code implying ~May);
+                     buildScenario()'s per-month loop now computes health
+                     cost per exact month via healthMonthly(cal, mo+1, p)
+                     instead of a once-per-year flat sentinel value;
+                     healthAnnual's hardcoded yr===0 5mo/7mo special case
+                     (implied a June 2026 transition) replaced with a sum of
+                     12 real per-month healthMonthly() calls.
 retirement-simulator.spec.js
-                     E5/L1 version string -> v4.1.2; new S4 (tooltip name
-                     regression) and S5 (debt-clear marker split + parity
-                     contract) in Group S.
+                     E5/L1 version string -> v4.1.2, then -> v4.1.3; new S4
+                     (tooltip name regression) and S5 (debt-clear marker
+                     split + parity contract) in Group S.
 
 --- OPEN BACKLOG ---
 
-[P1] ANNUAL VS MONTHLY ENGINE HI-DEBT-CLEAR DIVERGENCE (new, this session) --
-     buildScenario()'s per-year internal monthly avalanche loop (engine.js
-     ~855-895) and the wfData block's own per-month avalanche disagree on the
-     HI-debt zero-crossing month by ~2 years in at least one test case with
-     zero grace period, so it isn't explained by sweepDelay. Needs a
-     side-by-side month-by-month diff of the two loops' `_avail`/
-     `_splitProtect`/`xtra` (annual) vs `afterBuckets`/`cfSplitProtect`/`sweep`
-     (monthly) to find where they actually diverge -- candidates to check
-     first: whether the annual loop's `_avail` omits the same
-     reserve/buffer/maintenance top-up deductions that wfData's
-     `afterBuckets` includes before computing surplus-above-floor. User
-     explicitly deferred fixing this to a future session; the v4.1.2 marker
-     fix ships as-is (correct relative to each engine's own data) with this
-     known limitation.
+[P1] ANNUAL VS MONTHLY ENGINE HI-DEBT-CLEAR DIVERGENCE -- REVISED, SMALLER
+     THAN REPORTED (this session). Real gap is ~1yr (2035 wfData vs 2036
+     annual engine in one test scenario), not the ~2yr originally reported in
+     section 2 (that included a diagnostic-script date-mapping bug, now
+     corrected -- see section 4). Mortgage balances/timing are byte-identical
+     between engines; health cost is now unified (v4.1.3) and confirmed NOT
+     to be the driver of the remaining gap. Next suspect: `_work0`, `_ss0`,
+     `_rental0` in buildScenario's per-year setup (engine.js ~823-828) are
+     ALL computed once per year and held flat across the internal per-month
+     loop, same pattern as the health-cost bug just fixed -- but SS/rental
+     don't have known mid-year transition dates the way health did, so the
+     mechanism (and whether it's even worth chasing further) needs
+     re-establishing per input before assuming it's the same shape of fix.
+     Start by checking whether the annual engine's `debtSweep` field is
+     nonzero in OTHER scenarios (it was $0 throughout in the one tested here
+     -- if that's typical, the gap may be dominated by something in the
+     minimum-payment/interest math instead, not the surplus-availability
+     calc at all).
 [P1] Unify annual sweep model with wfData -- carried from session20/21/22
-     (likely the SAME underlying issue as the new P1 above -- worth tackling
-     together next time).
+     (likely overlaps with the P1 above -- worth tackling together).
 [P1] CPA rate calibration (6th sale tax still runs below the CPA sheet).
 [P2] Barberry/Lafayette mortgage origin date -- needs a real servicer stmt.
-[P2] Glossary needs a full v4 pass -- now also v4.1.1/4.1.2's tooltip/marker
-     changes.
+[P2] Glossary needs a full v4 pass -- now also v4.1.1/4.1.2/4.1.3's
+     tooltip/marker/health-cost changes.
 [P3] investedCash in defaults.js -- still orphaned, still flagged not fixed.
 [P3] run_tests.ps1 Start-Transcript reliability -- not re-tested this
      session (used direct npx invocation throughout).
 
 --- HOW TO PICK UP FROM HERE ---
 
-1. v4.1.2 is committed and test-green (77/77). Tooltips now name every
-   series on every comparison chart; the FCF chart's debt-clear marker
-   matches the HI Debt Balance chart's own zero-crossing, with a second
-   distinctly-labeled marker for when the sweep actually redirects to
-   savings.
-2. The annual/monthly HI-debt-clear divergence (P1 above) is the important
-   thing to pick up next -- it's likely the root cause behind more than just
-   this session's marker confusion (e.g. any stat or chart that mixes
-   liveRows-derived and wfData-derived debt timing could show similar
-   mismatches). Start by instrumenting both loops' month-by-month hiDebt
-   trajectory for the SAME scenario side by side (window.__liveRows vs
-   window.__wfData already expose both) before touching either engine's
-   code.
-3. window.__chartMarkers is new test scaffolding (debtClearYear,
-   sweepToSavingsYear) -- same category as __wfData/__liveRows, not a public
-   API, only for Playwright.
+1. v4.1.3 is committed and test-green (77/77). Tooltips name every series on
+   every comparison chart; the FCF chart's debt-clear marker matches the HI
+   Debt Balance chart's own zero-crossing with a second distinctly-labeled
+   marker for when the sweep redirects to savings; health cost is computed
+   identically (and correctly, Nov 2026 transition) by both engines.
+2. The annual/monthly HI-debt-clear gap (P1 above) is smaller than this
+   session originally thought, and health cost is now ruled out as its
+   cause. Before writing any more fixes, re-verify with a fresh
+   window.__liveRows/__wfData trace (correct month mapping this time --
+   wfData's epoch is Jun 2026, mo+5 to get real calendar months) whether
+   `debtSweep` (annual) is genuinely $0 across the board in typical
+   scenarios, since that changes where to look next (surplus-availability
+   math vs. the minimum-payment/interest amortization math instead).
+3. window.__chartMarkers (debtClearYear, sweepToSavingsYear) is test
+   scaffolding, same category as __wfData/__liveRows -- not a public API,
+   only for Playwright.
