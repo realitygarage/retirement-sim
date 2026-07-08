@@ -1,0 +1,214 @@
+=== SESSION 25 JOURNAL — v4.2.0 ===
+
+Date: 2026-07-08
+
+Session goal: bug report -- selecting a pinned scenario as the "edit
+target" ("Editing pin -- changes update this pin's scenario independently")
+left the sidebar controls non-responsive; sliders/toggles/fields had no
+effect while a pin was the edit target. Editing the live scenario worked
+fine.
+
+--- WHAT SHIPPED ---
+
+v4.2.0 -- removed in-place pin editing entirely. Replaced with a
+load-into-live model: the sidebar always edits `live`; clicking a pinned
+scenario's pill copies that pin's saved params into live and pre-fills the
+Pin-name field; re-Pinning under the same name overwrites that pin, a new
+name branches into a new pin.
+
+--- 1. INVESTIGATION: THE REPORTED BINDING WAS ACTUALLY WIRED CORRECTLY ---
+
+Read through the `pinScs`/`activeSc` state machine (App.jsx) before touching
+anything. `sc = activeSc==="live" ? liveSc : pinScs[activeSc]` and `setSc`
+routed correctly to `pinScs[activeSc]`, and every individual setter
+(setProperty, setRdTopUp, etc.) called through `setSc` -- so the actual
+control->state wiring was not the bug. The complexity was in the
+surrounding machinery: `switchToPin`, `requestSwitch`/`confirmSwitch` (an
+unsaved-changes "Save this pin before switching?" prompt), `entryScRef`
+(tracked a JSON snapshot to detect changes), and a fully separate
+`effectivePins` useMemo that re-ran `buildScenario` for any pin mid-edit so
+charts reflected in-progress pin edits. There was also a dead, unwired
+`restorePin` function -- apparently an earlier, incomplete attempt at
+exactly the load-into-live feature this session ended up shipping.
+
+Given the surrounding state machine's complexity (and the user's specific
+ask for a redesign, not a patch), decided to remove the in-place editing
+path entirely rather than debug it further.
+
+--- 2. DESIGN, CONFIRMED WITH USER BEFORE WRITING CODE (plan mode) ---
+
+Two things the user flagged before approving the plan:
+- The existing "live on/off" toggle (`showLive`, chart-visibility only, in
+  the Pinned Scenarios panel header) is a *different* control from the
+  edit-target selector being removed -- left untouched, but loading a pin
+  into live now forces it on, so the edited live line is visible against
+  the pinned comparison lines as you tweak.
+- No confirm-before-overwrite dialog needed when loading a pin into live.
+  Target workflow: pin two scenarios, compare their charts, load one into
+  live, tweak, then save under a NEW name to branch (not overwrite the
+  original) -- explicitly no prompt wanted for that flow.
+
+--- 3. IMPLEMENTATION (App.jsx) ---
+
+Collapsed `liveSc`/`pinScs`/`activeSc` to a single `liveSc` state; `sc` is
+now always `liveSc`, `setSc` always routes to it. Removed `switchToPin`,
+`requestSwitch`, `confirmSwitch`, `pendingSwitch`, `showSavePrompt`,
+`entryScRef` (+ its useEffect), the dead `restorePin`, and the
+`effectivePins` recompute layer (its 5 call sites now just read `pins`
+directly -- `chartData` already did, it was never routed through
+`effectivePins`).
+
+New `loadPinIntoLive(pin)`: shallow-copies `pin.paramSnapshot` over
+SC_DEFAULTS into `liveSc`, pre-fills the pin-name field with the pin's name,
+and turns `showLive` on. Shallow copy is safe (not just convenient) because
+every setter in this file does copy-on-write on sc's nested arrays/objects
+(`properties.map(pr=>pr.id===id?{...pr,...patch}:pr)` etc.) -- confirmed via
+grep that nothing does in-place `.push`/`.splice` on sc-owned state anywhere
+in App.jsx, so editing live after a load can't leak back into the pin's
+stored snapshot.
+
+`addPin` now looks up a pin with a matching trimmed name and overwrites it
+in place (keeping id/color, replacing rows/stats/cfSettings/paramSnapshot)
+instead of always appending; a new/changed name still branches into a new
+pin exactly as before (same 5-pin trim, same auto-visibility).
+
+Sidebar UI: the old "Editing: [live] [pin pills]" selector + save-prompt
+block became a simpler "Load into editor" pill row -- pins only (no `live`
+pill, since the sidebar is always live now), `onClick={()=>
+loadPinIntoLive(pin)}`.
+
+Added `window.__liveSc` / `window.__pins` test scaffolding (same category as
+the existing `__wfData`/`__liveRows`/`__chartData` -- Playwright-only, not a
+public API) so tests can assert param equality/non-mutation without
+scraping every sidebar control.
+
+--- 4. A REGRESSION FOUND DURING TEST-WRITING, FIXED ---
+
+Removing the `live` pill changed the DOM: with exactly one visible pin, the
+"Load into editor" row's flex-wrap div now has textContent that's an EXACT
+match for that pin's name alone (previously it was "live"+pinname
+concatenated, never an exact match). Group D's existing D4 test located the
+pin card via `page.locator('div').filter({hasText:/^NAME$/}).first()
+.locator('xpath=ancestor::div[3])` -- a fragile "first div with exact text"
+heuristic that happened to land on the pin card before this session only by
+DOM-order coincidence. After the sidebar change, `.first()` started
+grabbing the NEW "Load into editor" row instead, whose 3rd ancestor doesn't
+contain "NW yr10" -- D4 failed.
+
+Fixed properly rather than patching around it: added
+`data-testid="pin-card-${pin.id}"` to the pin card's root div (same pattern
+as the existing `property-${id}-card` testids) and pointed D4 at
+`[data-testid^="pin-card-"]` filtered by name -- unambiguous regardless of
+what else on the page contains that pin's name.
+
+--- 5. A SECOND, PRE-EXISTING TEST-INFRA BUG FOUND WHILE WRITING NEW TESTS ---
+
+Wrote D5-D8 using `setSlider(page, 'Fallback floor (unscheduled years)',
+...)`, the shared helper (CLAUDE.md already warns its `near` heuristic can
+grab the wrong slider on a long scrollable tab). All four tests failed with
+discFloor stuck at the SC_DEFAULTS value (800) regardless of what was set.
+Debugged with a throwaway Playwright script (not committed): `near` matched
+12 candidate range inputs for that label and `.first()` grabbed an unrelated
+one. Switched to an explicit DOM walk (label span -> ancestor div[2] -> its
+one input[type=range]) and re-tested -- the DOM value visibly changed but
+`window.__liveSc.discFloor` still didn't update. Root cause: React installs
+an instance-level override on a controlled input's `value` setter to track
+"real" changes; `el.value = val` (what `setSlider` does) goes through that
+override and primes the tracker, so the subsequently dispatched `input`
+event looks like a no-op to React and `onChange` never fires. Real keyboard
+input (`.focus()` + `ArrowRight`) confirmed the binding itself was correct
+and did fire real state updates -- proving this was a synthetic-event
+technique gap, not an App.jsx bug.
+
+Fix: added `setSliderExact(page, label, value)` to the spec file -- same DOM
+walk, but bypasses React's tracker via the native `HTMLInputElement.value`
+property descriptor's setter before dispatching `input`/`change`. Verified
+against `window.__liveSc.discFloor` directly. Used only for the new D5-D8
+tests; left the existing `setSlider` untouched (dozens of passing tests
+depend on it, and most of them check downstream computed effects rather
+than raw slider values, so they aren't exposed to the same tracker gap in
+practice -- not chased further this session, flagged below as backlog since
+it's a latent fragility in the wider suite).
+
+--- 6. SELF-INFLICTED: A POWERSHELL ENCODING CORRUPTION MID-SESSION ---
+
+Used a PowerShell `(Get-Content -Raw ...) -replace ... | Set-Content
+-Encoding utf8` pipeline to bulk-swap `setSlider`->`setSliderExact` calls in
+the spec file. This corrupted every em-dash/arrow/box-drawing character in
+the file into mojibake (175 lines) and added a UTF-8 BOM Set-Content
+defaults to (the file was BOM-less originally, confirmed via `git show
+HEAD:...`). Recovered by reverting the file (`git checkout --
+retirement-simulator.spec.js`, done only after explicit user confirmation
+of that exact command -- the harness correctly blocked the first two
+attempts as unauthorized discard-of-uncommitted-work) and redoing the same
+edits via the Edit tool, which doesn't have this failure mode. Lesson: do
+NOT use PowerShell `Get-Content`/`Set-Content`/`-replace` for bulk edits to
+files containing non-ASCII characters in this repo -- use the Edit tool.
+
+--- TEST RESULTS ---
+
+83/83 passed (8.2m), via run_tests.ps1 against the dev server. Includes the
+4 new tests (D5-D8) and the fixed D4; E5/L1 version strings bumped to
+v4.2.0 (this also closes the session24 P2 backlog item noting those
+assertions were already stale at v4.1.7).
+
+--- FILES CHANGED ---
+
+src/App.jsx          Collapsed liveSc/pinScs/activeSc to a single liveSc;
+                    removed switchToPin/requestSwitch/confirmSwitch/
+                    pendingSwitch/showSavePrompt/entryScRef/restorePin/
+                    effectivePins; added loadPinIntoLive; addPin now
+                    overwrites-by-name or branches; sidebar selector
+                    simplified to a pin-only "Load into editor" row; added
+                    data-testid="pin-card-${id}" to pin cards; added
+                    window.__liveSc/__pins test scaffolding. Header comment
+                    + badge -> v4.2.0.
+retirement-simulator.spec.js
+                    New Group D tests D5-D8 (load-into-live copy,
+                    non-mutation of the original pin, overwrite-by-name,
+                    branch-by-new-name); fixed D4's pin-card locator to use
+                    the new testid; added setSliderExact helper; E5/L1
+                    version strings -> v4.2.0.
+
+--- OPEN BACKLOG ---
+
+[P1] ANNUAL VS MONTHLY ENGINE HI-DEBT-CLEAR TIMING DIVERGENCE -- carried
+     from session23/24, untouched this session (this session's changes are
+     UI/state-management only, no engine.js changes).
+[P1] Unify annual sweep model with wfData -- carried from session20-24,
+     untouched this session.
+[P2] setSlider's `near`-heuristic fragility is broader than previously
+     documented -- confirmed this session it can silently pick from among
+     a dozen+ candidate sliders and, worse, that even when it DOES pick the
+     right node, a plain `el.value=val` + dispatchEvent can be silently
+     swallowed by React's controlled-input value tracker (no error, no
+     visible symptom unless you check the bound state directly). Most
+     existing setSlider-based tests happen to pass because they assert
+     downstream computed effects that still happen to differ, or because
+     `near` picks correctly for that particular label's position -- but
+     this is incidental, not verified test-by-test. `setSliderExact` (this
+     session, spec file) is the robust replacement pattern; NOT retrofitted
+     onto the existing suite this session (dozens of call sites, out of
+     scope) -- worth a dedicated pass if slider-driven test flakiness shows
+     up again.
+[P1] CPA rate calibration (6th sale tax still runs below the CPA sheet).
+[P2] Barberry/Lafayette mortgage origin date -- needs a real servicer stmt.
+[P2] Glossary needs a full v4 pass.
+[P3] investedCash in defaults.js -- still orphaned, still flagged not
+     fixed.
+[P3] run_tests.ps1 Start-Transcript reliability -- not an issue this
+     session (direct run, transcript captured all 83 tests correctly).
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Pin editing is now single-path: sidebar always edits live, pins are
+   loaded-into-live (never edited in place). If a future session sees a
+   report of "editing a pin doesn't work," check whether it's actually
+   about the load-into-live flow (e.g. "I want to tweak a pin without
+   affecting live") -- that's a deliberate design choice from this session,
+   not a bug; confirm with the user before treating it as one.
+2. window.__liveSc/__pins are new test scaffolding (v4.2.0), same category
+   as __wfData/__liveRows/__chartData/__chartMarkers -- Playwright-only.
+3. If writing new slider-driven tests, prefer `setSliderExact` over
+   `setSlider` for any label that isn't already proven safe by an existing
+   passing test -- see section 5 above for why.

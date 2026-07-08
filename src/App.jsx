@@ -1,5 +1,5 @@
-// v4.1.7 -- fix pinned-scenario FCF/Sweep chart fields overstating FCF and understating Sweep: fcfChart/sweepChart's floor term was using diCap (discFloor+rdTopUp+obTopUp) instead of discFloor alone, double-counting the rainy-day/op-buffer top-ups that the monthly engine already strips out separately before its own floor comparison
-import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
+// v4.2.0 -- pin editing via load-into-live: removed the broken in-place "editing pin" mode (sidebar always edits live now); loading a pin copies its params into live, re-Pinning under the same name overwrites, a new name branches
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -106,24 +106,15 @@ export default function App(){
     setDefaultsRev(r=>r+1);
   },[defaultsOv]);
 
-  // -- Scenario state (single object for live + per-pin editing) ------
+  // -- Scenario state (single editable object -- the sidebar always edits
+  // live; loading a pin copies its params into live, see loadPinIntoLive) --
   const [liveSc,  setLiveSc]  = useState(SC_DEFAULTS);
-  const [pinScs,  setPinScs]  = useState({});      // {pinId: sc_object}
-  const [activeSc,setActiveSc]= useState("live");  // "live" | pinId(number)
 
-  // Helpers: get/set the active scenario
-  const sc = activeSc==="live" ? liveSc : (pinScs[activeSc]||SC_DEFAULTS);
+  // Helpers: get/set the (sole) editable scenario
+  const sc = liveSc;
   const setSc = useCallback((updater)=>{
-    if(activeSc==="live"){
-      setLiveSc(s=>typeof updater==="function"?updater(s):{...s,...updater});
-    } else {
-      setPinScs(ps=>{
-        const cur=ps[activeSc]||SC_DEFAULTS;
-        const next=typeof updater==="function"?updater(cur):{...cur,...updater};
-        return {...ps,[activeSc]:next};
-      });
-    }
-  },[activeSc]);
+    setLiveSc(s=>typeof updater==="function"?updater(s):{...s,...updater});
+  },[]);
 
   // Destructure active scenario for use in controls + engines
   const {
@@ -255,7 +246,6 @@ export default function App(){
   const [eventsCollapsed, setEventsCollapsed] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [cumView,     setCumView]     = useState("income");
-  const entryScRef = React.useRef(null); // sc snapshot at moment of entering a pin
   const [cumCollapsed,setCumCollapsed]= useState(false);
   const [fcOpen, setFcOpen] = useState(false);  // fixed costs breakdown panel
   const [showLive, setShowLive] = useState(true);       // show live scenario on charts
@@ -308,31 +298,6 @@ export default function App(){
   }),[sc, diCap, maintRate, defaultsRev]);   // defaultsRev: engines read mutated BASE/DISPO objects
 
   const liveRows  = useMemo(()=>buildScenario(liveParams),[liveParams]);
-  // For pins being actively edited, recompute rows from pinScs
-  const effectivePins = useMemo(()=>pins.map(pin=>{
-    const editedSc = pinScs[pin.id];
-    if(!editedSc) return pin;
-    const eProps = editedSc.properties || freshPropertiesDefaults();
-    const eTotalVal = eProps.reduce((s,pr)=>s+(pr.hold?.mode==='keep'?pr.value:0),0);
-    const p = makeParams({
-      ...editedSc,
-      ssStartYear:2026+(editedSc.ssAge-65),
-      ssAmount:editedSc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(editedSc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
-      diCap:editedSc.discFloor+editedSc.rdTopUp+editedSc.obTopUp,
-      reAppreciation:editedSc.reApp/100, rentGrowth:editedSc.rentGr/100, inflation:editedSc.cpi/100,
-      coreCpi:editedSc.cpi/100, healthCpi:editedSc.healthCpi/100, propCpi:editedSc.propCpi/100,
-      propInflation:(editedSc.cpi/100)+0.007, investReturn:editedSc.investRet/100,
-      lifestyleDraws:editedSc.lifestyleDraws.filter(d=>d.enabled),
-      ccRate:editedSc.ccRate/100, sophiaRate:editedSc.sophiaRate/100, nolanRate:editedSc.nolanRate/100,
-      loans:(editedSc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
-      strPlatformPct:(editedSc.strPlatformPct||3)/100, strCleanPct:(editedSc.strCleanPct||4)/100, mgrPct:(editedSc.mgrPct||0)/100,
-      ltrVacancyPct:(editedSc.ltrVacancyPct||4)/100, mtrCleaningFlat:editedSc.mtrCleaningFlat||300,
-      maintRate:(editedSc.struct6*1000*editedSc.maintStr/100+editedSc.struct15*1000*editedSc.maintStr/100+editedSc.structLaf*1000*editedSc.maintStr/100)/
-               (eTotalVal||1)||0.005,
-    });
-    const rows = buildScenario(p);
-    return {...pin, rows, stats:keyStats(rows)};
-  }),[pins, pinScs]);
   const liveStats = useMemo(()=>keyStats(liveRows),[liveRows]);
 
   // v3.4.0: saved-pin rows must also see Defaults-tab overrides (their engine
@@ -812,6 +777,13 @@ export default function App(){
     if(typeof window !== 'undefined'){ window.__wfData = wfData; window.__liveRows = liveRows; }
   },[wfData, liveRows]);
 
+  // v4.2.0: expose the live scenario + pins, same test-scaffolding category
+  // as __wfData/__liveRows above -- lets Playwright assert load-into-live
+  // deep-equality/non-mutation without scraping every sidebar control.
+  useEffect(()=>{
+    if(typeof window !== 'undefined'){ window.__liveSc = sc; window.__pins = pins; }
+  },[sc, pins]);
+
   // -- Chart data ------------------------------------------
   // -- Chart data ------------------------------------------
   const chartData = useMemo(()=>{
@@ -1038,6 +1010,8 @@ export default function App(){
     }catch(e){console.warn('localStorage save failed',e);}
   },[]);
 
+  // Save live under `pinName`: overwrites the existing pin of that name (by
+  // trimmed match), or branches into a new pin if the name is new/changed.
   const addPin = useCallback(()=>{
     const name=pinName.trim()||`Scenario ${nextId}`;
     const paramSnapshot=captureSnapshot();
@@ -1047,11 +1021,17 @@ export default function App(){
       struct6,struct15,structLaf,maintStr,bufferMode,
       diCap,totalMaintAnnual,
     };
-    const newPin={id:nextId,name,color:PIN_COLORS[nextId%PIN_COLORS.length],rows,stats:keyStats(rows),cfSettings,paramSnapshot};
-    const newPins=[...pins.slice(-5),newPin];
-    const newNextId=nextId+1;
+    const existing=pins.find(p=>p.name===name);
+    let newPins, newNextId=nextId;
+    if(existing){
+      newPins=pins.map(p=>p.id===existing.id?{...p,rows,stats:keyStats(rows),cfSettings,paramSnapshot}:p);
+    } else {
+      const newPin={id:nextId,name,color:PIN_COLORS[nextId%PIN_COLORS.length],rows,stats:keyStats(rows),cfSettings,paramSnapshot};
+      newPins=[...pins.slice(-5),newPin];
+      newNextId=nextId+1;
+      setVisiblePins(s=>new Set([...s,nextId]));
+    }
     setPins(newPins);
-    setVisiblePins(s=>new Set([...s,nextId]));
     setNextId(newNextId);
     setPinName("");
     savePinsToStorage(newPins.map(p=>({...p,rows:undefined,stats:undefined})),newNextId);
@@ -1070,84 +1050,20 @@ export default function App(){
     savePinsToStorage(newPins.map(p=>({...p,rows:undefined,stats:undefined})),nextId);
   },[pins,nextId,savePinsToStorage]);
 
-  const restorePin = useCallback((pin)=>{
-    const s=pin.paramSnapshot||pin;
-    if(!s) return;
-    // v4.0.0-A: paramSnapshot is sc format (same as SC_DEFAULTS keys). No
-    // backward compatibility -- fresh schema, no migration. Merge with
-    // SC_DEFAULTS so missing fields (incl. properties/obligation) fall back.
+  // Load a pin's saved params into live (the sidebar's only editable
+  // state) so it can be tweaked, then re-Pinned -- under the same name to
+  // overwrite, or a new name to branch. Shallow copy: safe because every
+  // setter in this file does copy-on-write on sc's nested arrays/objects
+  // (never mutates in place), so subsequent live edits can't leak back into
+  // the pin's stored paramSnapshot.
+  const loadPinIntoLive = useCallback((pin)=>{
+    const s=pin.paramSnapshot||{};
     const next={...SC_DEFAULTS,...s};
     if(next.lifestyleDraws) next.lifestyleDraws=next.lifestyleDraws.map(d=>({...d,enabled:d.enabled!==false}));
-    if(activeSc==="live") setLiveSc(next);
-    else setPinScs(ps=>({...ps,[activeSc]:next}));
-  },[activeSc]);
-
-  const switchToPin = useCallback((pin)=>{
-    // If pin has no sc yet, seed it from its paramSnapshot
-    setPinScs(ps=>{
-      if(ps[pin.id]) return ps;
-      const next={...SC_DEFAULTS,...(pin.paramSnapshot||{})};
-      return {...ps,[pin.id]:next};
-    });
-    setActiveSc(pin.id);
-    entryScRef.current = null;
+    setLiveSc(next);
+    setPinName(pin.name);
+    setShowLive(true);
   },[]);
-
-  // Unsaved changes check
-  const [pendingSwitch, setPendingSwitch] = useState(null); // {toId} -- "live" or pin.id
-  const [showSavePrompt, setShowSavePrompt] = useState(false);
-
-  const requestSwitch = useCallback((toId, targetPin)=>{
-    if(activeSc!=="live" && activeSc!==toId){
-      // Only prompt if something actually changed since we entered this pin
-      const currentStr = pinScs[activeSc] ? JSON.stringify(pinScs[activeSc]) : null;
-      const hasChanges = entryScRef.current !== null && currentStr !== entryScRef.current;
-      if(hasChanges){
-        setShowSavePrompt(true);
-        setPendingSwitch({toId, targetPin});
-        return;
-      }
-    }
-    if(toId==="live"){ setActiveSc("live"); }
-    else if(targetPin){ switchToPin(targetPin); }
-  },[activeSc, pinScs, switchToPin]);
-
-  const confirmSwitch = useCallback((saveChanges)=>{
-    if(saveChanges && activeSc!=="live"){
-      // Rebuild pin rows from current pinScs[activeSc]
-      const updatedSc = pinScs[activeSc]||SC_DEFAULTS;
-      const updatedParams = makeParams({
-        ...updatedSc,
-        ssStartYear:2026+(updatedSc.ssAge-65),
-        ssAmount:updatedSc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(updatedSc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
-        reAppreciation:updatedSc.reApp/100, rentGrowth:updatedSc.rentGr/100, inflation:updatedSc.cpi/100,
-        coreCpi:updatedSc.cpi/100, healthCpi:updatedSc.healthCpi/100, propCpi:updatedSc.propCpi/100,
-        propInflation:(updatedSc.cpi/100)+0.007, investReturn:updatedSc.investRet/100,
-        loans:(updatedSc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
-        strPlatformPct:(updatedSc.strPlatformPct||3)/100, strCleanPct:(updatedSc.strCleanPct||4)/100, mgrPct:(updatedSc.mgrPct||0)/100,
-        ltrVacancyPct:(updatedSc.ltrVacancyPct||4)/100, mtrCleaningFlat:updatedSc.mtrCleaningFlat||300,
-        lifestyleDraws:updatedSc.lifestyleDraws.filter(d=>d.enabled),
-        ccRate:updatedSc.ccRate/100, sophiaRate:updatedSc.sophiaRate/100, nolanRate:updatedSc.nolanRate/100,
-      });
-      const newRows = buildScenario(updatedParams);
-      setPins(ps=>ps.map(p=>p.id===activeSc?{...p,rows:newRows,stats:keyStats(newRows),paramSnapshot:captureSnapshot()}:p));
-    }
-    setShowSavePrompt(false);
-    const {toId, targetPin} = pendingSwitch||{};
-    setPendingSwitch(null);
-    if(toId==="live"){ setActiveSc("live"); }
-    else if(targetPin){ switchToPin(targetPin); }
-  },[activeSc, pinScs, pendingSwitch, switchToPin, captureSnapshot]);
-
-  const switchToLive = useCallback(()=>requestSwitch("live",null),[requestSwitch]);
-  // Capture entry snapshot whenever we land on a pin
-  React.useEffect(()=>{
-    if(activeSc!=="live"){
-      entryScRef.current = pinScs[activeSc] ? JSON.stringify(pinScs[activeSc]) : null;
-    } else {
-      entryScRef.current = null;
-    }
-  },[activeSc]); // intentionally omit pinScs -- only capture on context switch
 
   const exportPins = useCallback(()=>{
     const payload={
@@ -1652,7 +1568,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.1.7</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.2.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1682,53 +1598,24 @@ export default function App(){
         <div style={{display:"flex",flexDirection:"column",gap:0}}>
           <div style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:"14px 14px 16px",overflowY:"auto",maxHeight:"calc(100vh - 120px)"}}>
 
-            {/* -- SCENARIO CONTEXT SELECTOR -- */}
-            {(showLive||pins.filter(p=>visiblePins.has(p.id)).length>0)&&(
+            {/* -- LOAD PINNED SCENARIO INTO EDITOR -- */}
+            {pins.filter(p=>visiblePins.has(p.id)).length>0&&(
               <div style={{marginBottom:12}}>
-                <div style={{fontSize:9,color:dim,marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Editing</div>
+                <div style={{fontSize:9,color:dim,marginBottom:5,textTransform:"uppercase",letterSpacing:1}}>Load into editor</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                  {showLive&&(
-                    <button onClick={switchToLive} style={{
-                      background:activeSc==="live"?amber+"33":"transparent",
-                      border:`1px solid ${activeSc==="live"?amber:dim}`,
-                      borderRadius:12,color:activeSc==="live"?amber:dim,
-                      cursor:"pointer",fontSize:10,padding:"3px 10px",fontFamily:font,
-                    }}>live</button>
-                  )}
-                  {effectivePins.filter(p=>visiblePins.has(p.id)).map(pin=>(
-                    <button key={pin.id} onClick={()=>requestSwitch(pin.id,pin)} style={{
-                      background:activeSc===pin.id?pin.color+"33":"transparent",
-                      border:`1px solid ${activeSc===pin.id?pin.color:dim}`,
-                      borderRadius:12,color:activeSc===pin.id?pin.color:dim,
+                  {pins.filter(p=>visiblePins.has(p.id)).map(pin=>(
+                    <button key={pin.id} onClick={()=>loadPinIntoLive(pin)} style={{
+                      background:"transparent",
+                      border:`1px solid ${pin.color}`,
+                      borderRadius:12,color:pin.color,
                       cursor:"pointer",fontSize:10,padding:"3px 10px",fontFamily:font,
                       maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
                     }}>{pin.name}</button>
                   ))}
                 </div>
-                {activeSc!=="live"&&(
-                  <div style={{fontSize:9,color:dim,marginTop:4,fontStyle:"italic"}}>
-                    Editing pin -- changes update this pin's scenario independently
-                  </div>
-                )}
-                {showSavePrompt&&(
-                  <div style={{marginTop:8,background:bg2,border:`1px solid ${amber}`,borderRadius:6,padding:"8px 10px"}}>
-                    <div style={{fontSize:10,color:amber,marginBottom:6}}>Save changes to this pin before switching?</div>
-                    <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>confirmSwitch(true)} style={{
-                        background:amber+"33",border:`1px solid ${amber}`,borderRadius:4,
-                        color:amber,cursor:"pointer",fontSize:10,padding:"3px 10px",fontFamily:font
-                      }}>Save + switch</button>
-                      <button onClick={()=>confirmSwitch(false)} style={{
-                        background:"transparent",border:`1px solid ${dim}`,borderRadius:4,
-                        color:dim,cursor:"pointer",fontSize:10,padding:"3px 10px",fontFamily:font
-                      }}>Discard + switch</button>
-                      <button onClick={()=>{setShowSavePrompt(false);setPendingSwitch(null);}} style={{
-                        background:"transparent",border:`1px solid ${dim}33`,borderRadius:4,
-                        color:dim,cursor:"pointer",fontSize:10,padding:"3px 10px",fontFamily:font
-                      }}>Cancel</button>
-                    </div>
-                  </div>
-                )}
+                <div style={{fontSize:9,color:dim,marginTop:4,fontStyle:"italic"}}>
+                  Loads this pin's params into the editor below (overwrites current edits). Pin under the same name to save changes back, or a new name to branch.
+                </div>
               </div>
             )}
 
@@ -2458,7 +2345,7 @@ export default function App(){
                     {showLive&&<Area data={liveRows} type="monotone" dataKey="cumRental"  name="Rental"  stackId="i" stroke={incColors.rental}  fill={incColors.rental}  fillOpacity={0.7}/>}
                     {showLive&&<Area data={liveRows} type="monotone" dataKey="cumSS"      name="SS"      stackId="i" stroke={incColors.ss}      fill={incColors.ss}      fillOpacity={0.7}/>}
                     {showLive&&last&&last.cumDraw>0&&<Area data={liveRows} type="monotone" dataKey="cumDraw" name="Draws" stackId="i" stroke={incColors.draw} fill={incColors.draw} fillOpacity={0.7}/>}
-                    {effectivePins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
+                    {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
                       <Line key={pin.id} data={pin.rows} type="monotone" dataKey="cumInc"
                         name={`${pin.name} total`} stroke={pin.color} strokeWidth={2} dot={false} strokeDasharray="5 3"/>
                     ))}
@@ -2480,7 +2367,7 @@ export default function App(){
                     {showLive&&<Area data={liveRows} type="monotone" dataKey="cumProp"    name="Prop Tax/Ins"stackId="c" stroke={costColors.prop}   fill={costColors.prop}   fillOpacity={0.7}/>}
                     {showLive&&<Area data={liveRows} type="monotone" dataKey="cumMaint"   name="Maintenance" stackId="c" stroke={costColors.maint}  fill={costColors.maint}  fillOpacity={0.7}/>}
                     {showLive&&<Area data={liveRows} type="monotone" dataKey="cumDebt"    name="HI Debt Pmts"stackId="c" stroke={costColors.debt}   fill={costColors.debt}   fillOpacity={0.7}/>}
-                    {effectivePins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
+                    {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
                       <Line key={pin.id} data={pin.rows} type="monotone" dataKey="cumCost"
                         name={`${pin.name} total`} stroke={pin.color} strokeWidth={2} dot={false} strokeDasharray="5 3"/>
                     ))}
@@ -2499,7 +2386,7 @@ export default function App(){
                     {showLive&&<Line data={liveRows} type="monotone" dataKey="cumInc"  name="Live Income" stroke={green} strokeWidth={2} dot={false}/>}
                     {showLive&&<Line data={liveRows} type="monotone" dataKey="cumCost" name="Live Cost"   stroke={red}   strokeWidth={2} dot={false}/>}
                     {showLive&&<Line data={liveRows} type="monotone" dataKey="cumGap"  name="Live Gap"    stroke={amber} strokeWidth={2} dot={false} strokeDasharray="4 2"/>}
-                    {effectivePins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
+                    {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
                       <Line key={pin.id} data={pin.rows} type="monotone" dataKey="cumGap"
                         name={`${pin.name} gap`} stroke={pin.color} strokeWidth={1.5} dot={false} strokeDasharray="6 2"/>
                     ))}
@@ -2767,7 +2654,7 @@ export default function App(){
             {/* Pin list */}
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {pins.map(pin=>(
-                <div key={pin.id} style={{
+                <div key={pin.id} data-testid={`pin-card-${pin.id}`} style={{
                   background:bg2,border:`1px solid ${pin.color}44`,
                   borderLeft:`3px solid ${pin.color}`,borderRadius:7,
                   padding:"9px 12px",display:"flex",alignItems:"center",gap:10,
@@ -2822,10 +2709,7 @@ export default function App(){
                         cursor:visiblePins.has(pin.id)?"default":"pointer",
                         fontSize:10,padding:"2px 8px",lineHeight:1,fontFamily:font,
                       }}>on</button>
-                    <button onClick={()=>{
-                        setVisiblePins(s=>{const n=new Set(s);n.delete(pin.id);return n;});
-                        if(activeSc===pin.id) switchToLive();
-                      }}
+                    <button onClick={()=>setVisiblePins(s=>{const n=new Set(s);n.delete(pin.id);return n;})}
                       disabled={!visiblePins.has(pin.id)}
                       style={{
                         background:!visiblePins.has(pin.id)?dim+"22":"transparent",
@@ -2837,7 +2721,7 @@ export default function App(){
 
                     {confirmDeleteId===pin.id
                       ? <div style={{display:"flex",gap:2}}>
-                          <button onClick={()=>{removePin(pin.id);setConfirmDeleteId(null);if(activeSc===pin.id)switchToLive();}} style={{
+                          <button onClick={()=>{removePin(pin.id);setConfirmDeleteId(null);}} style={{
                             background:red+"33",border:`1px solid ${red}`,borderRadius:4,
                             color:red,cursor:"pointer",fontSize:9,padding:"2px 5px",fontFamily:font,
                           }}>yes</button>
@@ -2861,7 +2745,7 @@ export default function App(){
 
             {/* ---- Comparison Table ---- */}
             {pins.length>0&&(()=>{
-              const visPins = effectivePins.filter(p=>visiblePins.has(p.id));
+              const visPins = pins.filter(p=>visiblePins.has(p.id));
               const cols = [
                 {id:"live", label:"Live", color:green, stats:liveStats, nwYr10:chartData[10]?.nw, sweepFinal:chartData[chartData.length-1]?.sweepSavK},
                 ...visPins.map(p=>({

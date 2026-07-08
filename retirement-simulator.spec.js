@@ -31,6 +31,27 @@ async function setSlider(page, labelText, value) {
   await page.waitForTimeout(200);
 }
 
+// setSlider's `near` heuristic can grab the wrong slider when several sit
+// close together on a long scrollable tab (confirmed empirically -- see
+// v4.2.0 journal). This walks the DOM structure explicitly instead: exact
+// label span -> its row div's parent (the slider() helper's outer wrapper)
+// -> the one input[type=range] inside it. Also uses the native value-setter
+// bypass so the dispatched 'input' event isn't swallowed by React's
+// controlled-input value tracker (a plain `el.value=val` primes the
+// tracker to think nothing changed, so the following dispatched event is a
+// no-op).
+async function setSliderExact(page, exactLabelText, value) {
+  const label = page.locator('span', { hasText: exactLabelText }).first();
+  const slider = label.locator('xpath=ancestor::div[2]').locator('input[type="range"]').first();
+  await slider.evaluate((el, val) => {
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+    desc.set.call(el, val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, String(value));
+  await page.waitForTimeout(200);
+}
+
 // ─── Group A: Core Engine Correctness ───────────────────────────────────────
 
 test.describe('Group A — Core Engine Correctness', () => {
@@ -448,12 +469,119 @@ test.describe('Group D — Pin System', () => {
     await page.waitForTimeout(400);
 
     // Find the pin card and check it shows an NW yr10 value
-    const pinCard = page.locator('div').filter({ hasText: /^NW Check D4$/ }).first()
-      .locator('xpath=ancestor::div[3]').first();
+    const pinCard = page.locator('[data-testid^="pin-card-"]').filter({ hasText: 'NW Check D4' }).first();
     const nwText = await pinCard.textContent();
     console.log(`  Pin card contains NW: ${nwText?.includes('NW yr10')}`);
     expect(nwText).toMatch(/NW yr10/);
     expect(nwText).toMatch(/\$[\d.]+M/);
+  });
+
+  test('D5 — Load pin into live copies params (v4.2.0)', async ({ page }) => {
+    await loadApp(page);
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 1900);
+    await clickTab(page, 'Simulator');
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Floor1900');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    // Move live away from the pinned value
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 700);
+    await clickTab(page, 'Simulator');
+    let liveFloor = await page.evaluate(() => window.__liveSc.discFloor);
+    expect(liveFloor).toBe(700);
+
+    // Load the pin back into live via the sidebar's "Load into editor" pill
+    await page.locator('button', { hasText: 'Floor1900' }).click();
+    await page.waitForTimeout(300);
+    liveFloor = await page.evaluate(() => window.__liveSc.discFloor);
+    expect(liveFloor).toBe(1900);
+    console.log(`  Live discFloor after load: ${liveFloor}`);
+
+    // Pin-name field pre-fills so re-Pinning under the same name overwrites
+    const nameVal = await page.locator('input[placeholder*="Name this scenario"]').inputValue();
+    expect(nameVal).toBe('Floor1900');
+  });
+
+  test('D6 — Editing live after a pin load does not mutate the original pin (v4.2.0)', async ({ page }) => {
+    await loadApp(page);
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 1200);
+    await clickTab(page, 'Simulator');
+    await page.locator('input[placeholder*="Name this scenario"]').fill('OrigPin');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    await page.locator('button', { hasText: 'OrigPin' }).click();
+    await page.waitForTimeout(300);
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 3000);
+    await clickTab(page, 'Simulator');
+
+    const origPinFloor = await page.evaluate(() =>
+      window.__pins.find(p => p.name === 'OrigPin')?.paramSnapshot?.discFloor);
+    const liveFloor = await page.evaluate(() => window.__liveSc.discFloor);
+    console.log(`  Original pin discFloor: ${origPinFloor}, live discFloor: ${liveFloor}`);
+    expect(origPinFloor).toBe(1200);
+    expect(liveFloor).toBe(3000);
+  });
+
+  test('D7 — Pinning under an existing name overwrites, not branches (v4.2.0)', async ({ page }) => {
+    await loadApp(page);
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 900);
+    await clickTab(page, 'Simulator');
+    await page.locator('input[placeholder*="Name this scenario"]').fill('OverwriteMe');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+    const countBefore = await page.evaluate(() => window.__pins.length);
+
+    await page.locator('button', { hasText: 'OverwriteMe' }).click();
+    await page.waitForTimeout(300);
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 2500);
+    await clickTab(page, 'Simulator');
+    await page.locator('input[placeholder*="Name this scenario"]').fill('OverwriteMe');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    const countAfter = await page.evaluate(() => window.__pins.length);
+    const updatedFloor = await page.evaluate(() =>
+      window.__pins.find(p => p.name === 'OverwriteMe')?.paramSnapshot?.discFloor);
+    console.log(`  Pin count before/after: ${countBefore}/${countAfter}, updated discFloor: ${updatedFloor}`);
+    expect(countAfter).toBe(countBefore);
+    expect(updatedFloor).toBe(2500);
+  });
+
+  test('D8 — Pinning under a new name branches instead of overwriting (v4.2.0)', async ({ page }) => {
+    await loadApp(page);
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 1100);
+    await clickTab(page, 'Simulator');
+    await page.locator('input[placeholder*="Name this scenario"]').fill('BranchBase');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+    const countBefore = await page.evaluate(() => window.__pins.length);
+
+    await page.locator('button', { hasText: 'BranchBase' }).click();
+    await page.waitForTimeout(300);
+    await clickTab(page, 'Cash Flow');
+    await setSliderExact(page, 'Fallback floor (unscheduled years)', 2200);
+    await clickTab(page, 'Simulator');
+    await page.locator('input[placeholder*="Name this scenario"]').fill('BranchNew');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    const countAfter = await page.evaluate(() => window.__pins.length);
+    const origFloor = await page.evaluate(() =>
+      window.__pins.find(p => p.name === 'BranchBase')?.paramSnapshot?.discFloor);
+    const newFloor = await page.evaluate(() =>
+      window.__pins.find(p => p.name === 'BranchNew')?.paramSnapshot?.discFloor);
+    console.log(`  Pin count before/after: ${countBefore}/${countAfter}, base: ${origFloor}, new: ${newFloor}`);
+    expect(countAfter).toBe(countBefore + 1);
+    expect(origFloor).toBe(1100);
+    expect(newFloor).toBe(2200);
   });
 
 });
@@ -499,10 +627,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.1.5"', async ({ page }) => {
+  test('E5 — Version header shows "v4.2.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.5').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.1.5');
+    await expect(page.locator('text=v4.2.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.2.0');
   });
 
 });
@@ -958,10 +1086,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.1.5', async ({ page }) => {
+  test('L1 — Version header shows v4.2.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.1.5').first()).toBeVisible();
-    console.log('  L1 — Version v4.1.5 confirmed');
+    await expect(page.locator('text=v4.2.0').first()).toBeVisible();
+    console.log('  L1 — Version v4.2.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
