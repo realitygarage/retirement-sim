@@ -1,9 +1,9 @@
-// v4.2.5 -- BUGFIX: disposition sale price no longer compounds appreciationPct by sale-year index
-// (computeDispo's fmv was prop.value * (1+app)^yrIdx, which ignored quarter and applied a full
-// year of appreciation for e.g. a Q4->Q1 timing change across a year boundary). Sale price is now
-// the entered property value, used verbatim -- appreciation still applies to Net Worth of held
-// properties (untouched, separate code path). Disposition breakdown now labels the gross line
-// "Sale price (entered -- no appreciation applied)" to keep this legible.
+// v4.2.6 -- itemized Disposition breakdown: a collapsible sub-card (default collapsed) under
+// each property's "Proceeds summary" showing the full sale->tax->proceeds derivation as
+// aligned label/value rows, adapting to mode (primary vs rental, 1031 vs sell). Display-only --
+// every value pulled straight from disposeAsset's return object (or its pre-offset snapshot for
+// the one-time-obligation delta line); rate labels (%) read from DISPO_DEFAULTS, never hardcoded.
+// Dev-mode console.warn guards the arithmetic chain against drifting from the engine's own fields.
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -260,6 +260,7 @@ export default function App(){
   const [propValueEdit, setPropValueEdit] = useState(null);   // {id,text} | null -- click-to-type property value
   const [loansDebtOpen, setLoansDebtOpen] = useState(true);   // v4.0.0-B Loans & Debt group collapse
   const [costProfilesOpen, setCostProfilesOpen] = useState(true); // v4.2.4 Cost Profiles group collapse
+  const [dispoBreakdownOpen, setDispoBreakdownOpen] = useState({}); // v4.2.6 per-property itemized disposition breakdown (default collapsed)
   // v4.2.1 property value slider top-end anchored to each property's *default* value (not its
   // live/current value) so the range stays fixed while dragging instead of receding as you approach it.
   const defaultPropValueById = useMemo(()=>Object.fromEntries(freshPropertiesDefaults().map(p=>[p.id,p.value])),[]);
@@ -356,6 +357,24 @@ export default function App(){
         console.warn(`[obligation audit] draw+paydown+savings split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
     }
   },[settleData,obligation.amount,liveRows,obligation.year]);
+
+  // v4.2.6 dev-mode consistency guard for the itemized Disposition breakdown sub-card:
+  // every property with mode!=='keep' (not just obligation-year sellers, unlike the audit
+  // above) must reconcile netSale/pre-tax/after-tax against disposeAsset's own fields.
+  useEffect(()=>{
+    if(!(import.meta.env && import.meta.env.DEV)) return;
+    const dr = liveRows.dispoResults || {};
+    for(const prop of properties){
+      const d = dr[prop.id];
+      if(!d || !d.mode || d.mode==='keep') continue;
+      if(Math.abs((d.grossPrice - d.sellingCosts) - d.netSale) > 1)
+        console.warn(`[dispo breakdown] ${prop.id}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts ($${Math.round(d.grossPrice - d.sellingCosts)})`);
+      if(d.mode==='full_1031') continue; // rolled, not cashed out -- afterTaxNetProceeds is deliberately 0, not preTax-totalTax
+      const preTax = d.mode==='partial_1031' ? (d.cashBoot||0) : d.netSale - d.mortgagePayoff;
+      if(Math.abs((preTax - d.totalTax) - d.afterTaxNetProceeds) > 1)
+        console.warn(`[dispo breakdown] ${prop.id}: afterTaxNetProceeds ($${Math.round(d.afterTaxNetProceeds)}) != pre-tax - totalTax ($${Math.round(preTax - d.totalTax)})`);
+    }
+  },[liveRows,properties]);
 
   // -- Cash flow waterfall engine ----------------------------
   const wfData = useMemo(()=>{
@@ -1202,6 +1221,71 @@ export default function App(){
     );
   };
 
+  // v4.2.6 itemized Disposition breakdown -- display-only. Every dollar value below is
+  // pulled straight off the disposeAsset return object (`d`, i.e. liveRows.dispoResults[id])
+  // or its pre-offset snapshot (`dNo`, i.e. liveRows.dispoResultsNoOffset[id]); nothing here
+  // recomputes tax/business logic -- only display arithmetic (subtraction/formatting) of
+  // already-computed engine fields. Rate constants read from DISPO_DEFAULTS (never hardcoded)
+  // so the % labels track the actual engine.js values.
+  const dispoPct = r => { const v=r*100; return (Number.isInteger(v)?v.toFixed(0):v.toFixed(1))+"%"; };
+  const dispoK = v => "$"+Math.round((v||0)/1000)+"K";
+  const dispoRow = (label, val, kind="item") => (
+    <div key={label} style={{
+      display:"flex",justifyContent:"space-between",padding:"2px 0",
+      borderTop:kind==="eq"?`1px solid ${bdr}`:"none",
+      marginTop:kind==="eq"?2:0,
+    }}>
+      <span style={{color:kind==="eq"?bright:muted,fontWeight:kind==="eq"?"bold":"normal"}}>
+        {kind==="sub"?"− ":kind==="eq"?"= ":""}{label}
+      </span>
+      <span style={{color:kind==="eq"?bright:muted,fontFamily:mono,fontWeight:kind==="eq"?"bold":"normal"}}>
+        {kind==="sub"?"−":""}{dispoK(val)}
+      </span>
+    </div>
+  );
+  const renderDispoBreakdown = (prop, hold, d, dNo) => {
+    if(!d || !d.mode || d.mode==="keep") return null;
+    const isPrimary = prop.isPrimary;
+    const preTaxProceeds = d.mode==="partial_1031" ? (d.cashBoot||0) : (d.netSale - d.mortgagePayoff);
+    const offsetAmt = (dNo.recognizedGain||0) - (d.recognizedGain||0);
+    const showOffset = obligation.offsetsCapitalGains!==false && obligation.year===hold.year && offsetAmt>0.5;
+    const is1031 = d.mode==="full_1031" || d.mode==="partial_1031";
+    return (
+      <div data-testid={`dispo-breakdown-${prop.id}`} style={{marginTop:8,paddingTop:8,borderTop:`1px dashed ${bdr}`,fontSize:9}}>
+        {dispoRow("Sale price (entered)", d.grossPrice)}
+        {dispoRow(`Selling costs (${dispoPct(DISPO_DEFAULTS.sellingCostsPct)})`, d.sellingCosts, "sub")}
+        {dispoRow("Net sale", d.netSale, "eq")}
+        {dispoRow("Mortgage payoff", d.mortgagePayoff, "sub")}
+        {dispoRow("Pre-tax proceeds", preTaxProceeds, "eq")}
+
+        <div style={{fontSize:8,color:dim,fontStyle:"italic",margin:"6px 0 2px"}}>Gain &amp; tax:</div>
+        {dispoRow("Adjusted basis", hold.basis||0)}
+        {dispoRow("Realized gain", d.realizedGain)}
+        {isPrimary && dispoRow("§121 exclusion (home)", hold.sec121Exclusion||0, "sub")}
+        {showOffset && dispoRow("One-time obligation offset", offsetAmt, "sub")}
+        {dispoRow("Recognized / taxable gain", d.recognizedGain, "eq")}
+
+        <div style={{fontSize:8,color:dim,fontStyle:"italic",margin:"6px 0 2px"}}>Tax detail:</div>
+        {!isPrimary && dispoRow(`Depreciation recapture (${dispoPct(DISPO_DEFAULTS.recaptureRate)})`, d.recaptureTax)}
+        {dispoRow(`Federal cap gains (${dispoPct(DISPO_DEFAULTS.fedCapGainsRate)})`, d.fedCapGainsTax)}
+        {!isPrimary && dispoRow("CA clawback", d.caClawbackTax)}
+        {dispoRow("CO tax", d.coTax)}
+        {!isPrimary && dispoRow("Other-state credit", d.otherStateCredit, "sub")}
+        {dispoRow("Total tax", d.totalTax, "eq")}
+        {dispoRow("After-tax proceeds", d.afterTaxNetProceeds, "eq")}
+
+        {is1031 && (
+          <>
+            <div style={{fontSize:8,color:dim,fontStyle:"italic",margin:"6px 0 2px"}}>1031 exchange:</div>
+            {d.mode==="partial_1031" && dispoRow("Cash boot", d.cashBoot)}
+            {dispoRow("Deferred gain (rolled)", d.deferredGain)}
+            {!isPrimary && dispoRow("CA-source deferred carryforward", d.deferredCarryForward)}
+          </>
+        )}
+      </div>
+    );
+  };
+
   const statBadge=(label,val,good)=>(
     <div style={{background:bg2,borderRadius:6,padding:"8px 10px",flex:1}}>
       <div style={{fontSize:9,color:dim,marginBottom:3}}>{label}</div>
@@ -1623,7 +1707,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.2.5</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.2.6</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1912,15 +1996,28 @@ export default function App(){
                     </div>
                   )}
 
-                  {/* Per-property proceeds summary */}
-                  {isSold && engineRes && engineRes.mode && engineRes.mode!=='keep' && (
+                  {/* Per-property proceeds summary + itemized Disposition breakdown sub-card (v4.2.6) */}
+                  {isSold && engineRes && engineRes.mode && engineRes.mode!=='keep' && (()=>{
+                    const noOffsetRes = liveRows.dispoResultsNoOffset?.[prop.id] || engineRes;
+                    const breakdownOpen = dispoBreakdownOpen[prop.id] === true;
+                    return (
                     <div style={{marginTop:8,padding:8,background:bg1,borderRadius:4,fontSize:9}}>
-                      <div style={{color:dim,marginBottom:3,fontWeight:"bold"}}>Proceeds summary (vs CPA sheet):</div>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                        <div style={{color:dim,fontWeight:"bold"}}>Proceeds summary (vs CPA sheet):</div>
+                        <button data-testid={`dispo-breakdown-toggle-${prop.id}`}
+                          onClick={()=>setDispoBreakdownOpen(o=>({...o,[prop.id]:!breakdownOpen}))}
+                          style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
+                            background:"transparent",border:`1px solid ${bdr}`,color:dim}}>
+                          {breakdownOpen?"▲ hide breakdown":"▾ itemized breakdown"}
+                        </button>
+                      </div>
                       <div style={{color:muted}}>Sale price (entered — no appreciation applied): <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.grossPrice||0)/1000)}K</span></div>
                       <div style={{color:muted}}>Tax: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.totalTax||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaEstTax||0)/1000)}K</div>
                       <div style={{color:muted}}>Net: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.afterTaxNetProceeds||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaNetProceedsAfterTax||0)/1000)}K</div>
+                      {breakdownOpen && renderDispoBreakdown(prop, hold, engineRes, noOffsetRes)}
                     </div>
-                  )}
+                    );
+                  })()}
                   </>)}
                 </div>
               );

@@ -627,10 +627,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.2.5"', async ({ page }) => {
+  test('E5 — Version header shows "v4.2.6"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.2.5').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.2.5');
+    await expect(page.locator('text=v4.2.6').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.2.6');
   });
 
 });
@@ -1086,10 +1086,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.2.5', async ({ page }) => {
+  test('L1 — Version header shows v4.2.6', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.2.5').first()).toBeVisible();
-    console.log('  L1 — Version v4.2.5 confirmed');
+    await expect(page.locator('text=v4.2.6').first()).toBeVisible();
+    console.log('  L1 — Version v4.2.6 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1429,6 +1429,84 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     for (const id of ['sixth', 'fifteenth', 'barberry']) {
       expect(new Set(result[id]).size).toBe(1);   // same gross price regardless of sale year/quarter
     }
+  });
+
+  test('R13 — itemized disposition breakdown arithmetic reconciles against disposeAsset fields', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      const cases = [
+        { id: 'sixth',     hold: { mode: 'sell', year: 2030, quarter: 2 } },
+        { id: 'fifteenth', hold: { mode: 'sell', year: 2030, quarter: 2 } },
+        { id: 'fifteenth', hold: { mode: 'full_1031', year: 2030, quarter: 2 } },
+        { id: 'fifteenth', hold: { mode: 'partial_1031', year: 2030, quarter: 2, cashBoot: 150000 } },
+        { id: 'barberry',  hold: { mode: 'sell', year: 2030, quarter: 2 } },
+      ];
+      return cases.map(({ id, hold }) => {
+        const rows = buildScenario(makeParams({ properties: [{ id, hold }] }));
+        const d = rows.dispoResults[id];
+        const netSaleCheck = (d.grossPrice - d.sellingCosts) - d.netSale;
+        // full_1031 is rolled, not cashed out -- afterTaxNetProceeds is deliberately 0 by
+        // design (disposeAsset), not derivable from preTax-totalTax; skip that leg for it,
+        // same exception the pre-existing "obligation audit" useEffect already carries.
+        let afterTaxCheck = 0;
+        if (d.mode !== 'full_1031') {
+          const preTax = d.mode === 'partial_1031' ? (d.cashBoot || 0) : (d.netSale - d.mortgagePayoff);
+          afterTaxCheck = (preTax - d.totalTax) - d.afterTaxNetProceeds;
+        }
+        return { id, mode: d.mode, netSaleCheck: Math.round(netSaleCheck), afterTaxCheck: Math.round(afterTaxCheck) };
+      });
+    });
+    console.log('  R13 — ' + JSON.stringify(result));
+    for (const r of result) {
+      expect(Math.abs(r.netSaleCheck)).toBeLessThanOrEqual(1);   // netSale === gross - sellingCosts
+      expect(Math.abs(r.afterTaxCheck)).toBeLessThanOrEqual(1);  // afterTax === preTax - totalTax (n/a for full_1031)
+    }
+  });
+
+  test('R14 — itemized breakdown sub-card: hidden at keep, collapsed by default, rows adapt to mode', async ({ page }) => {
+    await loadApp(page);
+
+    // keep (default): no breakdown toggle at all for sixth
+    await expect(page.locator('[data-testid="dispo-breakdown-toggle-sixth"]')).toHaveCount(0);
+
+    // sell sixth (primary) -> toggle appears, sub-card starts collapsed
+    await sellProperty(page, 'sixth', 2030, 2);
+    await page.waitForTimeout(200);
+    const sixthToggle = page.locator('[data-testid="dispo-breakdown-toggle-sixth"]');
+    await expect(sixthToggle).toBeVisible();
+    await expect(page.locator('[data-testid="dispo-breakdown-sixth"]')).toHaveCount(0);
+
+    await sixthToggle.click();
+    await page.waitForTimeout(200);
+    const sixthCard = page.locator('[data-testid="dispo-breakdown-sixth"]');
+    await expect(sixthCard).toBeVisible();
+    const sixthText = await sixthCard.textContent();
+    expect(sixthText).toContain('§121 exclusion (home)');       // primary-only row present
+    expect(sixthText).not.toContain('Depreciation recapture');  // rental-only rows absent for primary
+    expect(sixthText).not.toContain('CA clawback');
+    expect(sixthText).not.toContain('1031 exchange');           // sell mode, no 1031 section
+
+    // sell fifteenth (rental) -> rental-only rows present, no §121
+    await sellProperty(page, 'fifteenth', 2030, 2);
+    await page.waitForTimeout(200);
+    await page.locator('[data-testid="dispo-breakdown-toggle-fifteenth"]').click();
+    await page.waitForTimeout(200);
+    const rentalText = await page.locator('[data-testid="dispo-breakdown-fifteenth"]').textContent();
+    expect(rentalText).toContain('Depreciation recapture');
+    expect(rentalText).toContain('CA clawback');
+    expect(rentalText).not.toContain('§121 exclusion');
+
+    // switch fifteenth to Full 1031 -> 1031 section present, no Cash boot row (full, not partial)
+    const fifteenthCard = page.locator('[data-testid="property-fifteenth-card"]');
+    await fifteenthCard.locator('[data-testid="mode-toggle-fifteenth"]').getByRole('button', { name: 'Full 1031', exact: true }).click();
+    await page.waitForTimeout(200);
+    const full1031Text = await page.locator('[data-testid="dispo-breakdown-fifteenth"]').textContent();
+    expect(full1031Text).toContain('1031 exchange');
+    expect(full1031Text).toContain('Deferred gain (rolled)');
+    expect(full1031Text).not.toContain('Cash boot');
+
+    console.log('  R14 — conditional rows verified for keep/primary/rental/1031');
   });
 
 });

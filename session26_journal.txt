@@ -1,4 +1,4 @@
-=== SESSION 26 JOURNAL — v4.2.1 through v4.2.5 ===
+=== SESSION 26 JOURNAL — v4.2.1 through v4.2.6 ===
 
 Date: 2026-07-09
 
@@ -7,7 +7,10 @@ Session goal: a string of small UI requests on the Properties sidebar
 Cost Profiles card), then a user-reported bug: changing 6th St's sale
 timing from 2026-Q4 to 2027-Q1 jumped net proceeds by ~$63K with tax
 unchanged at $0 both times -- diagnosed and fixed as an engine bug, not a
-UI issue.
+UI issue. Session closed out with a follow-on request: an itemized,
+collapsible Disposition breakdown sub-card showing the full sale->tax->
+proceeds derivation per property, display-only off the same disposeAsset
+fields the v4.2.5 fix touched.
 
 --- WHAT SHIPPED ---
 
@@ -40,6 +43,10 @@ inventing a new one. Defaults to expanded.
 
 v4.2.5 -- BUGFIX: disposition sale price no longer compounds appreciation.
 See full diagnosis below.
+
+v4.2.6 -- itemized Disposition breakdown sub-card, per property, collapsible
+(default collapsed), shown only when mode!=='keep'. See full description
+below (after the v4.2.5 diagnosis section).
 
 --- THE v4.2.5 BUG: DIAGNOSIS BEFORE FIX (per user's explicit process) ---
 
@@ -111,6 +118,67 @@ across all three. Confirmed passing with the actual invariant values:
 sixth=[1675000,1675000,1675000], fifteenth=[1375000,1375000,1375000],
 barberry=[625000,625000,625000].
 
+--- v4.2.6: ITEMIZED DISPOSITION BREAKDOWN SUB-CARD ---
+
+Follow-on request after v4.2.5 shipped: since `prop.value` now visibly does
+double duty (verbatim sale price at disposition; appreciating market value
+for NW while held), the user wanted the full sale->tax->proceeds derivation
+made legible per property, not just the compact "Proceeds summary" line --
+a collapsible sub-card, collapsed by default, itemizing every step. Hard
+requirement: display-only, every value pulled directly from disposeAsset's
+return object (`liveRows.dispoResults[id]`) or its pre-offset snapshot
+(`liveRows.dispoResultsNoOffset[id]`) -- no tax/business logic recomputed
+in the UI.
+
+Implementation (App.jsx, all within the existing properties.map render):
+- New `dispoRow(label, val, kind)` -- a small three-variant line renderer
+  ("item" plain, "sub" for "− label / −$val", "eq" for "= label / $val"
+  with a top border + bold, mimicking a running subtotal).
+- New `renderDispoBreakdown(prop, hold, d, dNo)` -- builds the full row set
+  from `d` (post-offset dispoResults) and `dNo` (pre-offset snapshot, used
+  ONLY to compute the "One-time obligation offset" line as a diff of two
+  already-engine-computed `recognizedGain` values -- not a new calc).
+  Rows conditionally appear by reading `prop.isPrimary` / `d.mode` exactly
+  as specified: §121 exclusion primary-only; recapture/CA clawback/other-
+  state-credit rental-only; cash boot partial_1031-only; deferred gain
+  full_1031-or-partial_1031; CA-source carryforward rental-1031-only.
+  Percentage labels (selling costs 6%, recapture 25%, fed cap gains 23.8%)
+  read from `DISPO_DEFAULTS` live (a `dispoPct()` formatter), not hardcoded
+  strings -- so a future Defaults-tab override of those rates keeps the
+  labels honest.
+- The existing compact "Proceeds summary (vs CPA sheet)" block (Sale
+  price/Tax/Net, from v4.2.5) is now the collapsed-state header, per the
+  user's explicit ask -- unchanged, just gained a toggle button
+  (`▾ itemized breakdown` / `▲ hide breakdown`) next to it. New state
+  `dispoBreakdownOpen` (object keyed by property id, default collapsed).
+- New dev-mode `useEffect` (mirrors the pre-existing "obligation audit"
+  pattern) warning if `netSale != gross-sellingCosts` or
+  `afterTaxNetProceeds != preTax-totalTax` for ANY sold property (the
+  pre-existing audit only covers obligation-year sellers) -- guards the
+  itemized breakdown against silently drifting from disposeAsset's fields.
+
+Bug caught by the new tests before this shipped (not by the pre-existing
+suite): the dev-mode audit's `afterTax = preTax - totalTax` check doesn't
+hold for `full_1031` -- that mode is a rolled swap, so `disposeAsset` hard-
+codes `afterTaxNetProceeds = 0` regardless of the freed equity (`preTax`
+computed as netSale-mortgagePayoff would be a large positive number for a
+1031, e.g. the R13 test's first failure showed a ~$945K mismatch). The
+PRE-EXISTING "obligation audit" `useEffect` already knew this (`if(d.mode
+==='full_1031') continue;`) but I didn't carry that exception into the new
+audit or the new R13 test on the first pass -- `run_tests.ps1` caught it
+(R13 failed cleanly with the exact mismatch amount), fixed both the new
+`useEffect` and R13 to skip full_1031 the same way, reran, 86/86 green.
+
+New tests: R13 (engine-level, `window.__engine.buildScenario/makeParams`,
+5 cases spanning sell/full_1031/partial_1031 across sixth/fifteenth/
+barberry, asserts the two-equation reconciliation with the full_1031
+exception) and R14 (UI-level: confirms no toggle exists at mode=keep,
+confirms the sub-card is collapsed by default after selling, confirms
+primary-only vs rental-only rows via `textContent()` on sixth vs
+fifteenth, confirms the "1031 exchange" section + "Deferred gain (rolled)"
+appear and "Cash boot" does NOT appear when fifteenth is switched to Full
+1031 specifically).
+
 --- TEST INFRASTRUCTURE NOTE (not a code bug, but cost real time) ---
 
 First `run_tests.ps1` invocation this session: all 84 tests failed with
@@ -131,31 +199,47 @@ this session (out of the scope the user asked for).
 
 --- TEST RESULTS ---
 
-84/84 passed (8.2m), via run_tests.ps1 against a confirmed-up dev server.
-Includes new R12; E5/L1 version strings bumped to v4.2.5.
+v4.2.5: 84/84 passed (8.2m), via run_tests.ps1 against a confirmed-up dev
+server. Includes new R12; E5/L1 version strings bumped to v4.2.5.
+
+v4.2.6: 86/86 passed (8.4m) on the second run (first run caught the
+full_1031 exception gap in R13, see above). Includes new R13/R14; E5/L1
+version strings bumped to v4.2.6.
 
 --- FILES CHANGED ---
 
-src/App.jsx           Property value slider -> sliderTypeIn (click-to-type,
-                     range anchored to defaultPropValueById, 5x-default
-                     top end); LTR "Monthly rent" segment slider -> same
-                     sliderTypeIn; sliderTypeIn generalized with color/
-                     fontSize params, switched its input from type="number"
-                     to type="text" (no spinner) with clamp-on-commit; Cost
-                     Profiles section -> collapsibleSect (costProfilesOpen
-                     state); added "Sale price (entered -- no appreciation
+src/App.jsx           v4.2.1-4: Property value slider -> sliderTypeIn
+                     (click-to-type, range anchored to defaultPropValueById,
+                     5x-default top end); LTR "Monthly rent" segment slider
+                     -> same sliderTypeIn; sliderTypeIn generalized with
+                     color/fontSize params, switched its input from
+                     type="number" to type="text" (no spinner) with
+                     clamp-on-commit; Cost Profiles section ->
+                     collapsibleSect (costProfilesOpen state).
+                     v4.2.5: added "Sale price (entered -- no appreciation
                      applied)" line to the per-property proceeds summary.
-                     Header comment + badge -> v4.2.5 (final).
-src/engine.js          computeDispo(): fmv = prop.value verbatim (dropped
-                     the appreciationPct^yrIdx factor). Comments at both
-                     computeDispo's fmv line and the separate held-property
-                     valById appreciation calc, cross-referencing the split.
+                     v4.2.6: new dispoRow/renderDispoBreakdown helpers;
+                     itemized Disposition breakdown sub-card (collapsible,
+                     dispoBreakdownOpen state) wired into the existing
+                     "Proceeds summary" block as its expanded state; new
+                     dev-mode useEffect auditing the breakdown's arithmetic
+                     against liveRows.dispoResults for every sold property
+                     (full_1031-exempted, see above). Header comment +
+                     badge -> v4.2.6 (final).
+src/engine.js          v4.2.5: computeDispo(): fmv = prop.value verbatim
+                     (dropped the appreciationPct^yrIdx factor). Comments
+                     at both computeDispo's fmv line and the separate
+                     held-property valById appreciation calc, cross-
+                     referencing the split. No v4.2.6 changes (itemized
+                     breakdown is display-only, reads existing fields).
 retirement-simulator.spec.js
-                     New Group R test R12 (gross sale price invariant to
-                     sale year/quarter, all three properties); E5/L1
-                     version strings -> v4.2.5 (bumped 3x total this
-                     session as each UI change shipped, then again for the
-                     bugfix).
+                     v4.2.5: new Group R test R12 (gross sale price
+                     invariant to sale year/quarter, all three properties).
+                     v4.2.6: new Group R tests R13 (engine-level arithmetic
+                     reconciliation across sell/full_1031/partial_1031) and
+                     R14 (UI-level conditional-row rendering + hidden-at-
+                     keep + collapsed-by-default). E5/L1 version strings
+                     bumped across the session, final value v4.2.6.
 CLAUDE.md              Added the sale-price-vs-appreciation design
                      invariant to the "Property-centric schema (v4)"
                      section (this file was untracked in git before this
@@ -207,3 +291,19 @@ CLAUDE.md              Added the sale-price-vs-appreciation design
    above), and stray dev-server processes from manual browser-verification
    sessions can silently occupy 5174/5175 instead if 5173 was already
    taken, masking the real problem.
+5. `renderDispoBreakdown`/`dispoRow` (App.jsx, next to `sliderTypeIn`) are
+   the itemized-breakdown building blocks -- display-only by design, reading
+   `liveRows.dispoResults[id]` / `liveRows.dispoResultsNoOffset[id]`
+   directly. If a future session adds a new disposeAsset return field or a
+   new obligation-style post-hoc adjustment (like the same-year-all-sold
+   tax bump, which the breakdown deliberately does NOT itemize -- see
+   v4.2.6 section above), decide explicitly whether it needs its own row;
+   don't assume it's already covered.
+6. `full_1031` is a recurring special case across this codebase's tax
+   reconciliation checks (pre-existing "obligation audit" useEffect, the
+   new "dispo breakdown" useEffect, and R13): `afterTaxNetProceeds` is
+   hard-coded to 0 for that mode (rolled into a replacement property, not
+   cashed out), so `preTax - totalTax` does NOT equal it and any new
+   audit/test touching this reconciliation formula needs the same
+   `if(mode==='full_1031') continue/skip` -- caught once already this
+   session (v4.2.5's audit had it, v4.2.6's initial pass didn't).
