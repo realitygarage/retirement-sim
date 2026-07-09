@@ -544,9 +544,10 @@ export function buildScenario(p) {
   function computeDispo(prop){
     const hold = prop.hold||{mode:'keep'};
     if(hold.mode==='keep') return {mode:'keep', year:Infinity, afterTaxNetProceeds:0, totalTax:0, recognizedGain:0, caSourceDeferredGain:0};
-    const yrIdx = Math.max(0, (hold.year||2055) - BASE.startYear);
-    const appPct = prop.appreciationPct ?? p.reAppreciation;
-    const fmv = prop.value * Math.pow(1+appPct, yrIdx);
+    // v4.2.5: disposition sale price is the entered property value, used verbatim --
+    // appreciation is NEVER applied to sale price (see the appreciating valById calc
+    // below for held properties, which is the correct place for appreciationPct).
+    const fmv = prop.value;
     const saleMonth = quarterStartMonth(hold.quarter);
     const mtgB = mortgageBalanceClosed(prop.mortgage, mortgageMonthsSince(prop.mortgage, hold.year||2055, saleMonth));
     const depTaken = (hold.depreciationRecapture || 0) / DISPO_DEFAULTS.recaptureRate;
@@ -807,6 +808,9 @@ export function buildScenario(p) {
     const totalIncome=pension+workInc+(yourSs+brendaSs)*12+rental+drawInc;
 
     // -- NW pieces (per-property, gated) --
+    // v4.2.5: this is the one place appreciationPct should compound prop.value --
+    // Net Worth for a still-held property grows over time; disposition sale price
+    // (computeDispo above) intentionally does NOT do this (entered value, verbatim).
     const valById = {};
     for(const prop of properties){
       const appPct = prop.appreciationPct ?? p.reAppreciation;

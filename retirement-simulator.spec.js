@@ -627,10 +627,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.2.0"', async ({ page }) => {
+  test('E5 — Version header shows "v4.2.5"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.2.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.2.0');
+    await expect(page.locator('text=v4.2.5').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.2.5');
   });
 
 });
@@ -1086,10 +1086,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.2.0', async ({ page }) => {
+  test('L1 — Version header shows v4.2.5', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.2.0').first()).toBeVisible();
-    console.log('  L1 — Version v4.2.0 confirmed');
+    await expect(page.locator('text=v4.2.5').first()).toBeVisible();
+    console.log('  L1 — Version v4.2.5 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1402,6 +1402,33 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     expect(result.paydown).toBeGreaterThan(0);              // debt absorbed first
     expect(result.hiDebtAfter).toBe(0);                     // debt-first paydown was enough to fully clear it
     expect(result.reserveFill).toBeGreaterThan(0);          // only THEN does the leftover fill reserve buckets
+  });
+
+  test('R12 — disposition sale price is the entered value verbatim (no appreciation applied)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      const ids = ['sixth', 'fifteenth', 'barberry'];
+      const timings = [
+        { year: 2026, quarter: 4 },
+        { year: 2027, quarter: 1 },   // crosses a year boundary -- the case that exposed the bug
+        { year: 2040, quarter: 2 },
+      ];
+      const out = {};
+      for (const id of ids) {
+        out[id] = timings.map(({ year, quarter }) => {
+          const rows = buildScenario(makeParams({
+            properties: [{ id, hold: { mode: 'sell', year, quarter } }],
+          }));
+          return Math.round(rows.dispoResults[id].grossPrice);
+        });
+      }
+      return out;
+    });
+    console.log('  R12 — gross sale price by timing: ' + JSON.stringify(result));
+    for (const id of ['sixth', 'fifteenth', 'barberry']) {
+      expect(new Set(result[id]).size).toBe(1);   // same gross price regardless of sale year/quarter
+    }
   });
 
 });

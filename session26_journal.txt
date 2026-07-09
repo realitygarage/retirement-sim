@@ -1,0 +1,209 @@
+=== SESSION 26 JOURNAL — v4.2.1 through v4.2.5 ===
+
+Date: 2026-07-09
+
+Session goal: a string of small UI requests on the Properties sidebar
+(property value slider range/usability, click-to-type entry, a collapsible
+Cost Profiles card), then a user-reported bug: changing 6th St's sale
+timing from 2026-Q4 to 2027-Q1 jumped net proceeds by ~$63K with tax
+unchanged at $0 both times -- diagnosed and fixed as an engine bug, not a
+UI issue.
+
+--- WHAT SHIPPED ---
+
+v4.2.1 -- Property value slider (per-property, Properties section): the
+range was min/max = 0.5x/2x of the slider's own LIVE value, recomputed on
+every drag. Since the max was pegged to wherever you'd just dragged to, it
+receded ahead of the thumb while dragging up -- the slider felt
+unbounded/unusable. Fixed: range now anchored to each property's DEFAULT
+value (`defaultPropValueById`, from `freshPropertiesDefaults()`), fixed
+for the session; top end capped at 5x default per user request (bottom
+stays 0.5x default). Added click-to-type: click the "$1675K" display to
+swap in a text input (Enter/blur commits, Escape cancels).
+
+v4.2.2 -- Cleaned up the click-to-type box: swapped `type="number"` (native
+up/down spinner) for a plain `type="text"` input (`inputMode="decimal"`,
+keystroke-filtered to digits/decimal/minus). Out-of-range typed values now
+clamp to the slider's [min,max] on commit instead of being silently
+rejected.
+
+v4.2.3 -- Applied the same click-to-type treatment to the LTR segment's
+"Monthly rent" slider (the only slider literally labeled "Monthly rent" --
+STR $/night and MTR Rate/mo were left untouched, not requested). Generalized
+the `sliderTypeIn` helper with `color`/`fontSize` params so it can drive
+both the property-value slider (amber, 10px) and the LTR rent slider
+(green, 8px) without duplicating the click-to-type logic.
+
+v4.2.4 -- Cost Profiles section is now a collapsible card, reusing the
+existing `collapsibleSect` pattern (same as Loans & Debt) rather than
+inventing a new one. Defaults to expanded.
+
+v4.2.5 -- BUGFIX: disposition sale price no longer compounds appreciation.
+See full diagnosis below.
+
+--- THE v4.2.5 BUG: DIAGNOSIS BEFORE FIX (per user's explicit process) ---
+
+User asked for a diagnose-first, fix-after-approval workflow, correcting an
+earlier framing: the design intent (from the original v4.0.0-A spec) is
+that a property's SALE PRICE is a manual entry used verbatim -- appreciation
+must never touch it.
+
+Traced `disposeAsset()` (engine.js) -- clean, just uses whatever `fmv` it's
+given. The bug was one level up, in its only caller `computeDispo()` inside
+`buildScenario`:
+
+    const yrIdx = Math.max(0, (hold.year||2055) - BASE.startYear);
+    const appPct = prop.appreciationPct ?? p.reAppreciation;
+    const fmv = prop.value * Math.pow(1+appPct, yrIdx);
+
+`yrIdx` only looked at `hold.year`, ignoring `hold.quarter` entirely -- so
+2026-Q4 -> 2027-Q1 (a 3-month move) jumped `yrIdx` 0->1, applying a full
+year of appreciation. Confirmed the magnitude analytically before touching
+code: $1,675,000 default value x 4% appreciation = $67,000 gross delta;
+after the 6% `sellingCostsPct` haircut, $67,000 x 0.94 = $62,980 -- matches
+the user's reported ~$63K to the dollar. Also confirmed 6th St's mortgage
+payoff is IDENTICAL at both dates (both fall inside its 2021-2031 IO
+window, where balance is flat regardless of month), so 100% of the delta
+traced to appreciation, 0% to the mortgage-timing part of the report (which
+was separately confirmed to be already quarter-correct via
+`mortgageMonthsSince(..., quarterStartMonth(hold.quarter))`).
+
+Also found: this is a single shared `computeDispo()` applied via
+`properties.map(...)`, so all three properties (sixth/fifteenth/barberry)
+had the identical bug, not something per-property. And: there is no
+separate "sale price" field anywhere in the schema/UI -- `prop.value` (the
+"Property value" slider) is the only entry point, doing double duty
+(appreciating market value for NW while held; was ALSO being appreciated
+for sale price, which is the part that's wrong). The original v4 spec
+(`v4_property_centric_spec.md`) actually documents `appreciationPct` as
+intended for exactly this projection, so the code matched that document --
+just not the corrected design intent the user gave this session.
+
+--- THE FIX (approved, then implemented) ---
+
+engine.js `computeDispo()`: dropped the `Math.pow(1+appPct, yrIdx)` factor
+entirely -- `fmv` is now `prop.value`, used verbatim. Removed the now-dead
+`yrIdx`/`appPct` locals.
+
+Left untouched (confirmed correct, separate code path): the NW-for-held-
+properties calc a bit further down in `buildScenario`,
+
+    const appPct = prop.appreciationPct ?? p.reAppreciation;
+    valById[prop.id] = keepMap[prop.id] ? prop.value*Math.pow(1+appPct,yr) : 0;
+
+-- this is gated on `keepMap[prop.id]` (still-held properties only) and is
+the one place appreciation SHOULD compound `prop.value`, for Net Worth
+tracking. Added a one-line comment at both sites (engine.js) cross-
+referencing the split, plus the invariant in CLAUDE.md's "Property-centric
+schema (v4)" section, so a future session doesn't reintroduce this by
+"fixing" the wrong line.
+
+UI legibility (App.jsx, per-property "Proceeds summary" block): added a new
+line, `Sale price (entered — no appreciation applied): $XXXK`, sourced from
+`engineRes.grossPrice` -- there wasn't a gross-price line in that block
+before.
+
+New test: R12 (`retirement-simulator.spec.js`, Group R) -- runs
+`buildScenario`/`makeParams` for each of sixth/fifteenth/barberry across
+three sale timings (2026-Q4, 2027-Q1 [the year-boundary case that exposed
+the bug], 2040-Q2) and asserts `dispoResults[id].grossPrice` is identical
+across all three. Confirmed passing with the actual invariant values:
+sixth=[1675000,1675000,1675000], fifteenth=[1375000,1375000,1375000],
+barberry=[625000,625000,625000].
+
+--- TEST INFRASTRUCTURE NOTE (not a code bug, but cost real time) ---
+
+First `run_tests.ps1` invocation this session: all 84 tests failed with
+`net::ERR_CONNECTION_REFUSED`. Root cause: `run_tests.ps1`'s actual content
+is just `npx playwright test retirement-simulator.spec.js --reporter=list
+--headed` -- it does NOT start or stop the Vite dev server, contrary to
+what CLAUDE.md's "Running tests" section currently says ("convenience
+wrappers that also start/stop the Vite dev server"). No server was up on
+5173 when it ran. Compounding this: earlier in the session I'd started and
+manually killed several `npm run dev` instances for browser-driven
+verification (Playwright screenshots via a throwaway script, not the
+suite) -- two of those left orphaned `node` processes squatting on 5174/
+5175 (Vite's fallback ports), which I found and killed via `netstat -ano` +
+`taskkill`. Started a fresh single dev server, confirmed `curl` 200 on
+5173, reran `run_tests.ps1` -- 84/84 passed (8.2m). CLAUDE.md's
+"Running tests" section is stale on this point; flagged below, not fixed
+this session (out of the scope the user asked for).
+
+--- TEST RESULTS ---
+
+84/84 passed (8.2m), via run_tests.ps1 against a confirmed-up dev server.
+Includes new R12; E5/L1 version strings bumped to v4.2.5.
+
+--- FILES CHANGED ---
+
+src/App.jsx           Property value slider -> sliderTypeIn (click-to-type,
+                     range anchored to defaultPropValueById, 5x-default
+                     top end); LTR "Monthly rent" segment slider -> same
+                     sliderTypeIn; sliderTypeIn generalized with color/
+                     fontSize params, switched its input from type="number"
+                     to type="text" (no spinner) with clamp-on-commit; Cost
+                     Profiles section -> collapsibleSect (costProfilesOpen
+                     state); added "Sale price (entered -- no appreciation
+                     applied)" line to the per-property proceeds summary.
+                     Header comment + badge -> v4.2.5 (final).
+src/engine.js          computeDispo(): fmv = prop.value verbatim (dropped
+                     the appreciationPct^yrIdx factor). Comments at both
+                     computeDispo's fmv line and the separate held-property
+                     valById appreciation calc, cross-referencing the split.
+retirement-simulator.spec.js
+                     New Group R test R12 (gross sale price invariant to
+                     sale year/quarter, all three properties); E5/L1
+                     version strings -> v4.2.5 (bumped 3x total this
+                     session as each UI change shipped, then again for the
+                     bugfix).
+CLAUDE.md              Added the sale-price-vs-appreciation design
+                     invariant to the "Property-centric schema (v4)"
+                     section (this file was untracked in git before this
+                     session -- committed for the first time now).
+
+--- OPEN BACKLOG ---
+
+[P1] ANNUAL VS MONTHLY ENGINE HI-DEBT-CLEAR TIMING DIVERGENCE -- carried
+     from session23/24/25, untouched this session.
+[P1] Unify annual sweep model with wfData -- carried from session20-25,
+     untouched this session.
+[P1] CPA rate calibration (6th sale tax still runs below the CPA sheet) --
+     carried, untouched.
+[P2] CLAUDE.md's "Running tests" section incorrectly states run_tests.ps1
+     "also start[s]/stop[s] the Vite dev server" -- it doesn't; it assumes
+     the server is already up on 5173 and will fail every test with
+     ERR_CONNECTION_REFUSED if it isn't. Worth either fixing the doc or
+     adding that start/stop logic to the script itself -- flagged, not
+     changed this session (outside what was asked).
+[P2] setSlider's `near`-heuristic fragility -- carried from session25,
+     untouched.
+[P2] Barberry/Lafayette mortgage origin date -- needs a real servicer
+     stmt, carried.
+[P2] Glossary needs a full v4 pass -- carried.
+[P3] investedCash in defaults.js -- still orphaned, carried.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Sale price vs. Net Worth appreciation is now a locked invariant (see
+   CLAUDE.md "Property-centric schema (v4)" and the comments at both call
+   sites in engine.js) -- if a future session is tempted to make
+   disposition FMV grow with sale year again, that's very likely a
+   regression, not a feature; confirm with the user first.
+2. `prop.value` remains the ONLY per-property value input in the schema --
+   there is still no separate "sale price" field. If the user ever wants
+   sale price to diverge from the "Property value" slider (e.g. entering a
+   different expected sale price than the current-value slider shows),
+   that would need a genuinely new `hold.salePrice` field, not a tweak to
+   the appreciation math.
+3. `sliderTypeIn` (App.jsx, next to `slider`) is now the reusable click-to-
+   type slider variant -- takes toText/fromText unit-conversion functions
+   plus color/fontSize, and clamps to [min,max] on commit. Used by Property
+   value and the LTR Monthly rent slider; other dollar sliders (STR $/
+   night, MTR Rate/mo, HI debt balances, etc.) still use the plain `slider`
+   helper and were not touched -- ask before assuming they should match.
+4. Before starting a `run_tests.ps1` run, confirm something is actually
+   listening on localhost:5173 (`curl -s -o /dev/null -w "%{http_code}" http
+   ://localhost:5173`) -- the script will not start it for you (see backlog
+   above), and stray dev-server processes from manual browser-verification
+   sessions can silently occupy 5174/5175 instead if 5173 was already
+   taken, masking the real problem.

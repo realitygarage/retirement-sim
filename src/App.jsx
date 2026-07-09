@@ -1,4 +1,9 @@
-// v4.2.0 -- pin editing via load-into-live: removed the broken in-place "editing pin" mode (sidebar always edits live now); loading a pin copies its params into live, re-Pinning under the same name overwrites, a new name branches
+// v4.2.5 -- BUGFIX: disposition sale price no longer compounds appreciationPct by sale-year index
+// (computeDispo's fmv was prop.value * (1+app)^yrIdx, which ignored quarter and applied a full
+// year of appreciation for e.g. a Q4->Q1 timing change across a year boundary). Sale price is now
+// the entered property value, used verbatim -- appreciation still applies to Net Worth of held
+// properties (untouched, separate code path). Disposition breakdown now labels the gross line
+// "Sale price (entered -- no appreciation applied)" to keep this legible.
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
@@ -252,7 +257,12 @@ export default function App(){
   const [expandedChart, setExpandedChart] = useState(null); // which chart is drilled into
   const [nwMode,        setNwMode]        = useState('book'); // 'book' | 'liq'
   const [propCardOpen,  setPropCardOpen]  = useState({});     // v4.0.0-B per-property collapse (default open)
+  const [propValueEdit, setPropValueEdit] = useState(null);   // {id,text} | null -- click-to-type property value
   const [loansDebtOpen, setLoansDebtOpen] = useState(true);   // v4.0.0-B Loans & Debt group collapse
+  const [costProfilesOpen, setCostProfilesOpen] = useState(true); // v4.2.4 Cost Profiles group collapse
+  // v4.2.1 property value slider top-end anchored to each property's *default* value (not its
+  // live/current value) so the range stays fixed while dragging instead of receding as you approach it.
+  const defaultPropValueById = useMemo(()=>Object.fromEntries(freshPropertiesDefaults().map(p=>[p.id,p.value])),[]);
   // CF waterfall state now in sc object (see setSc setters above)
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
   const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Fixed-cost columns in month table
@@ -1147,6 +1157,51 @@ export default function App(){
     </div>
   );
 
+  // v4.2.1 slider variant with a click-to-type value: clicking the numeric display swaps it for
+  // a plain text input (Enter/blur commits, Escape cancels) so an exact value can be typed instead
+  // of dragged. Typed values are clamped to [min,max] on commit. toText/fromText convert between
+  // the slider's raw units and the typed display units (e.g. raw dollars <-> $K) -- pass identity
+  // functions if no conversion is needed. Plain text (not type="number") so there's no native
+  // spinner UI to clean up.
+  const commitTypedSlider=(setVal,fromText,min,max)=>{
+    if(!propValueEdit) return;
+    const n=fromText(propValueEdit.text);
+    if(!isNaN(n)) setVal(Math.min(max,Math.max(min,n)));
+    setPropValueEdit(null);
+  };
+  const sliderTypeIn=(label,val,setVal,min,max,step,fmt,toText,fromText,testId,color=amber,fontSize=10)=>{
+    const isEditing = propValueEdit && propValueEdit.id===testId;
+    return (
+      <div style={{marginBottom:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+          <span style={{fontSize,color:muted}}>{label}</span>
+          {isEditing ? (
+            <input type="text" inputMode="decimal" autoFocus data-testid={`${testId}-input`}
+              value={propValueEdit.text}
+              onChange={e=>{
+                const v=e.target.value;
+                if(/^-?\d*\.?\d*$/.test(v)) setPropValueEdit({id:testId,text:v});
+              }}
+              onBlur={()=>commitTypedSlider(setVal,fromText,min,max)}
+              onKeyDown={e=>{
+                if(e.key==='Enter') commitTypedSlider(setVal,fromText,min,max);
+                if(e.key==='Escape') setPropValueEdit(null);
+              }}
+              style={{fontSize,color,fontFamily:mono,background:bg1,border:`1px solid ${color}`,
+                borderRadius:3,width:70,textAlign:"right",padding:"1px 4px",outline:"none"}}/>
+          ) : (
+            <span data-testid={`${testId}-display`} onClick={()=>setPropValueEdit({id:testId,text:toText(val)})}
+              style={{fontSize,color,fontFamily:mono,cursor:"pointer"}}
+              title="Click to type an exact value">{fmt(val)}</span>
+          )}
+        </div>
+        <input type="range" min={min} max={max} step={step} value={val}
+          onChange={e=>setVal(parseFloat(e.target.value))}
+          style={{width:"100%",accentColor:color,cursor:"pointer",height:4}}/>
+      </div>
+    );
+  };
+
   const statBadge=(label,val,good)=>(
     <div style={{background:bg2,borderRadius:6,padding:"8px 10px",flex:1}}>
       <div style={{fontSize:9,color:dim,marginBottom:3}}>{label}</div>
@@ -1568,7 +1623,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.2.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.2.5</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -1660,9 +1715,15 @@ export default function App(){
                   </div>
 
                   {isOpen && (<>
-                  {/* Value + mortgage -- basic property attributes */}
-                  {slider("Property value",prop.value||0,v=>setProperty(prop.id,{value:v}),
-                    Math.round((prop.value||500000)*0.5),Math.round((prop.value||500000)*2),5000,v=>"$"+Math.round(v/1000)+"K")}
+                  {/* Value + mortgage -- basic property attributes. Range is anchored to this
+                      property's *default* value (not its live value) so it stays fixed while
+                      dragging -- top end capped at 5x default per user request (v4.2.1/v4.2.2). */}
+                  {sliderTypeIn("Property value",prop.value||0,v=>setProperty(prop.id,{value:v}),
+                    Math.round((defaultPropValueById[prop.id]||prop.value||500000)*0.5),
+                    Math.round((defaultPropValueById[prop.id]||prop.value||500000)*5),
+                    5000,v=>"$"+Math.round(v/1000)+"K",
+                    v=>String(Math.round(v/1000)),t=>Math.round(parseFloat(t)*1000),
+                    `prop-value-${prop.id}`)}
                   <div style={{marginBottom:8}}>
                     <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6}}>Mortgage</div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
@@ -1804,17 +1865,11 @@ export default function App(){
                                       style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
                                   </div>
                                 ))}
-                                {seg.kind==='ltr' && (
-                                  <div style={{marginBottom:6}}>
-                                    <div style={{display:"flex",justifyContent:"space-between"}}>
-                                      <span style={{fontSize:8,color:muted}}>Monthly rent</span>
-                                      <span style={{fontSize:8,color:green,fontFamily:mono}}>${(seg.ltr?.monthlyRent||0).toLocaleString()}/mo</span>
-                                    </div>
-                                    <input type="range" min={1000} max={12000} step={50} value={seg.ltr?.monthlyRent||0}
-                                      onChange={e=>updSeg(ei,{ltr:{...(seg.ltr||{}),monthlyRent:parseInt(e.target.value)}})}
-                                      style={{width:"100%",accentColor:green,cursor:"pointer",height:4}}/>
-                                  </div>
-                                )}
+                                {seg.kind==='ltr' && sliderTypeIn("Monthly rent",seg.ltr?.monthlyRent||0,
+                                  v=>updSeg(ei,{ltr:{...(seg.ltr||{}),monthlyRent:v}}),
+                                  1000,12000,50,v=>"$"+v.toLocaleString()+"/mo",
+                                  v=>String(v),t=>parseFloat(t),
+                                  `ltr-rent-${unit.id}-${ei}`,green,8)}
                                 {clip && clip.truncated && (
                                   <div style={{fontSize:8,color:blue,fontStyle:"italic"}}>ⓘ truncated at Q{hold.quarter||1} {hold.year} sale</div>
                                 )}
@@ -1861,6 +1916,7 @@ export default function App(){
                   {isSold && engineRes && engineRes.mode && engineRes.mode!=='keep' && (
                     <div style={{marginTop:8,padding:8,background:bg1,borderRadius:4,fontSize:9}}>
                       <div style={{color:dim,marginBottom:3,fontWeight:"bold"}}>Proceeds summary (vs CPA sheet):</div>
+                      <div style={{color:muted}}>Sale price (entered — no appreciation applied): <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.grossPrice||0)/1000)}K</span></div>
                       <div style={{color:muted}}>Tax: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.totalTax||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaEstTax||0)/1000)}K</div>
                       <div style={{color:muted}}>Net: <span style={{color:bright,fontFamily:mono}}>${Math.round((engineRes.afterTaxNetProceeds||0)/1000)}K</span> vs CPA ${Math.round((hold.cpaNetProceedsAfterTax||0)/1000)}K</div>
                     </div>
@@ -1871,13 +1927,15 @@ export default function App(){
             })}
 
             {/* Cost profiles -- applied automatically by segment kind (§1 table), trailer of the Properties group */}
-            {sect("Cost Profiles")}
+            {collapsibleSect("Cost Profiles", costProfilesOpen, ()=>setCostProfilesOpen(o=>!o))}
+            {costProfilesOpen && (<>
             <div style={{fontSize:8,color:dim,marginBottom:8}}>Applied automatically by segment kind: STR = platform% + cleaning%; MTR = flat $/block cleaning; LTR = vacancy%. Mgmt fee applies to all three.</div>
             {slider("STR platform fee",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%")}
             {slider("STR cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%")}
             {slider("MTR cleaning (flat $/block)",mtrCleaningFlat,setMtrCleaningFlat,0,1000,25,v=>"$"+v)}
             {slider("LTR vacancy/collection loss",ltrVacancyPct,setLtrVacancyPct,0,15,0.5,v=>v+"%")}
             {slider("Mgmt fee (all kinds)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross")}
+            </>)}
 
             {/* One-Time Obligation (was Settlement) */}
             {sect("One-Time Obligation")}
