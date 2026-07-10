@@ -1,3 +1,16 @@
+// v4.3.0 -- explicit model start-date anchor: BASE.startMonth (new) + BASE.startYear
+// (promoted from a hardcoded constant to a Defaults-tab-editable field, alongside
+// startMonth) replace the old implicit Jan-1 assumption. buildScenario's yr=0 is now a
+// genuine partial period (only the months remaining in the start year), stocks (HI debt,
+// mortgage balances) are snapshotted BEFORE that period's activity so the chart's start
+// column matches entered settings exactly, and growth/appreciation exponents use
+// continuous elapsed real time from the start date instead of the integer year index.
+// wfData's startDate (was hardcoded June 2026) and the chart's calendar-year bucketing
+// (was assuming mo=0 was January) now key off the same anchor. Both engines now share
+// the same start-of-period HI-debt snapshot convention (closing that half of the annual-
+// vs-monthly divergence), but their avalanche/sweep MAGNITUDES still genuinely differ --
+// the two can still land on different debt-clear calendar years (separate, still-open
+// "unify annual sweep model with wfData" issue, not touched this session).
 // v4.2.6 -- itemized Disposition breakdown: a collapsible sub-card (default collapsed) under
 // each property's "Proceeds summary" showing the full sale->tax->proceeds derivation as
 // aligned label/value rows, adapting to mode (primary vs rental, 1031 vs sell). Display-only --
@@ -10,13 +23,17 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly } from "./engine.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear } from "./engine.js";
+// v4.3.0: BASE.startYear/startMonth (imported above) are the single source
+// of truth for the model's "now" -- both are Defaults-tab-editable (see
+// DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
+// wfData's hardcoded June-2026 startDate.
 import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS_SC, freshPropertiesDefaults, freshObligationDefaults } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
   window.__engine = {
-    BASE, buildScenario, keyStats, disposeAsset, taxRecognized,
+    BASE, HI_TOTAL, buildScenario, keyStats, disposeAsset, taxRecognized,
     DISPO_DEFAULTS, makeParams,
     workFromCurve, remainBal, estimateTax,
     unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps,
@@ -25,6 +42,7 @@ if (typeof window !== 'undefined') {
     mortgageBalanceClosed, mortgageMonthsSince,
     applyDefaultsOverrides, getDefaultsCode,
     freshPropertiesDefaults, freshObligationDefaults,
+    monthsInYear, monthsElapsedBeforeYear,
   };
 }
 import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_W, SVG_H, rNodePos } from "./relationships-data.js";
@@ -36,6 +54,14 @@ import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_
 // Paths address the overrides object handed to applyDefaultsOverrides().
 // =============================================================================
 const DEFAULTS_REGISTRY = [
+  {group:"Model Start Date", items:[
+    // v4.3.0: the model's "now" -- both engines key every balance/growth
+    // calculation off this pair (see engine.js's BASE.startMonth comment).
+    // Deliberately the FIRST group: keeping this current is what keeps every
+    // other number in the model honest.
+    ["BASE.startYear","Start year"],
+    ["BASE.startMonth","Start month (1-12)"],
+  ]},
   {group:"Liquidation-View Constants", items:[
     ["BASE.marriedExcl","§121 married exclusion $"],
     ["BASE.sellingCosts","Selling costs (liq view, fraction)"],
@@ -223,7 +249,10 @@ export default function App(){
     const maintRate_=totalVal>0?totalMaint/totalVal:0.005;
     return buildScenario(makeParams({
       ...sc,
-      ssStartYear:2026+(sc.ssAge-65),
+      // v4.3.0: BASE.startYear (was hardcoded 2026) -- ssAge is relative to
+      // BASE.myAge AT THE START date; a hardcoded 2026 would misdate SS start
+      // once BASE.startYear is edited away from 2026.
+      ssStartYear:BASE.startYear+(sc.ssAge-65),
       ssAmount:sc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(sc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
       diCap:diCap_, maintRate:maintRate_,
       reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
@@ -294,7 +323,7 @@ export default function App(){
 
   const liveParams = useMemo(()=>makeParams({
     ...sc,
-    ssStartYear: 2026+(sc.ssAge-65),
+    ssStartYear: BASE.startYear+(sc.ssAge-65),  // v4.3.0: was hardcoded 2026
     ssAmount:    sc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(sc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
     diCap, maintRate,
     reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
@@ -422,7 +451,11 @@ export default function App(){
       }
       const _oblig = liveParams.obligation || {};
       if((_oblig.amount||0) > 0){
-        _yearCashSub[_oblig.year||2026] = (_yearCashSub[_oblig.year||2026]||0) + _oblig.amount;
+        // v4.3.0: BASE.startYear (was hardcoded 2026) -- matches engine.js's
+        // buildScenario `obligYr = obligation.year || BASE.startYear` fallback;
+        // a mismatched fallback here would silently disagree with the annual
+        // engine on which year an unset obligation defaults to.
+        _yearCashSub[_oblig.year||BASE.startYear] = (_yearCashSub[_oblig.year||BASE.startYear]||0) + _oblig.amount;
       }
     } catch(e) {}
     const _paidYears = new Set();  // years where HI paydown has been applied
@@ -432,7 +465,11 @@ export default function App(){
       label: l.label||'Loan', rate: l.rate||0, amount: l.amount||0,
       includeInSweep: !!l.includeInSweep,
       pmt: loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
-      startAbs: Math.max(0, ((l.startYear||2026)-2026)*12 + ((l.startMonth||6)-6)),
+      // v4.3.0: keyed to BASE.startYear/startMonth (was hardcoded 2026/6, which
+      // only happened to match this engine's OLD hardcoded June startDate below --
+      // see engine.js's buildScenario for the identical fix and the "-6 magic
+      // number" note).
+      startAbs: Math.max(0, ((l.startYear||BASE.startYear)-BASE.startYear)*12 + ((l.startMonth||BASE.startMonth)-BASE.startMonth)),
       bal: 0, started:false, startAnnounced:false, payoffAnnounced:false,
     }));
     const _sweepLoanQ = ()=>_loans.filter(L=>L.includeInSweep && L.bal>0)
@@ -480,7 +517,14 @@ export default function App(){
     let savingsAcc = 0;      // accumulated post-debt sweep redirected to investments
 
     const rows = [];
-    const startDate = new Date(2026, 5); // Jun 2026
+    // v4.3.0: was a hardcoded new Date(2026,5) (June 2026) -- the actual root
+    // cause of the "$60K CC setting shows as $46K on the chart" bug (this
+    // startDate silently disagreed with the annual engine's Jan-1-anchored
+    // BASE.startYear, and with the chart's own year-bucketing below, which
+    // assumed mo=0 was January). Now keyed to the same explicit, Defaults-
+    // tab-editable anchor buildScenario uses.
+    const _startMonthClamped = Math.min(12, Math.max(1, Math.round(BASE.startMonth||1)));
+    const startDate = new Date(BASE.startYear, _startMonthClamped-1);
 
     for(let mo=0; mo<252; mo++){  // 252 = 21 full years to match buildScenario (2026-2046)
       const d = new Date(startDate.getFullYear(), startDate.getMonth()+mo);
@@ -505,7 +549,8 @@ export default function App(){
       if((_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
         const residual = Math.max(0, (_yearCashAdd[calYear] - (_yearCashSub[calYear]||0)));
         const split = splitResidual(residual, {
-          lifestyleDraw: calYear===((liveParams.obligation||{}).year||2026) ? (liveParams.settleLifestyleDraw||0) : 0,
+          // v4.3.0: BASE.startYear (was hardcoded 2026) -- same fallback fix as above.
+          lifestyleDraw: calYear===((liveParams.obligation||{}).year||BASE.startYear) ? (liveParams.settleLifestyleDraw||0) : 0,
         });
         const mkDebts = ()=>[
           ...(!payOffHI ? [
@@ -593,6 +638,14 @@ export default function App(){
         }
       }
       // HI minimums
+      // v4.3.0 FOLLOW-UP (deferred, not fixed here -- see journal and the
+      // twin gate/comment in engine.js's buildScenario): `mo` is elapsed
+      // months since BASE.startYear/startMonth (was elapsed months since a
+      // hardcoded June 2026). This threshold's real-world meaning shifts with
+      // the anchor -- for the current startMonth=7 default, "mo>=5" now reads
+      // as "from December of the start year," vs. "from November" under the
+      // old hardcoded June anchor. Needs an explicit absolute-calendar-date
+      // decision, not a threshold tweak.
       if(mo>=5) nolanOn=true;
       const minCC  = ccBal>0?ccMin_:0;
       const minSoph= sophiaBal>0?sophiaMin_:0;
@@ -730,8 +783,12 @@ export default function App(){
       // Detect key events
       const events=[];
       if(mo===0) events.push("Launch");
-      if(mo===4) events.push("You -> Medicare");
-      if(mo===5) events.push("Nolan loan payments begin");
+      // v4.3.0: real calendar check (was `mo===4`, which only happened to
+      // land on the real Nov-2026 transition by coincidence of the old
+      // hardcoded June-2026 startDate -- see healthMonthly's actual Nov-2026
+      // gate in engine.js, which this marker now matches exactly).
+      if(calYear===2026 && d.getMonth()===10) events.push("You -> Medicare");
+      if(mo===5) events.push("Nolan loan payments begin");  // deferred threshold, see the gate above
       // v3.2.0 loan events from engine state (scheduled, sweep, and paydown payoffs)
       for(const L of _loans){
         if(L.started && !L.startAnnounced){ L.startAnnounced=true; events.push(`${L.label} starts -- $${Math.round(L.pmt).toLocaleString()}/mo`); }
@@ -762,7 +819,7 @@ export default function App(){
       if(calYear>=BASE.brendaMedYear&&d.getMonth()===0&&calYear===BASE.brendaMedYear) events.push("Brenda -> Medicare");
 
       rows.push({
-        mo, cal:`${d.toLocaleString('default',{month:'short'})} '${String(calYear).slice(2)}`,
+        mo, calYear, cal:`${d.toLocaleString('default',{month:'short'})} '${String(calYear).slice(2)}`,
         totalInc:Math.round(totalInc), tier1:Math.round(tier1), rentalOpCost:Math.round(rentalOpCost),
         // Fixed cost breakdown sub-components (for breakdown panel)
         fc_mtg:Math.round(mtg), fc_health:Math.round(health), fc_core:Math.round(core),
@@ -831,7 +888,13 @@ export default function App(){
     const discByYear={}, sweepByYear={}, totalSweepByYr={}, cntByYear={}, savAccByYear={}, abByYear={}, floorByYear={};
     const fc_mtgByYr={}, fc_hlthByYr={}, fc_coreByYr={}, fc_famByYr={}, fc_hiMinsByYr={}, fc_ropByYr={}, fc_propByYr={}, fc_taxByYr={};
     (wfData||[]).forEach(r=>{
-      const yr=2026+Math.floor(r.mo/12);
+      // v4.3.0: r.calYear (was `2026+Math.floor(r.mo/12)`, which silently
+      // assumed wfData's mo=0 was January -- it wasn't even before this
+      // change (wfData started at a hardcoded June), so this bucketing was
+      // already mislabeling roughly half of every "calendar year" bucket
+      // with the wrong 6 months. r.calYear is the SAME real calendar year
+      // wfData itself computed for that row -- can't drift from it.
+      const yr=r.calYear;
       discByYear[yr]=(discByYear[yr]||0)+(r.disc||0);
       sweepByYear[yr]=(sweepByYear[yr]||0)+(r.sweepToSavings||0);
       // combinedSweep: debt sweep while in debt, savings sweep after — mutually exclusive in wfData
@@ -1547,7 +1610,7 @@ export default function App(){
     const SVG_W=280, SVG_H=150, PAD={t:14,r:12,b:26,l:46};
     const iW=SVG_W-PAD.l-PAD.r, iH=SVG_H-PAD.t-PAD.b;
     const YR_MIN=0, YR_MAX=10, VAL_MAX=8000;
-    const START=2026;
+    const START=BASE.startYear;   // v4.3.0: was hardcoded 2026 -- workPts.yr is an offset from the model's start year
 
     const toX = yr  => PAD.l + (yr-YR_MIN)/(YR_MAX-YR_MIN)*iW;
     const toY = val => PAD.t + (1-val/VAL_MAX)*iH;
@@ -1707,12 +1770,15 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.2.6</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.3.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
         <div style={{fontSize:10,color:dim,textAlign:"right"}}>
-          Launch Jun 2026 &middot; Ages 65/60<br/>
+          {/* v4.3.0: was a static "Launch Jun 2026 - Ages 65/60" -- now reads
+              the actual Defaults-tab start-date/age settings, since a stale
+              hardcoded date here was part of what this version fixes. */}
+          Launch {["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][BASE.startMonth-1]} {BASE.startYear} &middot; Ages {BASE.myAge}/{BASE.wifeAge}<br/>
           {"$"}{Math.round(HI_TOTAL/1000)}K HI debt at start
         </div>
       </div>
@@ -1838,7 +1904,9 @@ export default function App(){
                     </div>
                     {isSold && (<>
                       <div data-testid={`sale-year-slider-${prop.id}`}>
-                        {slider("Sale year",hold.year||2026,v=>setPropertyHold(prop.id,{year:v}),2026,2046,1,v=>v+"")}
+                        {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) -- can't schedule a
+                            sale before the model's own start date, and the horizon is BASE.startYear+20. */}
+                        {slider("Sale year",hold.year||BASE.startYear,v=>setPropertyHold(prop.id,{year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
                       </div>
                       <div>
                         <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale quarter (assumed at quarter boundary)</div>
@@ -1864,8 +1932,9 @@ export default function App(){
                             <button data-testid={`seg-add-${unit.id}`}
                               onClick={()=>setUnitSegments(prop.id,unitIdx,list=>{
                                 const prev=list[list.length-1];
-                                const yrFrom=prev?Math.min(2046,(prev.yrTo||prev.yrFrom||2026)+1):2026;
-                                return [...list,{yrFrom, yrTo:Math.min(2046,yrFrom+1), kind:'ltr',
+                                // v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046)
+                                const yrFrom=prev?Math.min(BASE.startYear+20,(prev.yrTo||prev.yrFrom||BASE.startYear)+1):BASE.startYear;
+                                return [...list,{yrFrom, yrTo:Math.min(BASE.startYear+20,yrFrom+1), kind:'ltr',
                                   str:[{days:120,rate:280,type:"nightly"}], mtr:[{months:10,rate:3000}], ltr:{monthlyRent:3000}}];
                               })}
                               style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
@@ -1896,13 +1965,13 @@ export default function App(){
                                 <div style={{display:"flex",gap:8,marginBottom:6}}>
                                   <div style={{flex:1}}>
                                     <div style={{fontSize:8,color:dim,marginBottom:2}}>From {seg.yrFrom}</div>
-                                    <input type="range" min={2026} max={2046} step={1} value={seg.yrFrom}
+                                    <input type="range" min={BASE.startYear} max={BASE.startYear+20} step={1} value={seg.yrFrom}
                                       onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrFrom:v,yrTo:Math.max(v,seg.yrTo)});}}
                                       style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
                                   </div>
                                   <div style={{flex:1}}>
                                     <div style={{fontSize:8,color:dim,marginBottom:2}}>To {seg.yrTo}</div>
-                                    <input type="range" min={2026} max={2046} step={1} value={seg.yrTo}
+                                    <input type="range" min={BASE.startYear} max={BASE.startYear+20} step={1} value={seg.yrTo}
                                       onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrTo:v,yrFrom:Math.min(seg.yrFrom,v)});}}
                                       style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
                                   </div>
@@ -2038,7 +2107,8 @@ export default function App(){
             {sect("One-Time Obligation")}
             <div style={{fontSize:8,color:dim,marginBottom:8}}>When on, the obligation amount reduces that year's recognized capital gains (capped at the gains pool) -- the Kimbell/Arrowsmith position, now assumed fully applied.</div>
             {slider("Amount",obligation.amount||0,v=>setObligation({amount:v}),262500,787500,5000,v=>"$"+Math.round(v/1000)+"K")}
-            {slider("Year",obligation.year||2026,v=>setObligation({year:v}),2026,2046,1,v=>v+"")}
+            {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) */}
+            {slider("Year",obligation.year||BASE.startYear,v=>setObligation({year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
             <div style={{marginBottom:8}}>
               <div style={{fontSize:9,color:muted,marginBottom:3}}>Quarter</div>
               {toggle(obligation.quarter||1, v=>setObligation({quarter:v}), [1,2,3,4].map(q=>({v:q,l:'Q'+q})))}
@@ -2115,7 +2185,7 @@ export default function App(){
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Loans</span>
                 <button data-testid="loan-add"
-                  onClick={()=>setLoans(list=>[...list,{label:`Loan ${list.length+1}`,amount:25000,startYear:2026,startMonth:6,months:12,rate:7.5,includeInSweep:false}])}
+                  onClick={()=>setLoans(list=>[...list,{label:`Loan ${list.length+1}`,amount:25000,startYear:BASE.startYear,startMonth:BASE.startMonth,months:12,rate:7.5,includeInSweep:false}])}
                   style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
                     background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
                   + add loan
@@ -2149,10 +2219,11 @@ export default function App(){
                     {slider("Term (months)",L.months||1,v=>updL({months:v}),1,120,1,v=>v+" mo")}
                     <div style={{display:"flex",gap:8}}>
                       <div style={{flex:1}}>
-                        {slider("Start year",L.startYear||2026,v=>updL({startYear:v}),2026,2046,1,v=>v+"")}
+                        {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) */}
+                        {slider("Start year",L.startYear||BASE.startYear,v=>updL({startYear:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
                       </div>
                       <div style={{flex:1}}>
-                        {slider("Start month",L.startMonth||6,v=>updL({startMonth:v}),1,12,1,v=>new Date(2000,v-1).toLocaleString('default',{month:'short'}))}
+                        {slider("Start month",L.startMonth||BASE.startMonth,v=>updL({startMonth:v}),1,12,1,v=>new Date(2000,v-1).toLocaleString('default',{month:'short'}))}
                       </div>
                     </div>
                     <div style={{marginTop:2}}>
@@ -2238,7 +2309,8 @@ export default function App(){
                   <div style={{marginBottom:10}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
                       <span style={{fontSize:10,color:muted}}>Year</span>
-                      <span style={{fontSize:10,color:amber,fontFamily:mono}}>{2026+d.yr} (age {65+d.yr})</span>
+                      {/* v4.3.0: BASE.startYear (was hardcoded 2026) -- d.yr is an offset from the model's start */}
+                      <span style={{fontSize:10,color:amber,fontFamily:mono}}>{BASE.startYear+d.yr} (age {65+d.yr})</span>
                     </div>
                     <input type="range" min={0} max={20} step={1} value={d.yr}
                       onChange={e=>setLifestyleDraws(ds=>ds.map((x,j)=>j===i?{...x,yr:parseInt(e.target.value)}:x))}
@@ -2247,7 +2319,7 @@ export default function App(){
                       const cashAtYr = liveRows[d.yr]?.cashAst ?? 0;
                       const ok = cashAtYr >= d.amount;
                       return <div style={{fontSize:8,color:ok?dim:red,marginTop:3}}>
-                        Invested cash at {2026+d.yr}: ~${Math.round(cashAtYr/1000)}K
+                        Invested cash at {BASE.startYear+d.yr}: ~${Math.round(cashAtYr/1000)}K
                         {!ok&&" -- draw exceeds balance"}
                       </div>;
                     })()}
@@ -2262,7 +2334,7 @@ export default function App(){
                       style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
                   </div>
                   <div style={{fontSize:8,color:dim,marginTop:3,textAlign:"right"}}>
-                    <span style={{color:amber}}>${d.amount.toLocaleString()}</span> in <span style={{color:muted}}>{2026+d.yr}</span>
+                    <span style={{color:amber}}>${d.amount.toLocaleString()}</span> in <span style={{color:muted}}>{BASE.startYear+d.yr}</span>
                   </div>
                 </div>
               ))}
@@ -2287,7 +2359,8 @@ export default function App(){
               }}>{taxEnabled?"on":"off"}</button>
             </div>
             {taxEnabled&&<div style={{fontSize:9,color:dim,fontStyle:"italic"}}>
-              Est. {liveRows[0]?`$${Math.round(liveRows[0].tax/100)*100}/mo`:"..."} in 2026, {liveRows[4]?`$${Math.round(liveRows[4].tax/100)*100}/mo`:"..."} in 2030
+              {/* v4.3.0: BASE.startYear (was hardcoded "2026"/"2030") */}
+              Est. {liveRows[0]?`$${Math.round(liveRows[0].tax/100)*100}/mo`:"..."} in {BASE.startYear}, {liveRows[4]?`$${Math.round(liveRows[4].tax/100)*100}/mo`:"..."} in {BASE.startYear+4}
             </div>}
             {!payOffHI&&slider("Investment Return",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
             {payOffHI&&slider("Investment Return (SB proceeds)",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
@@ -2345,7 +2418,7 @@ export default function App(){
             {/* Row 1: core outputs */}
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
               {statBadge("Total work income needed",liveStats.launchRW>0?"$"+liveStats.launchRW.toLocaleString()+"/mo":"COVERED",liveStats.launchRW<2000)}
-              {statBadge("Work-free year",liveStats.workFreeYr?String(liveStats.workFreeYr):"2046+",!!liveStats.workFreeYr)}
+              {statBadge("Work-free year",liveStats.workFreeYr?String(liveStats.workFreeYr):`${BASE.startYear+20}+`,!!liveStats.workFreeYr)}
               {statBadge("HI debt clear",liveStats.debtClearYr?String(liveStats.debtClearYr):"Never",!!liveStats.debtClearYr)}
               {statBadge("Net worth yr 10","$"+liveNwYr10.toFixed(1)+"M",liveNwYr10>2)}
             </div>
@@ -2369,7 +2442,7 @@ export default function App(){
               return (
                 <div style={{background:bg2,borderRadius:7,padding:"9px 12px",borderLeft:`3px solid ${overCap>0?red:amber}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                    <span style={{fontSize:10,color:overCap>0?red:amber,fontWeight:"bold"}}>SS at {ssAge} -- Earnings Test active until age 67 ({2026+(67-ssAge)})</span>
+                    <span style={{fontSize:10,color:overCap>0?red:amber,fontWeight:"bold"}}>SS at {ssAge} -- Earnings Test active until age 67 ({BASE.startYear+(67-ssAge)})</span>
                     <span style={{fontSize:9,color:dim}}>2026 cap: <span style={{color:amber,fontFamily:mono}}>${SS_CAP.toLocaleString()}/yr</span></span>
                   </div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:6}}>
@@ -2390,7 +2463,7 @@ export default function App(){
                     </div>
                   </div>
                   <div style={{fontSize:8,color:dim,borderTop:`1px solid ${bdr}`,paddingTop:5}}>
-                    Cap ~4%/yr wage inflation: ${Math.round(SS_CAP*1.04).toLocaleString()} in 2027, ${Math.round(SS_CAP*1.04*1.04).toLocaleString()} in 2028 &middot; Disappears entirely at your FRA age 67 ({2026+(67-ssAge)}) &middot; Brenda has no SS yet -- no limit on her 1099s
+                    Cap ~4%/yr wage inflation: ${Math.round(SS_CAP*1.04).toLocaleString()} in 2027, ${Math.round(SS_CAP*1.04*1.04).toLocaleString()} in 2028 &middot; Disappears entirely at your FRA age 67 ({BASE.startYear+(67-ssAge)}) &middot; Brenda has no SS yet -- no limit on her 1099s
                   </div>
                 </div>
               );
@@ -2586,7 +2659,11 @@ export default function App(){
 
               // Income events
               if(r.yourSs>0 && (!prev||prev.yourSs===0))
-                evts.push({cat:"income", icon:"SS", desc:`Your SS starts (age ${65+(yr-2026)})`, delta:r.yourSs, note:`$${r.yourSs.toLocaleString()}/mo`});
+                // v4.3.0: yr-BASE.startYear (was yr-2026, hardcoded) -- age is
+                // relative to BASE.myAge AT THE START date, matching the
+                // already-correct ageFrom/ageTo pattern below; a hardcoded 2026
+                // would misreport age once BASE.startYear is edited away from 2026.
+                evts.push({cat:"income", icon:"SS", desc:`Your SS starts (age ${65+(yr-BASE.startYear)})`, delta:r.yourSs, note:`$${r.yourSs.toLocaleString()}/mo`});
               if(r.brendaSs>0 && (!prev||prev.brendaSs===0))
                 evts.push({cat:"income", icon:"SS", desc:`Brenda SS spousal starts (FRA ${yr})`, delta:r.brendaSs, note:`$${r.brendaSs.toLocaleString()}/mo`});
               if(prev && r.workInc<prev.workInc && prev.workInc>0)
@@ -2631,8 +2708,15 @@ export default function App(){
               // off-plan year -- where the kids' premium doesn't change -- was missing)
               {
                 const _hlNames = evts.filter(e=>e.icon==="HL").map(e=>e.desc).join(" ");
-                if(yr===BASE.startYear)
-                  evts.push({cat:"cost", icon:"HL", desc:"You → Medicare", delta:0, note:`Ericsson $${BASE.healthYouEricsson} → Medicare ~$${BASE.healthYouMedicare}/mo (Nov ${BASE.startYear})`});
+                // v4.3.0: yr===2026 (was yr===BASE.startYear) -- the real Medicare
+                // transition is a fixed Nov-2026 fact (see healthMonthly's own
+                // hardcoded 2026 check in engine.js), independent of the model's
+                // start-year setting. Comparing against BASE.startYear only
+                // happened to work while startYear was a hardcoded 2026 constant;
+                // now that it's Defaults-tab editable, a later startYear must NOT
+                // re-announce an already-past transition.
+                if(yr===2026)
+                  evts.push({cat:"cost", icon:"HL", desc:"You → Medicare", delta:0, note:`Ericsson $${BASE.healthYouEricsson} → Medicare ~$${BASE.healthYouMedicare}/mo (Nov 2026)`});
                 if(yr===BASE.sophiaOff && !/Sophia/.test(_hlNames))
                   evts.push({cat:"cost", icon:"HL", desc:"Sophia → off health insurance", delta:0, note:`kids' premium continues while Nolan is on plan (through ${BASE.nolanOff-1})`});
                 if(yr===BASE.nolanOff && !/Nolan/.test(_hlNames))
@@ -2655,11 +2739,11 @@ export default function App(){
 
               // Lifestyle draw events
               for(const d of lifestyleDraws.filter(x=>x.enabled)){
-                if(yr===2026+d.yr)
+                if(yr===BASE.startYear+d.yr)  // v4.3.0: was hardcoded 2026
                   evts.push({cat:"income", icon:"DR", desc:"Lifestyle Draw", delta:Math.round(d.amount/12), note:`$${d.amount.toLocaleString()} lump sum`});
               }
 
-              if(evts.length>0) events.push({yr, age:65+(yr-2026), r, evts});
+              if(evts.length>0) events.push({yr, age:65+(yr-BASE.startYear), r, evts});
             }
 
             const catColor = {income:green, cost:red, milestone:blue};
@@ -2826,7 +2910,7 @@ export default function App(){
                     <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                       {[
                         ["Launch RW","$"+pin.stats.launchRW.toLocaleString()+"/mo"],
-                        ["Work-free",pin.stats.workFreeYr||"2046+"],
+                        ["Work-free",pin.stats.workFreeYr||`${BASE.startYear+20}+`],
                         ["Debt clear",pin.stats.debtClearYr||"Never"],
                         ["NW yr10","$"+((chartData[10]?.[`pin_${pin.id}_nw`]??pin.stats.nwYr10/1000)).toFixed(1)+"M"],
                       ].map(([l,v])=>(
@@ -2911,8 +2995,9 @@ export default function App(){
               ];
               const rows = [
                 {label:"Launch work needed", fmt:c=>"$"+c.stats.launchRW.toLocaleString()+"/mo", good:c=>c.stats.launchRW<3000},
-                {label:"Work-free year",      fmt:c=>c.stats.workFreeYr?String(c.stats.workFreeYr):"2046+",  good:c=>!!c.stats.workFreeYr&&c.stats.workFreeYr<=2034},
-                {label:"HI debt clear",       fmt:c=>c.stats.debtClearYr?String(c.stats.debtClearYr):"Never", good:c=>!!c.stats.debtClearYr&&c.stats.debtClearYr<=2031},
+                // v4.3.0: BASE.startYear-relative thresholds (were hardcoded 2046/2034/2031)
+                {label:"Work-free year",      fmt:c=>c.stats.workFreeYr?String(c.stats.workFreeYr):`${BASE.startYear+20}+`,  good:c=>!!c.stats.workFreeYr&&c.stats.workFreeYr<=BASE.startYear+8},
+                {label:"HI debt clear",       fmt:c=>c.stats.debtClearYr?String(c.stats.debtClearYr):"Never", good:c=>!!c.stats.debtClearYr&&c.stats.debtClearYr<=BASE.startYear+5},
                 {label:"NW at yr 10",         fmt:c=>"$"+(c.nwYr10??0).toFixed(1)+"M", good:c=>(c.nwYr10??0)>=5},
                 {label:"Sweep savings (final)",fmt:c=>"$"+Math.round((c.sweepFinal??0)).toLocaleString()+"K", good:c=>(c.sweepFinal??0)>=1000},
               ];

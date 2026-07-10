@@ -1,0 +1,281 @@
+=== SESSION 27 JOURNAL — v4.3.0 (Model Start-Date Anchor) ===
+
+Date: 2026-07-09
+
+Session goal: user reported a bug -- the CC debt setting is $60K but the
+chart's 2026 column showed ~$46K. Asked for diagnose-first-report-a-plan
+(no code) before touching anything, specifically: enumerate every value
+anchored to a start assumption, propose an explicit start-date
+representation, confirm the "nothing paid down/grown/aged before start"
+invariant, and check interaction with the v4.2.5 disposition-appreciation
+fix. Plan was reviewed and approved (with two clarifications: promote
+BASE.startYear itself to Defaults-tab-editable alongside the new
+BASE.startMonth; defer the Nolan-grace-period fix but document its
+before/after meaning precisely) before implementation.
+
+--- DIAGNOSIS (before any code changed) ---
+
+Root cause was TWO stacked bugs, not one:
+
+1. buildScenario (engine.js, annual engine): the row labeled cal=2026 ran a
+   FULL 12-month mo-loop (interest + minimum payments + avalanche paydown)
+   BEFORE reading `hiDebt` into the row. So "2026" already reflected a full
+   calendar year of paydown from an implicit Jan-1 anchor, even though no
+   such year had elapsed. Mortgage balances (`balById`) were NOT affected --
+   they were already read before the mo-loop; only HI debt (ccBal/sophiaBal/
+   nolanBal) read post-loop.
+
+2. The chart's calendar-year bucketing of the monthly wfData engine
+   (App.jsx) did `const yr = 2026 + Math.floor(r.mo/12)`, assuming wfData's
+   mo=0 was January. It wasn't -- wfData's `startDate` was a hardcoded
+   `new Date(2026, 5)` (June), so this bucketing silently mislabeled
+   June-through-May windows as "2026," "2027," etc. Flow fields (disc,
+   sweep) came from this mis-bucketed monthly data while hiDebt came from
+   the Jan-anchored annual engine -- two different 12-month windows feeding
+   one chart column.
+
+wfData's own per-month hiDebt field was ALREADY captured pre-decrement
+(correct "as-of-start-of-period" semantics) -- it just needed its start
+date wired to something real instead of a hardcoded June 2026. This matches
+the open backlog item carried since session 23: "ANNUAL VS MONTHLY ENGINE
+HI-DEBT-CLEAR TIMING DIVERGENCE" -- this session's fix is the actual
+resolution of that backlog item, not just the reported symptom.
+
+--- WHAT SHIPPED (v4.3.0) ---
+
+engine.js:
+- BASE.startMonth: new field (default 7, matching today's real date). Both
+  BASE.startYear and BASE.startMonth are now Defaults-tab-editable (new
+  "Model Start Date" group in DEFAULTS_REGISTRY, App.jsx) -- the whole
+  point of making the anchor explicit is that it has to stay current, not
+  become a second stale hardcoded constant.
+- New exported helpers `monthsInYear(yr, startMonth)` and
+  `monthsElapsedBeforeYear(yr, startMonth)`: yr=0 covers only the months
+  from startMonth through December (a genuine partial period); yr>=1 stay
+  full 12-month years. Both collapse to the old plain-integer-yr behavior
+  exactly when startMonth===1. Exposed on window.__engine for direct
+  testing.
+- buildScenario restructured:
+  - hiDebt is now snapshotted BEFORE each iteration's mo-loop runs (same
+    convention mortgage balances already used) -- row yr=0's hiDebt is the
+    exact entered setting, zero elapsed decay. debtCleared/accel now use
+    this pre-loop snapshot too, which brings the annual engine onto the
+    SAME snapshot convention wfData already used (see the T5 correction
+    below -- this closes the timing/anchor half of the divergence, NOT the
+    sweep-magnitude half).
+  - The mo-loop for yr=0 only iterates monthsInYear(0,startMonth) months
+    (not always 12); calMonth1to12/absMo are derived from a monthOffset so
+    ownership/mortgage-step/health-cost calls land on the correct real
+    calendar month.
+  - Growth/appreciation/inflation/rent-growth exponents switched from
+    integer `yr` to `monthsElapsedBeforeYear(yr,startMonth)/12` (continuous
+    elapsed real years since the true start) -- fixes a SEPARATE,
+    previously-live inconsistency where the monthly engine already
+    compounded continuously (mo/12 from its own hardcoded anchor) while the
+    annual engine jumped in whole-year steps.
+  - Every "$/mo rate -> this row's period total" annualization (pension,
+    workInc, propCost, core, minDebt, irmaaAdd, splitProtect/discFloor
+    caps, health-month-sum loop, rental's yearHeldFraction) now scales by
+    monthsThisYear instead of a flat 12/hardcoded month range, and the
+    row.push conversions back to a displayed $/mo rate divide by the same
+    monthsThisYear -- net effect: displayed monthly rates are unchanged
+    from before, but a partial first year's totals (and the cumulative
+    cumInc/cumCost/etc. running sums, and the loansBalPre boundary check)
+    correctly reflect only the months actually simulated.
+  - cashAst's rerun-from-scratch loop changed from `y<=yr` to `y<yr` so its
+    "start of period yr" snapshot matches the hiDebt/mortgage convention
+    (yr=0 -> empty range -> $0, the exact starting cash position).
+  - Loan `startAbs` formula fixed: was `... + (l.startMonth||6) - 6`, a
+    magic "-6" that silently assumed absMo=0 was June of startYear (copied
+    from wfData's old hardcoded anchor) -- now `- BASE.startMonth`. This
+    was ALREADY WRONG before this session (the annual engine's own absMo
+    counted from January, not June) -- a third latent bug this session's
+    unification exposed and fixed.
+
+App.jsx:
+- wfData's `startDate` (was hardcoded `new Date(2026,5)`) now reads
+  `new Date(BASE.startYear, BASE.startMonth-1)` (clamped to a valid month).
+- wfData rows now carry a raw `calYear` field (not just the display-
+  formatted `cal` string).
+- The chart's year-bucketing (`chartData` useMemo) now reads `r.calYear`
+  directly instead of recomputing `2026+Math.floor(r.mo/12)`.
+- The "You -> Medicare" event marker switched from `mo===4` (an
+  approximation that only happened to land near the real date by
+  coincidence of the old June anchor) to an exact `calYear===2026 &&
+  d.getMonth()===10` check, matching healthMonthly's own real Nov-2026
+  fact.
+- Loan-scaffold "add new loan" UI default now starts BASE.startYear/
+  startMonth instead of hardcoded 2026/June.
+- Broad sweep of every other hardcoded "2026"/"2046" found in App.jsx that
+  was actually a sim-start-relative value (not a real external fact) --
+  ssStartYear formula (both call sites), obligation-year fallback (two
+  sites, now matches engine.js's own fallback so the two engines can't
+  disagree on the default obligation year), the work-curve editor's
+  calendar-year display, the static header "Launch Jun 2026 . Ages 65/60"
+  (now reads live BASE values), sale-year/obligation-year/loan-start-year
+  slider bounds and defaults (were hardcoded 2026-2046, now BASE.startYear
+  to BASE.startYear+20), lifestyle-draw year displays, the tax-estimate
+  "in 2026, in 2030" display, SS age-67-FRA-year displays, "2046+"
+  fallback labels (now BASE.startYear+20), and two age-offset formulas in
+  the financial-events timeline (were `yr-2026`/`2026+d.yr`, now
+  BASE.startYear-relative, matching the ALREADY-correct sibling pattern a
+  few hundred lines away in the FCF-schedule editor).
+- Explicitly NOT touched (real external facts, independent of sim start):
+  healthMonthly's Nov-2026 Medicare transition; SS_CAP's "2026 cap" label
+  (a specific tax-year IRS figure); defaults.js's literal scenario data
+  (rental segment year ranges, the default obligation year, the "Family
+  loan" real start date) -- these are facts about the current default
+  scenario, not anchor-derived formulas, and don't auto-follow
+  BASE.startYear if a user changes it (same as any other scenario input).
+
+retirement-simulator.spec.js:
+- E5/L1 version-string assertions bumped to v4.3.0.
+- Fixed a THIRD occurrence of the same stale bucketing bug, this time
+  inside the test file itself (S6's `drawYear = 2026 + Math.floor(wf[idx]
+  .mo/12)`) -- now reads `wf[idx].calYear` directly.
+- New Group T (5 tests, after one round of test-driven correction -- see
+  "TEST RUN FINDINGS" below): T1 asserts the $60K-setting bug directly
+  (row 0's hiDebtRaw matches the engine's own HI_TOTAL constant exactly,
+  not a paid-down value). T2 tests monthsInYear/monthsElapsedBeforeYear's
+  math directly. T3 confirms a later start month shrinks year-0's totals
+  (lower cumCost by row 9) without changing the displayed $/mo rate. T4 is
+  the startMonth=1 regression guard (elapsed-years exponent collapses to
+  plain integer yr). T5 asserts the annual and monthly engines report the
+  IDENTICAL starting HI-debt snapshot (row 0 only) -- scoped deliberately
+  narrow; see below for why a full "engines agree on the clear year" claim
+  was wrong and dropped.
+
+CLAUDE.md:
+- New "Model start-date anchor (v4.3.0)" section under Architecture: states
+  the "never hardcode a current year/month" rule, the snapshot-before-
+  mutate invariant, the fractional-elapsed-time growth-exponent rule, the
+  BASE.startYear/+20 slider-bound convention, the real-external-fact
+  exception (Medicare, SS_CAP), and the deferred Nolan-gate follow-up.
+- Updated the "Two parallel engines" section's window.__engine description
+  to mention the new monthsInYear/monthsElapsedBeforeYear exports and
+  wfData's new raw calYear field.
+
+--- TEST RUN FINDINGS (run_tests, first pass) ---
+
+First full run: 89/91 passed, both failures in the new Group T. Root-caused
+both before touching anything (dev server was already up on 5173; ran
+`npx playwright test retirement-simulator.spec.js --reporter=list` directly
+rather than run_tests.ps1).
+
+T1 failure: expected hiDebtRaw=60000, got 259174.69. Cause: the test's own
+override `{sophiaBal:0, nolanBal:0}` didn't do what it looked like it should
+-- buildScenario reads `p.sophiaBal || SOPHIA_LOANS.reduce(...)`, and `0` is
+falsy, so passing 0 falls straight through to the DEFAULT loan sums (this is
+pre-existing engine behavior, not something this session touched). 259174.69
+is exactly CC $60,000 + Sophia $58,057.62 + Nolan $141,117.07 -- i.e. the
+real default HI_TOTAL, snapshotted correctly. Fixed the TEST, not the
+engine: call makeParams({}) with no overrides and assert against the
+engine's own exported HI_TOTAL constant (now exposed on window.__engine)
+instead of a hand-picked number that fought the `||` pattern.
+
+T5 failure: expected annual clear year 2035 (matching wfData), got 2038 --
+a real 3-year gap, not a rounding artifact. Diagnosed via a throwaway
+probe.spec.js (git-stashed the whole diff, reran the same probe against the
+pre-v4.3.0 baseline, compared): the annual engine's `debtSweep` (accel)
+field is 0 in EVERY year, in BOTH the baseline and the v4.3.0 code -- the
+default scenario's annual engine pays down HI debt via MINIMUM PAYMENTS
+ONLY (baseDI never exceeds the lifestyle-split floor for this scenario),
+while wfData's waterfall applies a materially larger real sweep for the
+identical input, clearing 3 years sooner. This is the PRE-EXISTING,
+already-tracked "[P1] Unify annual sweep model with wfData" backlog item
+(carried since session20-25) -- a genuine, separate, still-open magnitude
+difference between the two engines' waterfall math, not something this
+session introduced or was ever going to fix as a side effect.
+v4.3.0 DOES fix the narrower claim: both engines now snapshot HI debt
+pre-decrement at the START of a period (baseline comparison confirmed
+liveRows[0] was $248K post-fabricated-year-of-paydown pre-fix vs wfData[0]'s
+already-correct $259K -- the two flatly disagreed at row 0 before this
+session). It does NOT unify the two engines' eventual payoff pace, and
+T5's original assertion (full agreement on the calendar year debt clears)
+overclaimed what was actually fixed. Corrected in three places: the
+engine.js/App.jsx v4.3.0 header comments (both said this "closes" the
+divergence -- now say it closes the snapshot/timing half only), and T5
+itself (rewritten to assert liveRows[0].hiDebt === wfData[0].hiDebt --
+the one thing actually fixed -- instead of clear-year agreement).
+Both corrections verified: probe.spec.js confirmed the pre-fix baseline
+would have failed the corrected T5 too (248 !== 259), so it's still a
+real regression guard, just honestly scoped.
+Second run: T1 still failed (toBeCloseTo(HI_TOTAL,1) -- off by $0.69,
+since HI_TOTAL is computed from the raw un-rounded SOPHIA_LOANS/
+NOLAN_LOANS arrays while DEFAULTS.sophiaBal/nolanBal are separately
+rounded literals a few cents off). Fixed T1 again to compare against
+p.ccBal+p.sophiaBal+p.nolanBal (the actual scenario's own params) instead
+of the separate HI_TOTAL constant. Third run: all 91 tests passed
+(probe.spec.js deleted before this run, not part of the suite).
+
+--- DEFERRED, NOT FIXED (per explicit user instruction) ---
+
+[FOLLOW-UP] Nolan loan grace-period gate (`engine.js` buildScenario:
+`if(absMo<5){...}else{nolanActive=true;}`; App.jsx wfData: `if(mo>=5)
+nolanOn=true;`). Both are "elapsed months since sim start < 5" checks with
+no real-world calendar anchor of their own. BEFORE this session: the two
+engines already silently disagreed on what this meant --
+  - engine.js's absMo counted from January of BASE.startYear (Jan-anchor)
+    -> grace ended, Nolan went active, in JUNE of the start year.
+  - App.jsx's wfData counted from its hardcoded June-2026 startDate ->
+    grace ended in NOVEMBER of the start year.
+  These are 5 months apart and had been disagreeing since whenever wfData's
+  June hardcode was introduced -- a real, pre-existing, shipped
+  inconsistency, not something this session created.
+AFTER this session (both engines now share the same true-start-date
+anchor, default startMonth=7/July): both engines now compute grace-end at
+the SAME point -- 5 months after the true start -- which for the current
+July default is DECEMBER of the start year. So v4.3.0 incidentally makes
+the two engines agree with each other on this gate (a nice side effect of
+sharing one anchor), but neither engine's answer is verified against
+Nolan's actual loan terms -- "5 months of grace" may have originally meant
+"grace ends in June 2026" (if calibrated off the old Jan-anchored annual
+engine) or something else entirely. This needs an explicit absolute-
+calendar-date decision from the user (e.g. "Nolan's grace period actually
+ends on <real date>"), then a one-line fix to replace `absMo<5`/`mo>=5`
+with a real calYear/calMonth check in both engines. Both call sites now
+carry a v4.3.0 comment with this exact before/after math so a future
+session doesn't have to re-derive it.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. This session's diff has NOT been through run_tests.ps1 yet as of this
+   journal entry -- per house workflow (CLAUDE.md's "pause and summarize
+   the diff for manual review first"), the plan is: user reviews the diff,
+   then on go-ahead run_tests.ps1, then commit. If a future session picks
+   this up mid-stream, check git status/log to see whether that already
+   happened.
+2. BASE.startMonth defaults to 7 (July 2026) to match the real date this
+   session was run. If BASE.startYear/startMonth ever need bumping forward
+   as real time passes, do it via the Defaults tab (or its localStorage-
+   persisted override), NOT by hand-editing the BASE constant in
+   engine.js -- that's the whole point of this session's fix; hand-editing
+   the constant again would just recreate a slightly-different version of
+   the original bug (a stale hardcoded "now").
+3. The fractional elapsed-time growth exponent (`monthsElapsedBeforeYear
+   (yr,startMonth)/12`) is now used everywhere `Math.pow(1+rate, yr)` used
+   to appear in buildScenario (inf, coreinf, propinf, rg, pinf, app,
+   valById, workFromCurve calls, the "_inf0/_pinf0" monthly-mirror
+   section). If a future session adds a NEW growth-rate calculation to
+   buildScenario, use this same `elapsedYrs` variable (already computed
+   once per iteration), not a bare `yr` -- a bare `yr` will silently
+   reintroduce a mid-year-start growth discontinuity.
+4. Every row-level flow total in buildScenario's row.push is now divided
+   by `monthsThisYear` (not a flat 12) to recover a displayed $/mo rate,
+   and the post-loop cumulative-tracking loop (cumInc/cumCost/etc., right
+   before `return rows`) multiplies by `monthsInYear(r.yr, startMonth)` to
+   reverse it. If a future session adds a new $/mo-rate row field, follow
+   this same *12-in, /monthsThisYear-out pattern, or its yr=0 value will
+   be wrong for any non-January startMonth.
+5. `wfData` rows now carry a raw `calYear` number (in addition to the
+   existing display-formatted `cal` string like "Jun '26") -- prefer
+   reading `calYear` over re-deriving a calendar year from `mo` anywhere
+   new code needs one; three separate places (App.jsx's chart bucketing,
+   and two spots in the test file) had each re-derived it independently
+   and silently drifted from each other before this session.
+6. Re-verify the "Known exception" list in CLAUDE.md's new section
+   (Medicare Nov-2026, SS_CAP's tax-year label) if BASE.startYear is ever
+   pushed out several years -- at some point a "fixed 2026 fact" may need
+   to become a genuinely different fixed year (e.g. if this household's
+   real Medicare transition is long past), which is a data-accuracy
+   question for the user, not a formula bug.

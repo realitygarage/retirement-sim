@@ -51,7 +51,7 @@ The app runs **two independent simulation engines** over the same inputs, and a 
 
 Both engines call into shared pure functions in `engine.js` (`unitSegmentGross/Net`, `estimateTax`, `disposeAsset`, `planHiPaydown`, `splitResidual`, mortgage state helpers, etc.) specifically so the two cannot drift apart on shared math. When changing anything that affects both (rental income, mortgage payments, tax estimates, property ownership timing), check both `buildScenario` and the `wfData` block, and look for a dev-mode `console.warn` "conservation" check in `App.jsx` that cross-validates the two engines' outputs against each other at runtime.
 
-`window.__engine`, `window.__wfData`, and `window.__liveRows` exist purely so Playwright tests can inspect/call into both engines directly — don't treat their presence as evidence of a "public API," they're test scaffolding.
+`window.__engine`, `window.__wfData`, and `window.__liveRows` exist purely so Playwright tests can inspect/call into both engines directly — don't treat their presence as evidence of a "public API," they're test scaffolding. `window.__engine` also exposes `monthsInYear`/`monthsElapsedBeforeYear` (v4.3.0) for testing the start-date-anchor math directly; `wfData` rows carry a raw `calYear` field (not just the display-formatted `cal` string) so tests and chart code can bucket by real calendar year without re-deriving it from `mo`.
 
 ### Property-centric schema (v4)
 
@@ -62,6 +62,20 @@ Properties are the root organizing concept, not a flat list of fields. Each prop
 ### Pooled proceeds routing (one-time sale-year cash flow)
 
 When a property sale + the "One-Time Obligation" (a fixed lump-sum outflow, e.g. a settlement) land in the same calendar year, their combined effect is computed once via `splitResidual()`/`planHiPaydown()` (`engine.js`) and applied at the start of that pool year: **draw → HI-debt avalanche (full remainder, debt-first) → reserve/buffer top-ups → whatever's left joins the ordinary monthly sweep**. This debt-first-then-buffers order is deliberately scoped to *this one-time inflow only* — the ordinary recurring monthly waterfall (Fixed Costs → Maintenance Reserves → Rainy Day/Op Buffer → FCF Floor → Surplus sweep) stays buffers-before-debt. The one-time "draw" (`settleDraw`) is a display/reporting value only, tracked separately from the recurring "Free Cash Flow" (`disc`) field precisely so a one-time lump sum doesn't spike the ongoing monthly FCF chart.
+
+### Model start-date anchor (v4.3.0)
+
+The model's "now" is `BASE.startYear`/`BASE.startMonth` (`engine.js`), both editable on the Defaults tab's "Model Start Date" group (`DEFAULTS_REGISTRY` in `App.jsx`) — **never hardcode a "current" year/month anywhere in this codebase; read `BASE.startYear`/`BASE.startMonth` instead.** A stale hardcoded anchor (an implicit Jan-1 assumption in `buildScenario`, plus a hardcoded June-2026 `startDate` in `wfData`, plus a chart-bucketing formula that assumed `wfData`'s month 0 was January) was the root cause of a real bug: the chart's first column showed a paid-down HI-debt balance instead of the exact entered setting.
+
+**Invariant: no balance is paid down, no value appreciated/inflated, before the start date.** Both engines enforce this the same way — a value is *snapshotted* (read before any mutation for the current period) rather than *computed after the fact*:
+- `buildScenario`'s annual loop: `yr=0` is a genuine **partial period** (only the months from `startMonth` through December — see `monthsInYear`/`monthsElapsedBeforeYear`, exported from `engine.js`), not a fabricated full year. Stock fields (HI debt, mortgage balances) for row `yr` are captured *before* that iteration's monthly step loop runs; flow fields (income, costs) are that period's real total, scaled by the actual month count, not always 12.
+- `wfData`'s monthly loop already captured balances pre-decrement each month (`hiDebtNow`) — it only needed its `startDate` wired to `BASE.startYear/startMonth` instead of a hardcoded June 2026.
+- Growth/appreciation/inflation exponents use **continuous elapsed real time since the start date** (`monthsElapsedBeforeYear(yr,startMonth)/12`, fractional for the partial first period), not the plain integer `yr` — this collapses to the old exact behavior when `startMonth===1`, and is what stops a mid-year start from front-loading a full year of growth at the first Jan-1 boundary.
+- Any calendar-year slider bound tied to "can this happen before now" (property sale year, loan start year, one-time obligation year, rental segment years) should be bounded by `BASE.startYear`/`BASE.startYear+20`, not a hardcoded `2026`/`2046`.
+
+**Known exception — real external facts stay hardcoded, do not key them to `BASE.startYear`:** the Medicare transition (a fixed Nov-2026 date, `healthMonthly` in `engine.js`) and the SS earnings-test cap's reference tax year (`SS_CAP` in `App.jsx`) are true calendar facts, independent of when the model happens to start. Only *sim-relative* values (ages, SS-start-year, work/lifestyle-draw curve offsets) should be `BASE.startYear`-relative.
+
+**Known follow-up, deliberately not fixed (see the newest session journal for the full before/after analysis):** the Nolan-loan grace-period gate (`absMo<5` in `engine.js`, `mo>=5` in `App.jsx`) is elapsed-months-since-start, and its real-world meaning shifts whenever `BASE.startMonth` changes — it needs an explicit absolute-calendar-date decision, not a threshold tweak. Both engines now share the *same* elapsed-time basis, so this gate no longer disagrees between the two engines the way it silently did before v4.3.0 — but its calendar accuracy relative to Nolan's actual loan terms is still unverified.
 
 ### Scenario pinning / comparison
 

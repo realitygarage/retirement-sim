@@ -627,10 +627,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.2.6"', async ({ page }) => {
+  test('E5 — Version header shows "v4.3.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.2.6').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.2.6');
+    await expect(page.locator('text=v4.3.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.3.0');
   });
 
 });
@@ -1086,10 +1086,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.2.6', async ({ page }) => {
+  test('L1 — Version header shows v4.3.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.2.6').first()).toBeVisible();
-    console.log('  L1 — Version v4.2.6 confirmed');
+    await expect(page.locator('text=v4.3.0').first()).toBeVisible();
+    console.log('  L1 — Version v4.3.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1738,7 +1738,11 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
       const liveRows = window.__liveRows || [];
       const idx = wf.findIndex(r => (r.settleDraw || 0) > 0);
       if (idx < 0 || !cd.length) return null;
-      const drawYear = 2026 + Math.floor(wf[idx].mo / 12);
+      // v4.3.0: wf[idx].calYear (was `2026 + Math.floor(wf[idx].mo / 12)`,
+      // which assumed wfData's mo=0 was January -- read straight off the row
+      // instead of re-deriving it, so this test can't drift from however the
+      // model's start date is configured).
+      const drawYear = wf[idx].calYear;
       const pinKey = Object.keys(cd[0]).find(k => /^pin_.*_di$/.test(k));
       const yi = cd.findIndex(r => r.year === drawYear);
       // pin.rows is buildScenario(liveParams) captured at pin time with no
@@ -1806,6 +1810,112 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
       expect(s.ratio, `year ${s.year}: live=${s.live} pinned=${s.pinned}`).toBeGreaterThan(0.5);
       expect(s.ratio, `year ${s.year}: live=${s.live} pinned=${s.pinned}`).toBeLessThan(1.5);
     }
+  });
+
+});
+
+// ─── Group T: v4.3.0 Model Start-Date Anchor ────────────────────────────────
+// BASE.startYear/startMonth replace the old implicit Jan-1 assumption -- see
+// engine.js's monthsInYear/monthsElapsedBeforeYear and the buildScenario/
+// wfData comments at every v4.3.0-tagged call site.
+test.describe('Group T — v4.3.0 Model Start-Date Anchor', () => {
+
+  test('T1 — start-of-model snapshot matches entered settings exactly (no pre-start decay)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      // NOTE: {sophiaBal:0, nolanBal:0} would NOT zero those out -- buildScenario
+      // reads `p.sophiaBal || SOPHIA_LOANS...`, and `0` is falsy, so it falls back
+      // to the default loan sums. Use the real default scenario params and compare
+      // against THEIR OWN sum (not engine.js's separate HI_TOTAL constant, which is
+      // computed from the raw un-rounded SOPHIA_LOANS/NOLAN_LOANS arrays and differs
+      // from DEFAULTS.sophiaBal/nolanBal's rounded values by a few cents).
+      const p = makeParams({});
+      const rows = buildScenario(p);
+      const expected = p.ccBal + p.sophiaBal + p.nolanBal;
+      return { hiDebtRaw: rows[0].hiDebtRaw, hiDebtK: rows[0].hiDebt, expected };
+    });
+    console.log('  T1 — row0 hiDebtRaw=$' + result.hiDebtRaw + ' hiDebtK=$' + result.hiDebtK + 'K vs expected=$' + result.expected);
+    // Pre-fix, row 0 reported the balance AFTER a full fabricated 12-month
+    // paydown (the "$60K setting shows $46K" bug) -- it must now equal the
+    // entered settings exactly, since nothing has run yet at the start snapshot.
+    expect(result.hiDebtRaw).toBe(result.expected);
+    expect(result.hiDebtK).toBe(Math.round(result.expected / 1000));
+  });
+
+  test('T2 — partial first year covers exactly (13-startMonth) months', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { monthsInYear, monthsElapsedBeforeYear } = window.__engine;
+      return {
+        janFirstYear: monthsInYear(0, 1),
+        julFirstYear: monthsInYear(0, 7),
+        janYr1Elapsed: monthsElapsedBeforeYear(1, 1),
+        julYr1Elapsed: monthsElapsedBeforeYear(1, 7),
+        julYr2Elapsed: monthsElapsedBeforeYear(2, 7),
+      };
+    });
+    console.log('  T2 — ' + JSON.stringify(result));
+    expect(result.janFirstYear).toBe(12);          // Jan start -> no partial year
+    expect(result.julFirstYear).toBe(6);            // Jul-Dec inclusive
+    expect(result.janYr1Elapsed).toBe(12);
+    expect(result.julYr1Elapsed).toBe(6);            // only the partial first period has elapsed
+    expect(result.julYr2Elapsed).toBe(18);           // 6 (partial) + 12 (first full year)
+  });
+
+  test('T3 — a later start month shrinks year-0 activity, not the displayed $/mo rate', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams, applyDefaultsOverrides } = window.__engine;
+      applyDefaultsOverrides({ BASE: { startMonth: 1 } });
+      const janRows = buildScenario(makeParams({ payOffHI: true }));
+      applyDefaultsOverrides({ BASE: { startMonth: 7 } });
+      const julRows = buildScenario(makeParams({ payOffHI: true }));
+      applyDefaultsOverrides({ BASE: { startMonth: 1 } });   // restore module-level BASE for later tests
+      return {
+        janCore: janRows[0].core, julCore: julRows[0].core,
+        janCumCost: janRows[9].cumCost, julCumCost: julRows[9].cumCost,
+      };
+    });
+    console.log('  T3 — ' + JSON.stringify(result));
+    // Displayed $/mo rate is unaffected by how many months are actually in year 0.
+    expect(Math.abs(result.janCore - result.julCore)).toBeLessThanOrEqual(1);
+    // But a July start has 6 fewer months of costs in year 0, so its running
+    // total through the same row index stays behind a January start's.
+    expect(result.julCumCost).toBeLessThan(result.janCumCost);
+  });
+
+  test('T4 — growth/appreciation elapsed-time exponent collapses to plain integer-yr when startMonth=1', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { monthsElapsedBeforeYear } = window.__engine;
+      return [0, 1, 2, 5, 10, 20].map(yr => ({ yr, elapsedYrs: monthsElapsedBeforeYear(yr, 1) / 12 }));
+    });
+    for (const { yr, elapsedYrs } of result) {
+      expect(elapsedYrs, `yr=${yr}`).toBeCloseTo(yr, 10);
+    }
+  });
+
+  test('T5 — annual and monthly engines report the identical starting HI-debt snapshot', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const liveRows = window.__liveRows || [];
+      const wfData = window.__wfData || [];
+      return { annualStart: liveRows[0]?.hiDebt, wfStart: wfData[0]?.hiDebt };
+    });
+    console.log('  T5 — annual row0=$' + result.annualStart + 'K, monthly row0=$' + result.wfStart + 'K');
+    // Pre-fix, liveRows[0] reported the balance after a fabricated full year
+    // of paydown while wfData[0] was already correct (pre-decrement) -- the
+    // two DISAGREED at the very first row. Both now snapshot the same true
+    // start-of-period balance, so they must agree here.
+    // NOTE: this does NOT mean the two engines agree on which calendar year
+    // debt clears entirely -- their avalanche/sweep magnitudes still
+    // genuinely differ (separate, still-open "unify annual sweep model with
+    // wfData" issue), so later rows can still diverge. This test is scoped
+    // to the one thing v4.3.0 actually fixed: the starting snapshot.
+    expect(result.annualStart).not.toBeUndefined();
+    expect(result.wfStart).not.toBeUndefined();
+    expect(result.annualStart).toBe(result.wfStart);
   });
 
 });
