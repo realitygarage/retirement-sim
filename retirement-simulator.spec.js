@@ -595,7 +595,10 @@ test.describe('Group E — Sanity Checks', () => {
     const wf65 = await page.locator('div').filter({ hasText: /^Work-free year$/ })
       .locator('xpath=following-sibling::div').first().textContent();
 
-    await page.locator('button', { hasText: '67' }).first().click();
+    // v4.4.0: the old "Your SS Start Age" 65/66/67/... toggle buttons were
+    // replaced by explicit year+month sliders -- default claim is 2026/Oct
+    // (his birth month) = exactly age 65, so +2 years at the same month = age 67.
+    await setSlider(page, 'Your SS Start Year', 2028);
     await page.waitForTimeout(400);
     const wf67 = await page.locator('div').filter({ hasText: /^Work-free year$/ })
       .locator('xpath=following-sibling::div').first().textContent();
@@ -627,10 +630,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.3.1"', async ({ page }) => {
+  test('E5 — Version header shows "v4.4.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.3.1').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.3.1');
+    await expect(page.locator('text=v4.4.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.4.0');
   });
 
 });
@@ -1086,10 +1089,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.3.1', async ({ page }) => {
+  test('L1 — Version header shows v4.4.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.3.1').first()).toBeVisible();
-    console.log('  L1 — Version v4.3.1 confirmed');
+    await expect(page.locator('text=v4.4.0').first()).toBeVisible();
+    console.log('  L1 — Version v4.4.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1953,6 +1956,192 @@ test.describe('Group T — v4.3.0 Model Start-Date Anchor', () => {
     expect(result.annualStart).not.toBeUndefined();
     expect(result.wfStart).not.toBeUndefined();
     expect(result.annualStart).toBe(result.wfStart);
+  });
+
+});
+
+// ─── Group U: v4.4.0 Birth-Date Anchor / Per-Spouse SS / Medicare-FRA Derivation ─
+// Bob: born Oct 18 1961 (yourBirthYear:1961, yourBirthMonth:10). Brenda: born
+// Jan 19 1967 (brendaBirthYear:1967, brendaBirthMonth:1). Default scenario:
+// Bob claims SS at exactly age 65 (Oct 2026, his birth month); Brenda claims
+// at her derived FRA (Jan 2034) -- both defaults chosen to reproduce the OLD
+// pre-v4.4.0 default behavior exactly, so the default-scenario numbers below
+// are not incidental. Bob's Medicare transition is birth-date-derived to Oct
+// 2026 -- an intentional CORRECTION from the old Nov-2026 hardcode (his real
+// birthday isn't the 1st of the month, so standard SSA "turns 65" timing puts
+// it in October) -- these tests lock the corrected dates, not the old ones.
+test.describe('Group U — v4.4.0 Birth-Date Anchor / Per-Spouse SS / Medicare-FRA Derivation', () => {
+
+  test('U1 — annual and monthly engines agree on Bob\'s SS dollar total in the (partial) start year', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const liveRows = window.__liveRows;
+      const wfData = window.__wfData;
+      const { monthsInYear, BASE } = window.__engine;
+      const row0 = liveRows[0];
+      const wfYr0 = wfData.filter(r => r.calYear === row0.cal);
+      const annualTotal = row0.yourSs * monthsInYear(0, BASE.startMonth);
+      const monthlyTotal = wfYr0.reduce((s, r) => s + r.yourSs, 0);
+      return { annualTotal, monthlyTotal, months: wfYr0.length, cal: row0.cal };
+    });
+    console.log('  U1 — ' + JSON.stringify(result));
+    // Bob's default claim (Oct 2026) lands mid-partial-year -- 3 of the 6
+    // Jul-Dec months are active. Small tolerance for the round-trip through
+    // row0's rounded displayed $/mo rate (not a real disagreement).
+    expect(Math.abs(result.annualTotal - result.monthlyTotal)).toBeLessThanOrEqual(result.months);
+  });
+
+  test('U1b — annual and monthly engines agree on Brenda\'s SS in her (full) claim year', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const liveRows = window.__liveRows;
+      const wfData = window.__wfData;
+      const { BASE } = window.__engine;
+      const claimRow = liveRows.find(r => r.cal === BASE.brendaFraYear);       // 2034, her default claim year
+      const priorRow  = liveRows.find(r => r.cal === BASE.brendaFraYear - 1);  // 2033, not yet claiming
+      const wfClaimYr = wfData.filter(r => r.calYear === BASE.brendaFraYear);
+      return {
+        claimRowBrendaSs: claimRow.brendaSs, priorRowBrendaSs: priorRow.brendaSs,
+        wfAllActive: wfClaimYr.every(r => r.brendaSs === BASE.brendaSsFRA),
+        brendaSsFRA: BASE.brendaSsFRA,
+      };
+    });
+    console.log('  U1b — ' + JSON.stringify(result));
+    expect(result.priorRowBrendaSs).toBe(0);                     // not yet claiming in 2033
+    expect(result.claimRowBrendaSs).toBe(result.brendaSsFRA);    // full flat rate, whole year 2034 (Jan start)
+    expect(result.wfAllActive).toBe(true);                       // every month of 2034 active in the monthly engine too
+  });
+
+  test('U2 — SS switches on in the exact chosen calendar month, prorating that row\'s average $/mo rate', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      // Isolate Bob's math: push Brenda's claim far past the 21-yr horizon so she never appears.
+      const p = makeParams({ ssStartYear: 2027, ssStartMonth: 4, ssAmount: 1000, ssBrendaStartYear: 2060, ssBrendaStartMonth: 1 });
+      const rows = buildScenario(p);
+      const row2027 = rows.find(r => r.cal === 2027);
+      const row2026 = rows.find(r => r.cal === 2026);
+      return { yourSs2027: row2027.yourSs, yourSs2026: row2026.yourSs };
+    });
+    console.log('  U2 — ' + JSON.stringify(result));
+    expect(result.yourSs2026).toBe(0);          // before the claim date -- zero, not partial
+    expect(result.yourSs2027).toBe(750);        // Apr-Dec active = 9/12 of the year -> 9/12*$1000 = $750/mo average
+  });
+
+  test('U3 — ssClaimAge matches direct birth-date math', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { ssClaimAge, BASE } = window.__engine;
+      return {
+        bobAt65: ssClaimAge(2026, 10, BASE.yourBirthYear, BASE.yourBirthMonth),
+        brendaAt65: ssClaimAge(2032, 1, BASE.brendaBirthYear, BASE.brendaBirthMonth),
+        brendaAt67: ssClaimAge(2034, 1, BASE.brendaBirthYear, BASE.brendaBirthMonth),
+        halfYearLater: ssClaimAge(2027, 4, BASE.yourBirthYear, BASE.yourBirthMonth),
+      };
+    });
+    console.log('  U3 — ' + JSON.stringify(result));
+    expect(result.bobAt65).toBeCloseTo(65, 10);
+    expect(result.brendaAt65).toBeCloseTo(65, 10);
+    expect(result.brendaAt67).toBeCloseTo(67, 10);
+    expect(result.halfYearLater).toBeCloseTo(65.5, 10);  // Oct 2026 -> Apr 2027 = 6 months = 0.5yr later
+  });
+
+  test('U3b — Simulator sidebar shows the derived claiming-age readout for both spouses', async ({ page }) => {
+    await loadApp(page);
+    const bodyText = await page.locator('body').textContent();
+    // Default: Bob claims Oct 2026 at exactly age 65.0; Brenda claims Jan 2034 (her FRA) at exactly age 67.0
+    expect(bodyText).toMatch(/age 65\.0/);
+    expect(bodyText).toMatch(/age 67\.0/);
+  });
+
+  test('U4a — Medicare/FRA anchors derive to the corrected birth-date dates (Bob\'s Oct-2026 correction, not the old Nov-2026)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { BASE } = window.__engine;
+      return {
+        medicareYouYear: BASE.medicareYouYear, medicareYouMonth: BASE.medicareYouMonth,
+        brendaMedYear: BASE.brendaMedYear, brendaMedMonth: BASE.brendaMedMonth,
+        brendaFraYear: BASE.brendaFraYear, brendaFraMonth: BASE.brendaFraMonth,
+      };
+    });
+    console.log('  U4a — ' + JSON.stringify(result));
+    // Locks the CORRECTED derivation going forward -- the old hardcode was Nov (11), not Oct (10).
+    expect(result.medicareYouYear).toBe(2026);
+    expect(result.medicareYouMonth).toBe(10);
+    expect(result.brendaMedYear).toBe(2032);
+    expect(result.brendaMedMonth).toBe(1);
+    expect(result.brendaFraYear).toBe(2034);
+    expect(result.brendaFraMonth).toBe(1);
+  });
+
+  test('U4b — healthMonthly() switches Bob from Ericsson to Medicare cost exactly at his derived month (Oct 2026, not Nov)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { healthMonthly, makeParams } = window.__engine;
+      const p = makeParams({});
+      return {
+        sep: healthMonthly(2026, 9, p),   // before -- still Ericsson
+        oct: healthMonthly(2026, 10, p),  // his derived Medicare month
+      };
+    });
+    console.log('  U4b — ' + JSON.stringify(result));
+    // 839 (Ericsson) -> 335 (Medicare) = $504 delta, landing between Sep and Oct
+    // (if the old Nov-2026 hardcode were still live, Sep AND Oct would be equal).
+    expect(result.sep - result.oct).toBe(504);
+  });
+
+  test('U4c — monthly engine (wfData) shows the same health-cost transition at Oct 2026, and fires the event marker there (not Nov)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const wfData = window.__wfData;
+      // mo=0 is Jul 2026 (BASE.startMonth) -- mo=2 is Sep, mo=3 is Oct.
+      return {
+        sepHealth: wfData[2].fc_health, octHealth: wfData[3].fc_health,
+        octEvents: wfData[3].events, sepEvents: wfData[2].events,
+      };
+    });
+    console.log('  U4c — ' + JSON.stringify(result));
+    expect(result.sepHealth - result.octHealth).toBe(504);
+    expect(result.octEvents).toContain('You -> Medicare');
+    expect(result.sepEvents).not.toContain('You -> Medicare');
+  });
+
+  test('U4d — annual engine\'s partial start-year health total reflects the Oct (not Nov) transition', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const liveRows = window.__liveRows;
+      return { row0Health: liveRows[0].health };
+    });
+    console.log('  U4d — ' + JSON.stringify(result));
+    // Jul-Sep (3mo) Ericsson (839+839+414=2092/mo) + Oct-Dec (3mo) Medicare
+    // (335+839+414=1588/mo) averaged over 6 months = $1840/mo. The old
+    // Nov-2026 hardcode would instead give 4mo Ericsson + 2mo Medicare =
+    // $1924/mo -- this distinguishes the two exactly, not just approximately.
+    expect(result.row0Health).toBe(1840);
+  });
+
+  test('U6 — editing birth date re-derives Medicare/FRA anchors (cannot drift from the source)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { BASE, applyDefaultsOverrides } = window.__engine;
+      applyDefaultsOverrides({ BASE: { brendaBirthYear: 1970 } });
+      const after = { brendaMedYear: BASE.brendaMedYear, brendaFraYear: BASE.brendaFraYear };
+      applyDefaultsOverrides({ BASE: { brendaBirthYear: 1967 } });  // restore
+      return after;
+    });
+    console.log('  U6 — ' + JSON.stringify(result));
+    expect(result).toEqual({ brendaMedYear: 2035, brendaFraYear: 2037 });
+  });
+
+  test('U7 — a stale direct override of a now-derived field (e.g. brendaFraYear) cannot stick', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { BASE, applyDefaultsOverrides } = window.__engine;
+      applyDefaultsOverrides({ BASE: { brendaFraYear: 1999 } });
+      return BASE.brendaFraYear;
+    });
+    console.log('  U7 — brendaFraYear after stale override attempt: ' + result);
+    expect(result).toBe(2034);  // birth-date-derived value wins, not the stale override
   });
 
 });

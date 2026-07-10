@@ -1,0 +1,214 @@
+=== SESSION 29 JOURNAL — v4.4.0 (Birth-Date Anchor, Per-Spouse SS, Medicare/FRA Derivation) ===
+
+Date: 2026-07-10
+
+Session goal: user asked for three things building on the v4.3.0 start-date
+anchor work: (1) add real birth dates as the anchor for age-triggered events,
+(2) give Social Security month-precision AND make it independently settable
+per spouse (staggered claiming), (3) investigate and report scope BEFORE
+touching Medicare/FRA (currently pegged to a hardcoded Nov-2026 date and a
+year-only brendaFraYear), then derive both from birth date -- pausing to
+flag before implementing if that rippled unexpectedly.
+
+--- INVESTIGATION (before any code changed) ---
+
+Read session27/28 journals first per house convention. Traced Medicare/FRA
+pegging: healthMonthly() (engine.js) hardcoded Bob's Ericsson->Medicare
+transition as calYear===2026&&calMonth<11 (Nov 2026), and Brenda's as a
+year-only BASE.brendaMedYear(2032)/brendaFraYear(2034) check with no month.
+~13 call sites referenced these across both engines + event timelines +
+DEFAULTS_REGISTRY, none locked by an existing test (verified via grep) --
+low regression risk to change the underlying dates.
+
+Two real unknowns surfaced that couldn't be resolved from the code:
+1. Actual birth dates -- BASE.myAge:65/wifeAge:60 (labels only, unused in any
+   calc) and brendaMedYear/brendaFraYear (2032/2034, 65/67 exactly 2yr apart)
+   pointed at inconsistent implied birth years for Brenda (1966 vs 1967).
+   Asked the user directly rather than reverse-engineer a guess. Got: Bob
+   Oct 18 1961, Brenda Jan 19 1967.
+2. Bob's birthday (Oct 18) is NOT the 1st of the month, so the standard SSA
+   "Medicare starts the month you turn 65" rule derives Oct 2026 -- one month
+   EARLIER than the existing Nov-2026 hardcode. Flagged this explicitly
+   before implementing (per the user's own instruction to pause on anything
+   that moves an existing date) and asked whether Nov-2026 should be treated
+   as a calibrated real fact (birthMonth+1, e.g. employer coverage lapsing
+   Oct 31) or corrected. User confirmed: CORRECT to Oct 2026 -- the old
+   Nov-2026 value was stale, not calibrated, and regression tests should lock
+   the NEW corrected date, not the old one.
+3. Confirmed scope for Brenda's SS: her benefit $ amount stays FLAT
+   (BASE.brendaSsFRA) regardless of her chosen claim date -- no early/delayed
+   formula exists for her today (unlike Bob's Early->FRA interpolation), and
+   building one wasn't asked for; a deliberate scope decision, not an
+   oversight, documented in CLAUDE.md for future sessions.
+
+--- WHAT SHIPPED (v4.4.0) ---
+
+engine.js:
+- BASE gets four new birth-date fields: yourBirthYear:1961, yourBirthMonth:10
+  (Bob), brendaBirthYear:1967, brendaBirthMonth:1 (Brenda) -- Defaults-tab
+  editable, single source of truth for every age-triggered event.
+- New deriveAgeAnchors(base): computes medicareYouYear/Month (birthYear+65),
+  brendaMedYear/Month (birthYear+65), brendaFraYear/Month (birthYear+67) onto
+  BASE in place. Runs once at module load and again at the END of
+  applyDefaultsOverrides() (after overrides apply) -- so a stale saved
+  override of one of the DERIVED fields (e.g. a pre-v4.4.0 brendaFraYear in a
+  localStorage blob) gets overwritten right back to the birth-date-derived
+  value. Verified via a dedicated test (U7) that a direct override attempt on
+  brendaFraYear cannot stick.
+- New ssClaimAge(startYear,startMonth,birthYear,birthMonth): one shared
+  continuous-age formula, used by both the SS $-amount calc and the Simulator
+  sidebar's derived age readout -- not duplicated three times.
+- healthMonthly(): Bob's and Brenda's Ericsson->Medicare gates now compare an
+  absolute calendar month (calYear*12+calMonth) against the derived
+  medicareYouYear/Month and brendaMedYear/Month -- month-precision for both
+  (Brenda's was year-only before). Bob's transition is now Oct 2026 (was
+  Nov 2026) -- confirmed by the user as an intentional correction.
+- buildScenario(): yourSs/brendaSs restructured from a flat per-row $/mo
+  constant (year-only on/off check) into a genuine PERIOD DOLLAR TOTAL,
+  summed month-by-month over the row's real months -- exactly mirroring the
+  existing healthAnnual loop's monthOffset convention (no parallel logic
+  invented). Every downstream read site adjusted to match: totalIncome/
+  passive no longer multiply by monthsThisYear (yourSs/brendaSs are already
+  period totals); estimateTax's call divides back down to a $/mo rate
+  (preserving its existing, separately-pre-existing *12 approximation
+  unchanged); row.push divides by monthsThisYear to recover the displayed
+  $/mo rate, following the same "*12-in, /monthsThisYear-out" pattern v4.3.0
+  established for other fields. The debt-availability mo-loop's SS component
+  (_ss0, a row-level constant before) is now computed LIVE inside the loop
+  using its own real calMonth1to12, so the HI-debt-paydown-pacing gauge sees
+  the exact month a spouse's SS switches on instead of a year-level guess.
+- Params gained ssStartMonth (Bob, new) and ssBrendaStartYear/ssBrendaStartMonth
+  (Brenda, new) alongside the existing ssStartYear/ssAmount.
+
+App.jsx:
+- window.__engine gained ssClaimAge, deriveAgeAnchors, and healthMonthly
+  (the last one was ALREADY imported/used internally but had never been
+  exposed for Playwright -- a pre-existing gap this session's tests needed
+  closed, not something v4.4.0 introduced).
+- wfData's yourSsMo/brendaSsMo: both spouses now gate on an absolute calendar
+  month (calYear*12+(d.getMonth()+1)) instead of a year-only check --
+  already-monthly engine, so this is exact by construction, no proration
+  math needed (unlike buildScenario above).
+- wfData's "You -> Medicare" and "Brenda -> Medicare" event markers: replaced
+  the hardcoded calYear===2026&&d.getMonth()===10 and the year-only
+  brendaMedYear&&d.getMonth()===0 checks with BASE.medicareYouYear/Month and
+  BASE.brendaMedYear/Month absolute-month comparisons.
+- Annual-engine events timeline: the hardcoded `yr===2026` Medicare check
+  became `yr===BASE.medicareYouYear`; "Your SS starts (age X)" and "Brenda SS
+  spousal starts (FRA year)" labels (both already slightly wrong before this
+  session -- they assumed claiming always happened at age 65 / at FRA) now
+  read the real derived claiming age via yourSsAge/brendaSsAge.
+- Simulator sidebar: replaced the "Your SS Start Age" 65-70 stepped toggle
+  (Bob only, no control existed for Brenda at all) with two blocks -- "Your
+  SS Start" and "Brenda SS Start" -- each a year slider (BASE.startYear..+20)
+  + month slider (1-12) + a derived claiming-age readout ("2026 * Oct -> age
+  65.0") + a non-blocking amber warning below age 62. Bob's SS $-amount
+  formula generalized from stepped ssAge to continuous ssClaimAge (same
+  Early->FRA interpolation rule, unchanged -- including the pre-existing
+  quirk that ages past 67 don't actually get the delayed-credit bonus the old
+  UI text implied; not fixed here, flagged in a comment).
+- SS earnings-test card, its chart ref-lines, and the launch-header age
+  display (BASE.myAge/wifeAge, which had drifted stale -- Bob is actually 64
+  and Brenda 59 at the real Jul-2026 default start, not 65/60) all now read
+  the derived age instead of the old static/stepped values.
+- Defaults tab: new "Birth Dates" group (yourBirthYear/Month,
+  brendaBirthYear/Month); removed "Brenda FRA year" and "Brenda -> Medicare
+  (year)" from their old groups since both are now derived, not independently
+  editable (editing them directly would silently revert on the next
+  applyDefaultsOverrides call, which would have been confusing UX).
+- SAVE_SCHEMA_VERSION bumped 4->5 (ssAge removed from the sc shape, no
+  migration, per project convention) -- old pins are discarded, not migrated.
+
+defaults.js: DEFAULTS and SC_DEFAULTS both updated -- ssAge replaced by
+ssStartYear/ssStartMonth/ssBrendaStartYear/ssBrendaStartMonth, defaults
+chosen to reproduce the OLD default scenario's behavior exactly (Bob claims
+at his birth month in the year he turns 65; Brenda claims at her derived FRA
+-- both defaults are now BASE.*BirthYear+65/67 expressions, not literals).
+
+retirement-simulator.spec.js:
+- E5/L1 version strings bumped to v4.4.0.
+- E1 (SS age 65->67 sanity check) updated -- the old test clicked a "67"
+  toggle button that no longer exists; now drags the new "Your SS Start Year"
+  slider to 2028 (2yr later than the default 2026/Oct = age 65, same month =
+  age 67).
+- New Group U (11 tests): U1/U1b lock dual-engine SS-dollar agreement (Bob's
+  partial-start-year proration, Brenda's full-year default-FRA claim); U2
+  locks exact-month proration for an isolated custom claim date; U3/U3b lock
+  ssClaimAge's math and the sidebar's rendered readout text; U4a-d lock the
+  CORRECTED Medicare dates (2026/10, 2032/1, 2034/1 -- explicitly NOT the old
+  2026/11) across BASE, the shared healthMonthly(), the monthly engine's
+  actual per-month cost + event marker, and the annual engine's partial-year
+  health total (1840 vs what the old Nov-hardcode would have given, 1924 --
+  the two numbers are far enough apart to be a real regression guard, not a
+  rounding coincidence); U6/U7 lock the "can't drift from birth date" design
+  (editing birth date re-derives the anchors; a stale direct override of a
+  derived field is silently overwritten back).
+
+CLAUDE.md:
+- New "Birth-date anchor (v4.4.0)" section under Architecture, in the same
+  style as the v4.3.0 start-date section -- states the single-source-of-truth
+  rule, the deriveAgeAnchors()/applyDefaultsOverrides ordering that makes
+  overrides of derived fields harmless, the shared ssClaimAge definition, and
+  the period-dollar-total pattern for any future age-triggered $ field in
+  buildScenario.
+- Corrected the stale "Known exception" line that called the Medicare
+  transition a "fixed Nov-2026... true calendar fact independent of start
+  date" -- it never really was independent of anything, it was standing in
+  for a birth date we didn't have tracked yet. Only SS_CAP's tax-year label
+  is still a genuine external-fact exception now.
+- window.__engine description updated to mention ssClaimAge/deriveAgeAnchors/
+  healthMonthly.
+
+--- VERIFICATION ---
+
+npm run lint: 30 problems before this session's fix to one incidental dead
+variable (yourSsMonthly, made unused by the ssAge->ssClaimAge rename, cheap
+to remove since already touching that line) vs 31 baseline before this
+session started -- net ZERO new lint issues introduced, confirmed by
+stashing the diff and re-running lint against the pre-session baseline for
+an exact before/after count.
+npm run build: clean, no errors.
+Full Playwright suite (run directly via npx playwright test, dev server
+already up on 5173): 103/103 passed after two rounds of fixes --
+  - healthMonthly wasn't exposed on window.__engine at all before this
+    session (a pre-existing gap, not something v4.4.0 broke) -- U4b's first
+    run failed with "healthMonthly is not a function"; fixed by adding the
+    export to the window.__engine object.
+  - E1 failed on the first full run (timeout clicking a button that no
+    longer exists, from the old ssAge toggle UI) -- fixed the TEST to drive
+    the new year slider instead, not the app.
+A stray `test-results/test-run.txt` deletion showed up in git status after
+the test runs (unrelated -- some test-run artifact-cleanup step touched a
+tracked file that shouldn't have been) -- restored via `git checkout --`
+before presenting the diff for review; not part of this session's actual
+change.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Brenda's SS amount is flat by deliberate scope decision (this session) --
+   if a future session wants an actual early/delayed $ formula for her
+   (matching Bob's yourSsEarly/yourSsFRA/8%-delayed-credit shape), it needs a
+   real "Brenda early-claim $" figure that doesn't exist in BASE today; ask
+   the user for it rather than inventing one.
+2. Bob's SS $-amount formula still carries the PRE-EXISTING quirk (not
+   introduced or fixed this session) that claiming past age 67 doesn't
+   actually apply the 8%/yr delayed-credit bonus the UI helper text used to
+   imply -- only the FRA flat rate applies for any age >=67. Flagged in a
+   code comment (App.jsx, near yourSsAmountFromAge) for whoever picks this up
+   next.
+3. The "[P1] Unify annual sweep model with wfData" backlog item (carried
+   since session20-25, most recently re-confirmed unaffected in session27's
+   T5) is untouched by this session -- the SS/health restructuring changed
+   WHEN income switches on, not the debt-sweep pacing logic itself.
+4. Following the birth-date-anchor pattern established this session: any
+   FUTURE age-triggered event (a hypothetical new insurance transition, a
+   new benefit start date, etc.) should derive from BASE.yourBirthYear/Month
+   or BASE.brendaBirthYear/Month via the same deriveAgeAnchors()-style
+   pattern, not a fresh hardcoded year/month -- that's the whole point of
+   making birth date the single source of truth now.
+5. This session's diff has NOT been committed yet as of this journal entry --
+   per house workflow, the plan is: user reviews the diff, then on go-ahead
+   commit with the message "v4.4.0 -- birth-date anchor, per-spouse SS
+   year+month with derived age, Medicare/FRA derived from birth date". If a
+   future session picks this up mid-stream, check git status/log to see
+   whether that already happened.

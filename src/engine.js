@@ -32,22 +32,67 @@ export const BASE = {
   // monthsElapsedBeforeYear below -- both engines share them so the
   // partial-first-year length and growth-exponent basis can't drift apart.
   startMonth:7,
+  // v4.4.0: birth-date anchor -- real biographical facts, editable on the
+  // Defaults tab. These are the SINGLE SOURCE OF TRUTH for every age-triggered
+  // event (Medicare, FRA, SS claiming) -- see deriveAgeAnchors() below, which
+  // computes medicareYouYear/Month, brendaMedYear/Month, brendaFraYear/Month
+  // from these four fields. Do not hand-edit the derived fields; they are
+  // recomputed from birth date every time overrides are applied.
+  yourBirthYear:1961, yourBirthMonth:10,     // Bob: Oct 18 1961
+  brendaBirthYear:1967, brendaBirthMonth:1,  // Brenda: Jan 19 1967
   sellingCosts:0.05,   // liq-NW quick-calc constant (not the per-disposition sellingCostsPct)
   healthYouEricsson:839, healthYouMedicare:335, healthMedicareInflation:0.04,
   healthBrendaEricsson:839, healthBrendaMedicare:335, ericssonInflation:0.015,
   healthKids:414,
-  sophiaOff:2028, nolanOff:2031, brendaMedYear:2032,
+  sophiaOff:2028, nolanOff:2031,
+  // v4.4.0: brendaMedYear/Month, brendaFraYear/Month (below) are now DERIVED
+  // by deriveAgeAnchors() from brendaBirthYear/Month -- placeholder values
+  // here get overwritten immediately at module load (see call at the bottom
+  // of the deriveAgeAnchors block) and again on every Defaults-tab override.
+  brendaMedYear:2032, brendaMedMonth:1,
   lafTaxMo:267, lafInsMo:154, dplxTaxMo:700, dplxInsMo:183, primTaxMo:873, primInsMo:200,
   carLease:250, otherIns:500, food:900, utilities:400, personal:600,
   pensionMonthly:3_300,
   yourSsEarly:3_271, yourSsFRA:3_874,
   brendaSsFRA:1_937,
-  brendaFraYear:2034,
+  brendaFraYear:2034, brendaFraMonth:1,
+  // v4.4.0: derived from yourBirthYear/Month -- was a hardcoded Nov-2026
+  // (calYear===2026&&calMonth<11) check inside healthMonthly(). Corrected to
+  // Oct 2026 (his actual 65th-birthday month) -- see session29 journal for
+  // the investigation; the old Nov-2026 value was a stale approximation, not
+  // a calibrated real fact, so this is an intentional correction, not just a
+  // refactor.
+  medicareYouYear:2026, medicareYouMonth:10,
   marriedExcl:   500_000,   // liq-NW quick-calc §121 approximation (generic, not property-specific)
   fedCapGains:   0.238,     // liq-NW quick-calc cap-gains rate
   coCapGains:    0.044,
   irmaaSurge:    350,
 };
+
+// =============================================================================
+// AGE-ANCHOR DERIVATION (v4.4.0) -- birthYear/birthMonth are the single source
+// of truth for every age-triggered constant (Medicare at 65, FRA at 67).
+// Recomputes medicareYouYear/Month, brendaMedYear/Month, brendaFraYear/Month
+// on `base` in place. Called once at module load (below) and again inside
+// applyDefaultsOverrides() AFTER overrides are applied, so a stale saved
+// override of one of the derived fields themselves (e.g. from a pre-v4.4.0
+// localStorage blob) is immediately overwritten -- the derived fields cannot
+// drift from birth date, by construction.
+// =============================================================================
+export function deriveAgeAnchors(base){
+  base.medicareYouYear = base.yourBirthYear+65;   base.medicareYouMonth = base.yourBirthMonth;
+  base.brendaMedYear   = base.brendaBirthYear+65; base.brendaMedMonth   = base.brendaBirthMonth;
+  base.brendaFraYear   = base.brendaBirthYear+67; base.brendaFraMonth   = base.brendaBirthMonth;
+}
+deriveAgeAnchors(BASE);
+
+// Continuous SS claiming age (fractional years) at an absolute calendar
+// month, given a birth date -- shared by both engines' SS $-amount formula
+// and the Simulator sidebar's derived claiming-age readout, so there is one
+// definition of "age" for SS purposes, not three.
+export function ssClaimAge(startYear, startMonth, birthYear, birthMonth){
+  return (startYear*12+startMonth - (birthYear*12+birthMonth)) / 12;
+}
 
 // =============================================================================
 // MODEL START-DATE ANCHOR (v4.3.0) -- yr=0 in buildScenario's annual loop
@@ -117,6 +162,12 @@ export function applyDefaultsOverrides(ov = {}){
     if(k in BASE && typeof v==='number' && isFinite(v)) BASE[k]=v;
   for(const [k,v] of Object.entries(ov.DISPO_DEFAULTS||{}))
     if(k in DISPO_DEFAULTS && typeof v==='number' && isFinite(v)) DISPO_DEFAULTS[k]=v;
+  // v4.4.0: re-derive Medicare/FRA anchors from birth date AFTER overrides
+  // apply -- if ov.BASE contains a stale direct override of one of the
+  // derived fields (e.g. a pre-v4.4.0 saved brendaFraYear), this overwrites
+  // it right back with the birth-date-derived value, so birth date always
+  // wins.
+  deriveAgeAnchors(BASE);
 }
 
 // =============================================================================
@@ -130,13 +181,18 @@ export function remainBal(p,r,origYrs,yrsPaid){
 }
 export function healthMonthly(calYear, calMonth, p){
   const hcpi = p?.healthCpi || BASE.healthMedicareInflation;
-  const youMedInf=Math.pow(1+hcpi,Math.max(0,calYear-2026));
-  // You -> Medicare is Nov 2026 (real transition date, confirmed) -- Ericsson
-  // through Oct 2026, Medicare from Nov 2026 on. calYear<2026 is unreachable
-  // in practice (sim starts 2026) but kept for a well-defined pre-2026 case.
-  const you=(calYear<2026||(calYear===2026&&calMonth<11))?BASE.healthYouEricsson:Math.round(BASE.healthYouMedicare*youMedInf);
+  const youMedInf=Math.pow(1+hcpi,Math.max(0,calYear-BASE.medicareYouYear));
+  // v4.4.0: You -> Medicare is now birth-date-derived (BASE.medicareYouYear/
+  // Month = yourBirthYear+65/yourBirthMonth, see deriveAgeAnchors above) --
+  // was a hardcoded Nov-2026 check. Compared as an absolute calendar month
+  // (year*12+month) so the transition lands on the exact derived month, not
+  // just the derived year.
+  const absMo = calYear*12+calMonth;
+  const you=(absMo < BASE.medicareYouYear*12+BASE.medicareYouMonth)?BASE.healthYouEricsson:Math.round(BASE.healthYouMedicare*youMedInf);
   let brenda;
-  if(calYear>=BASE.brendaMedYear){
+  // v4.4.0: month-precision (was year-only) -- BASE.brendaMedYear/Month is
+  // likewise birth-date-derived now.
+  if(absMo >= BASE.brendaMedYear*12+BASE.brendaMedMonth){
     brenda=Math.round(BASE.healthBrendaMedicare*Math.pow(1+hcpi,calYear-BASE.brendaMedYear));
   } else {
     brenda=Math.round(BASE.healthBrendaEricsson*Math.pow(1+BASE.ericssonInflation,calYear-BASE.startYear));
@@ -837,8 +893,22 @@ export function buildScenario(p) {
     const pinf=propinf;
     const app =Math.pow(1+p.reAppreciation,elapsedYrs);
 
-    const yourSs  =(p.ssStartYear&&cal>=p.ssStartYear)?p.ssAmount:0;
-    const brendaSs=cal>=BASE.brendaFraYear?BASE.brendaSsFRA:0;
+    // v4.4.0: SS is calendar-pegged like Medicare -- each spouse switches on
+    // at its own absolute calendar month (year*12+month), not a year-only
+    // boundary. yourSs/brendaSs are now this ROW'S PERIOD DOLLAR TOTAL (like
+    // healthAnnual below), summed month-by-month over the real months in
+    // this period (monthOffset+1..12, same convention as the healthAnnual
+    // loop further down) -- NOT a flat $/mo rate -- so a spouse's claim
+    // starting mid-period is prorated correctly instead of all-or-nothing
+    // for the whole row. Every downstream use of yourSs/brendaSs below
+    // (totalIncome, estimateTax, passive, row.push) has been adjusted to
+    // match this "period total" convention (see each site's own comment).
+    let yourSs=0, brendaSs=0;
+    for(let hm=monthOffset+1; hm<=12; hm++){
+      const absCalMo = cal*12+hm;
+      if(p.ssStartYear && absCalMo >= p.ssStartYear*12+(p.ssStartMonth||1)) yourSs += p.ssAmount;
+      if(p.ssBrendaStartYear && absCalMo >= p.ssBrendaStartYear*12+(p.ssBrendaStartMonth||1)) brendaSs += BASE.brendaSsFRA;
+    }
     // v4.3.0: *monthsThisYear (was *12) -- these are $/mo rates annualized to
     // "this row's period total"; yr=0 only covers the months actually
     // simulated, matching the row.push conversions back to $/mo below.
@@ -911,8 +981,10 @@ export function buildScenario(p) {
       }
     }
     drawInc += (drawByYear[cal] || 0);
-    // v4.3.0: *monthsThisYear (was *12), same reasoning as pension/workInc above.
-    const totalIncome=pension+workInc+(yourSs+brendaSs)*monthsThisYear+rental+drawInc;
+    // v4.4.0: no *monthsThisYear here -- yourSs/brendaSs are now already this
+    // row's period DOLLAR TOTAL (summed month-by-month above), unlike
+    // pension/workInc which are still flat $/mo rates needing the multiply.
+    const totalIncome=pension+workInc+(yourSs+brendaSs)+rental+drawInc;
 
     // -- NW pieces (per-property, gated) --
     // v4.2.5: this is the one place appreciationPct should compound prop.value --
@@ -935,7 +1007,13 @@ export function buildScenario(p) {
     for(const prop of properties) balById[prop.id] = keepMap[prop.id] ? mtgById[prop.id].bal : 0;
     const primBal = balById.sixth, dplxBal = balById.fifteenth, lafBal = balById.barberry;
     const _mtgInt = properties.reduce((s,prop)=>s+balById[prop.id]*mtgById[prop.id].p.rate, 0);
-    const taxAnnual=estimateTax(p,pension,workInc,yourSs,brendaSs,rental,_mtgInt);
+    // v4.4.0: /monthsThisYear -- estimateTax expects a $/mo SS rate (it does
+    // its own internal *12), so yourSs/brendaSs's new period-dollar-total
+    // convention needs averaging back down to a rate first. This preserves
+    // estimateTax's existing (already slightly approximate for a partial
+    // first year) *12 treatment unchanged -- not attempting to fix that
+    // separate, pre-existing approximation as part of this change.
+    const taxAnnual=estimateTax(p,pension,workInc,yourSs/monthsThisYear,brendaSs/monthsThisYear,rental,_mtgInt);
 
     // -- Monthly mirror (same gating): reuse the annual rental figure directly --
     const _inf0 = Math.pow(1+p.inflation, elapsedYrs);
@@ -944,9 +1022,12 @@ export function buildScenario(p) {
     // PERIOD's total (partial for yr=0), so recovering its average $/mo rate
     // divides by the months actually in the period, not a flat 12.
     const _rental0 = rental/monthsThisYear;
-    const _ss0    = ((p.ssStartYear&&(BASE.startYear+yr)>=p.ssStartYear)?p.ssAmount:0)+((BASE.startYear+yr)>=BASE.brendaFraYear?BASE.brendaSsFRA:0);
     const _work0  = workFromCurve(elapsedYrs, p.workPts)*_inf0;
-    const _incMo  = BASE.pensionMonthly + _ss0 + _rental0 + _work0;
+    // v4.4.0: SS moved OUT of this row-level constant -- it's now computed
+    // live inside the mo-loop below (as `_ssMo`, using the loop's own real
+    // calMonth1to12) so the debt-availability gauge sees the exact calendar
+    // month a spouse's SS switches on, not a year-level approximation.
+    const _incMoBase = BASE.pensionMonthly + _rental0 + _work0;
     const _propC0 = (keepDuplex?(BASE.dplxTaxMo+BASE.dplxInsMo):0)
                   + (keepPrimary?(BASE.primTaxMo+BASE.primInsMo):0)
                   + (keepLafOwned?(BASE.lafTaxMo+BASE.lafInsMo):0);
@@ -954,8 +1035,9 @@ export function buildScenario(p) {
     const _maint0 = properties.reduce((s,prop)=>s+(keepMap[prop.id]?prop.value*p.maintRate*_pinf0perMo:0), 0);
     const _core0  = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*_inf0;
     // v4.1.3: health is no longer flattened to a single per-year figure here --
-    // it varies within the year (You -> Medicare, Nov 2026), computed per exact
-    // month inside the loop below via healthMonthly(cal, calMonth1to12, p).
+    // it varies within the year (You -> Medicare, birth-date-derived -- Oct
+    // 2026, v4.4.0), computed per exact month inside the loop below via
+    // healthMonthly(cal, calMonth1to12, p).
     // v4.0.0-A: mortgage payments are state-driven per month (IO -> recast)
     // inside the loop below, for ALL properties (Lafayette/Barberry included).
     // v4.3.0: taxAnnual/monthsThisYear (was /12) -- taxAnnual is this period's
@@ -1005,6 +1087,13 @@ export function buildScenario(p) {
       }
       loanPmtYrTotal += _loanMo;
       const _hlthMo = healthMonthly(cal, calMonth1to12, p);
+      // v4.4.0: live per-month SS (was the row-level `_ss0` constant) --
+      // reuses this loop's own calMonth1to12/cal, same absolute-calendar-
+      // month comparison as the row-total loop above, so the debt-
+      // availability gauge sees the exact month a spouse's SS switches on.
+      const _absCalMoNow = cal*12+calMonth1to12;
+      const _ssMo = (p.ssStartYear && _absCalMoNow>=p.ssStartYear*12+(p.ssStartMonth||1) ? p.ssAmount : 0)
+                  + (p.ssBrendaStartYear && _absCalMoNow>=p.ssBrendaStartYear*12+(p.ssBrendaStartMonth||1) ? BASE.brendaSsFRA : 0);
       let _minsMo = 0, loopDebt = 0, xtra = 0;
       if(!p.payOffHI){
         // v4.3.0 FOLLOW-UP (deferred, not fixed here -- see journal): `absMo`
@@ -1026,7 +1115,7 @@ export function buildScenario(p) {
         if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
         loopDebt=ccBal+sophiaBal+nolanBal;
       }
-      const _avail = (_incMo - _fixedMoNoHealth - _hlthMo - _mtgMo) - _minsMo - _loanMo;
+      const _avail = (_incMoBase + _ssMo - _fixedMoNoHealth - _hlthMo - _mtgMo) - _minsMo - _loanMo;
       const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
       if(!p.payOffHI){
         xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
@@ -1069,7 +1158,8 @@ export function buildScenario(p) {
     const mtgPmt   = mtgPmtYrTotal;
 
     // v4.1.3: sum real per-month figures (was a hardcoded yr===0 5mo/7mo split
-    // that assumed a June 2026 Medicare transition -- the real date is Nov 2026).
+    // that assumed a June 2026 Medicare transition -- the real date is
+    // birth-date-derived, v4.4.0 -- Oct 2026).
     // v4.3.0: only the months actually in this row's period -- yr=0 sums
     // startMonth..12 (a genuine partial-year total), not a fabricated Jan-Dec.
     let healthAnnual=0;
@@ -1134,7 +1224,8 @@ export function buildScenario(p) {
     // sibling field avoids, for the same reason fcfChart was added instead of
     // reusing `surplus`.
     const sweepChart = Math.max(0, baseDIExDraw - fcfChart);
-    const passive =pension+(yourSs+brendaSs)*monthsThisYear+rental;
+    // v4.4.0: no *monthsThisYear -- yourSs/brendaSs are already period totals (see note above totalIncome).
+    const passive =pension+(yourSs+brendaSs)+rental;
     const reqWork =Math.max(0,totalOut-passive);
     const nw      =Math.round((dplxVal+lafVal+primVal+cashAst-dplxBal-lafBal-primBal-hiDebt)/1000);
 
@@ -1161,8 +1252,11 @@ export function buildScenario(p) {
       rental:   Math.round(rental/monthsThisYear),
       passive:  Math.round(passive/monthsThisYear),
       pension:  Math.round(pension/monthsThisYear),
-      yourSs:   Math.round(yourSs),
-      brendaSs: Math.round(brendaSs),
+      // v4.4.0: /monthsThisYear -- yourSs/brendaSs are period dollar totals now (see note
+      // above totalIncome); recover the displayed $/mo rate the same way every other
+      // row field does (mtg, core, etc.), so a partial-start-year row shows a correct average.
+      yourSs:   Math.round(yourSs/monthsThisYear),
+      brendaSs: Math.round(brendaSs/monthsThisYear),
       workInc:  Math.round(workInc/monthsThisYear),
       tax:      Math.round(taxAnnual/monthsThisYear),
       health:   Math.round(healthAnnual/monthsThisYear),

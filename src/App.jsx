@@ -1,3 +1,25 @@
+// v4.4.0 -- birth-date anchor, per-spouse SS year+month with derived age, Medicare/FRA
+// derived from birth date. BASE.yourBirthYear/Month (Bob, Oct 18 1961) and
+// BASE.brendaBirthYear/Month (Brenda, Jan 19 1967) are now the single source of truth
+// for every age-triggered event -- engine.js's deriveAgeAnchors() computes
+// medicareYouYear/Month, brendaMedYear/Month, brendaFraYear/Month from them (never
+// hand-edit the derived fields; a stale direct override of one is overwritten back to
+// the birth-date-derived value the next time applyDefaultsOverrides runs). Bob's
+// Medicare transition is corrected from the old hardcoded Nov-2026 to birth-date-derived
+// Oct 2026 (his real birthday isn't the 1st of the month, so standard SSA "turns 65"
+// timing puts it in October) -- an intentional correction, not a regression; the
+// Playwright suite (Group U) now locks the corrected dates. SS is calendar-pegged like
+// Medicare in BOTH engines: each spouse has independent ssStartYear/ssStartMonth (was a
+// single stepped 65-70 ssAge toggle for Bob only, with no claiming control for Brenda at
+// all) -- staggered claiming is now modelable, and buildScenario's yourSs/brendaSs became
+// period-DOLLAR-TOTALS (summed month-by-month, prorating a mid-period claim) instead of
+// flat $/mo constants, following the same "*12-in, /monthsThisYear-out" convention
+// v4.3.0 established for other row fields. The Simulator sidebar's SS controls now show a
+// derived claiming-age read-out per spouse (ssClaimAge, engine.js) with a non-blocking
+// warning below age 62; Brenda's SS dollar amount stays flat regardless of claim date
+// (no early/delayed formula exists for her, unlike Bob's Early->FRA interpolation, which
+// is unchanged). SAVE_SCHEMA_VERSION bumped (ssAge removed from the sc shape) -- old pins
+// are discarded, not migrated, per project convention.
 // v4.3.1 -- 6th St selling-cost double-count fix: adjustedBasis ($899,550) already
 // capitalizes the agent's $88,550 closing costs, but disposeAsset was ALSO subtracting
 // DISPO_DEFAULTS.sellingCostsPct (6%) from the sale price before computing gain,
@@ -36,7 +58,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear } from "./engine.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors } from "./engine.js";
 // v4.3.0: BASE.startYear/startMonth (imported above) are the single source
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
@@ -56,7 +78,21 @@ if (typeof window !== 'undefined') {
     applyDefaultsOverrides, getDefaultsCode,
     freshPropertiesDefaults, freshObligationDefaults,
     monthsInYear, monthsElapsedBeforeYear,
+    ssClaimAge, deriveAgeAnchors, healthMonthly,
   };
+}
+// v4.4.0: month-name labels for the SS/Medicare month-precision UI (year+month
+// pickers, event-timeline notes). Single shared constant -- was previously an
+// inline array literal at the "Launch {month} {year}" header display.
+const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// v4.4.0: Bob's SS $ formula, generalized from the old stepped ssAge (65/66/67)
+// toggle to a continuous derived age (see ssClaimAge, engine.js). Same two-piece
+// rule as before: flat FRA at/after 67, linear Early->FRA interpolation below --
+// preserves the pre-existing quirk that ages beyond 67 do NOT get a delayed-claim
+// bonus in the real $ calc (only the UI's old helper text ever showed that 8%/yr
+// figure) -- not fixing that here, just not changing it.
+function yourSsAmountFromAge(age){
+  return age>=67 ? BASE.yourSsFRA : BASE.yourSsEarly + (age-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2);
 }
 import { REL_COLORS, RNODES, REDGES, NODE_W, NODE_H, COL_X, ROW_H, ROW_OFF, SVG_W, SVG_H, rNodePos } from "./relationships-data.js";
 
@@ -75,6 +111,17 @@ const DEFAULTS_REGISTRY = [
     ["BASE.startYear","Start year"],
     ["BASE.startMonth","Start month (1-12)"],
   ]},
+  {group:"Birth Dates", items:[
+    // v4.4.0: single source of truth for every age-triggered event (Medicare
+    // at 65, FRA at 67, SS claiming-age readout) -- see engine.js's
+    // deriveAgeAnchors(). Brenda FRA year/Brenda -> Medicare year (both
+    // formerly separate overridable BASE fields here) are now DERIVED from
+    // these and are no longer directly editable -- edit birth date instead.
+    ["BASE.yourBirthYear","Your birth year"],
+    ["BASE.yourBirthMonth","Your birth month (1-12)"],
+    ["BASE.brendaBirthYear","Brenda birth year"],
+    ["BASE.brendaBirthMonth","Brenda birth month (1-12)"],
+  ]},
   {group:"Liquidation-View Constants", items:[
     ["BASE.marriedExcl","§121 married exclusion $"],
     ["BASE.sellingCosts","Selling costs (liq view, fraction)"],
@@ -86,7 +133,6 @@ const DEFAULTS_REGISTRY = [
     ["BASE.yourSsEarly","Your SS early $/mo"],
     ["BASE.yourSsFRA","Your SS FRA $/mo"],
     ["BASE.brendaSsFRA","Brenda SS FRA $/mo"],
-    ["BASE.brendaFraYear","Brenda FRA year"],
   ]},
   {group:"Health Insurance", items:[
     ["BASE.healthYouEricsson","You: Ericsson $/mo"],
@@ -98,7 +144,6 @@ const DEFAULTS_REGISTRY = [
     ["BASE.healthKids","Kids premium $/mo"],
     ["BASE.sophiaOff","Sophia off plan (year)"],
     ["BASE.nolanOff","Nolan off plan (year)"],
-    ["BASE.brendaMedYear","Brenda → Medicare (year)"],
     ["BASE.irmaaSurge","IRMAA surge $/mo/person"],
   ]},
   {group:"Property Tax & Insurance ($/mo)", items:[
@@ -163,7 +208,9 @@ export default function App(){
   // Destructure active scenario for use in controls + engines
   const {
     payOffHI,
-    ssAge, workPts, lifestyleSplit,
+    // v4.4.0: ssAge (stepped 65-70 toggle) replaced by explicit per-spouse claim dates.
+    ssStartYear, ssStartMonth, ssBrendaStartYear, ssBrendaStartMonth,
+    workPts, lifestyleSplit,
     reApp, rentGr, cpi, healthCpi, propCpi, taxEnabled, investRet, lifestyleDraws,
     ccBal, ccRate, ccMin, sophiaBal, sophiaRate, sophiaMin, nolanBal, nolanRate, nolanMin,
     loans=DEFAULT_LOANS_SC,
@@ -204,7 +251,10 @@ export default function App(){
   const setPayOffHI       = v=>setSc(s=>({...s,payOffHI:v}));
   const setSameYearSaleTaxBumpOn = v=>setSc(s=>({...s,sameYearSaleTaxBumpOn:v}));
   const setSameYearSaleTaxBump   = v=>setSc(s=>({...s,sameYearSaleTaxBump:v}));
-  const setSsAge          = v=>setSc(s=>({...s,ssAge:v}));
+  const setSsStartYear        = v=>setSc(s=>({...s,ssStartYear:v}));
+  const setSsStartMonth       = v=>setSc(s=>({...s,ssStartMonth:v}));
+  const setSsBrendaStartYear  = v=>setSc(s=>({...s,ssBrendaStartYear:v}));
+  const setSsBrendaStartMonth = v=>setSc(s=>({...s,ssBrendaStartMonth:v}));
   const setWorkPts        = v=>setSc(s=>({...s,workPts:typeof v==="function"?v(s.workPts):v}));
   const setLifestyleSplit = v=>setSc(s=>({...s,lifestyleSplit:v}));
   const setReApp          = v=>setSc(s=>({...s,reApp:v}));
@@ -262,11 +312,17 @@ export default function App(){
     const maintRate_=totalVal>0?totalMaint/totalVal:0.005;
     return buildScenario(makeParams({
       ...sc,
-      // v4.3.0: BASE.startYear (was hardcoded 2026) -- ssAge is relative to
-      // BASE.myAge AT THE START date; a hardcoded 2026 would misdate SS start
-      // once BASE.startYear is edited away from 2026.
-      ssStartYear:BASE.startYear+(sc.ssAge-65),
-      ssAmount:sc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(sc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
+      // v4.4.0: ssAge (stepped toggle) replaced by explicit ssStartYear/Month
+      // per spouse -- ssAmount now derives from a continuous claiming age
+      // computed against Bob's real birth date (see ssClaimAge, engine.js),
+      // not an implicit "myAge at BASE.startYear" assumption. Brenda's start
+      // date/month pass straight through (her amount stays flat -- see
+      // BASE.brendaSsFRA, read directly by the engine, not a param here).
+      ssStartYear:  sc.ssStartYear,
+      ssStartMonth: sc.ssStartMonth,
+      ssAmount:     yourSsAmountFromAge(ssClaimAge(sc.ssStartYear, sc.ssStartMonth, BASE.yourBirthYear, BASE.yourBirthMonth)),
+      ssBrendaStartYear:  sc.ssBrendaStartYear,
+      ssBrendaStartMonth: sc.ssBrendaStartMonth,
       diCap:diCap_, maintRate:maintRate_,
       reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
       coreCpi:sc.cpi/100, healthCpi:sc.healthCpi/100, propCpi:sc.propCpi/100, propInflation:sc.cpi/100+0.007,
@@ -321,6 +377,12 @@ export default function App(){
   // diCap is still the hard floor (min FCF + buffers); split controls above-floor routing
   const diCap = discFloor + rdTopUp + obTopUp;
 
+  // v4.4.0: derived SS claiming age per spouse -- computed once here, reused
+  // by the sidebar readout, the SS earnings-test card, and the chart ref-lines
+  // below, so there is one definition of "claiming age," not three.
+  const yourSsAge   = ssClaimAge(ssStartYear, ssStartMonth, BASE.yourBirthYear, BASE.yourBirthMonth);
+  const brendaSsAge = ssClaimAge(ssBrendaStartYear, ssBrendaStartMonth, BASE.brendaBirthYear, BASE.brendaBirthMonth);
+
   // Maintenance: derived from Cash Flow structure values + rate -- source of truth.
   // v4.0.0-A: "still held" now keyed by each property's OWN hold.mode/year
   // (struct6 slider only matters while 6th is held at launch).
@@ -336,8 +398,13 @@ export default function App(){
 
   const liveParams = useMemo(()=>makeParams({
     ...sc,
-    ssStartYear: BASE.startYear+(sc.ssAge-65),  // v4.3.0: was hardcoded 2026
-    ssAmount:    sc.ssAge>=67?BASE.yourSsFRA:BASE.yourSsEarly+(sc.ssAge-65)*((BASE.yourSsFRA-BASE.yourSsEarly)/2),
+    // v4.4.0: ssAge (stepped toggle) replaced by explicit per-spouse
+    // ssStartYear/Month -- see the identical note in buildRowsFromSnapshot above.
+    ssStartYear:  sc.ssStartYear,
+    ssStartMonth: sc.ssStartMonth,
+    ssAmount:     yourSsAmountFromAge(ssClaimAge(sc.ssStartYear, sc.ssStartMonth, BASE.yourBirthYear, BASE.yourBirthMonth)),
+    ssBrendaStartYear:  sc.ssBrendaStartYear,
+    ssBrendaStartMonth: sc.ssBrendaStartMonth,
     diCap, maintRate,
     reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
     coreCpi:sc.cpi/100, healthCpi:sc.healthCpi/100, propCpi:sc.propCpi/100,
@@ -602,9 +669,15 @@ export default function App(){
 
       // -- INCOME --
       const pension  = BASE.pensionMonthly;
-      const yourSsMo = (liveParams.ssStartYear && calYear>=liveParams.ssStartYear)
+      // v4.4.0: SS is calendar-pegged like Medicare -- each spouse switches on
+      // at its own absolute calendar month (year*12+month), not a year-only
+      // boundary. This engine is already monthly, so (unlike buildScenario's
+      // proration gymnastics) this is exact by construction -- no averaging needed.
+      const _ssAbsMo = calYear*12 + (d.getMonth()+1);
+      const yourSsMo = (liveParams.ssStartYear && _ssAbsMo>=liveParams.ssStartYear*12+(liveParams.ssStartMonth||1))
         ? liveParams.ssAmount : 0;
-      const brendaSsMo = calYear>=BASE.brendaFraYear ? BASE.brendaSsFRA : 0;
+      const brendaSsMo = (liveParams.ssBrendaStartYear && _ssAbsMo>=liveParams.ssBrendaStartYear*12+(liveParams.ssBrendaStartMonth||1))
+        ? BASE.brendaSsFRA : 0;
 
       // -- Rental income (v4.0.0-A): for each held property, for each unit,
       //    sum GROSS + NET across all covering segments. rentalMo stays GROSS
@@ -630,7 +703,8 @@ export default function App(){
       // -- TIER 1: FIXED COSTS --
       // v4.1.3: use the shared engine.js healthMonthly() instead of a duplicate
       // inline calc, so both engines agree on the You -> Medicare transition
-      // (Nov 2026) instead of drifting on two separately-maintained versions.
+      // (birth-date-derived, v4.4.0 -- Oct 2026) instead of drifting on two
+      // separately-maintained versions.
       const health = healthMonthly(calYear, d.getMonth()+1, liveParams);
       const hiDebtNow = ccBal+sophiaBal+nolanBal;
       // v4.0.0-A: contractual IO -> recast P&I, ALL properties via the same
@@ -796,11 +870,11 @@ export default function App(){
       // Detect key events
       const events=[];
       if(mo===0) events.push("Launch");
-      // v4.3.0: real calendar check (was `mo===4`, which only happened to
-      // land on the real Nov-2026 transition by coincidence of the old
-      // hardcoded June-2026 startDate -- see healthMonthly's actual Nov-2026
-      // gate in engine.js, which this marker now matches exactly).
-      if(calYear===2026 && d.getMonth()===10) events.push("You -> Medicare");
+      // v4.4.0: birth-date-derived (was a hardcoded calYear===2026 &&
+      // d.getMonth()===10 check) -- matches healthMonthly's own
+      // BASE.medicareYouYear/Month gate in engine.js exactly, which is now
+      // Oct 2026 (was Nov 2026 -- see session29 journal for the correction).
+      if(calYear===BASE.medicareYouYear && (d.getMonth()+1)===BASE.medicareYouMonth) events.push("You -> Medicare");
       if(mo===5) events.push("Nolan loan payments begin");  // deferred threshold, see the gate above
       // v3.2.0 loan events from engine state (scheduled, sweep, and paydown payoffs)
       for(const L of _loans){
@@ -829,7 +903,9 @@ export default function App(){
       if(debtClearedMo===mo && mo>0) events.push("ALL HI DEBT CLEARED! 🎉");
       if(calYear===BASE.sophiaOff&&d.getMonth()===9) events.push("Sophia off health plan");
       if(calYear===BASE.nolanOff&&d.getMonth()===5)  events.push("Nolan off health plan");
-      if(calYear>=BASE.brendaMedYear&&d.getMonth()===0&&calYear===BASE.brendaMedYear) events.push("Brenda -> Medicare");
+      // v4.4.0: month-precision (was year-only + a hardcoded d.getMonth()===0
+      // January assumption) -- BASE.brendaMedYear/Month is birth-date-derived.
+      if(calYear===BASE.brendaMedYear && (d.getMonth()+1)===BASE.brendaMedMonth) events.push("Brenda -> Medicare");
 
       rows.push({
         mo, calYear, cal:`${d.toLocaleString('default',{month:'short'})} '${String(calYear).slice(2)}`,
@@ -867,7 +943,7 @@ export default function App(){
     }
     return rows;
   },[liveParams,liveRows,properties,obligation,
-     workPts,ssAge,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
+     workPts,ssStartYear,ssStartMonth,ssBrendaStartYear,ssBrendaStartMonth,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
      struct6,struct15,structLaf,maintStr,bufferMode,payOffHI,
      strPlatformPct,strCleanPct,mgrPct,ltrVacancyPct,mtrCleaningFlat,defaultsRev]);  // wfMonths only affects table slice, not engine run
 
@@ -1783,15 +1859,18 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.3.1</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.4.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
         <div style={{fontSize:10,color:dim,textAlign:"right"}}>
           {/* v4.3.0: was a static "Launch Jun 2026 - Ages 65/60" -- now reads
               the actual Defaults-tab start-date/age settings, since a stale
-              hardcoded date here was part of what this version fixes. */}
-          Launch {["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][BASE.startMonth-1]} {BASE.startYear} &middot; Ages {BASE.myAge}/{BASE.wifeAge}<br/>
+              hardcoded date here was part of what this version fixes.
+              v4.4.0: ages are now birth-date-derived (was the static
+              BASE.myAge/wifeAge:65/60, which had drifted stale -- Bob is
+              actually 64 and Brenda 59 at the current Jul-2026 start date). */}
+          Launch {MONTH_ABBR[BASE.startMonth-1]} {BASE.startYear} &middot; Ages {Math.floor(ssClaimAge(BASE.startYear,BASE.startMonth,BASE.yourBirthYear,BASE.yourBirthMonth))}/{Math.floor(ssClaimAge(BASE.startYear,BASE.startMonth,BASE.brendaBirthYear,BASE.brendaBirthMonth))}<br/>
           {"$"}{Math.round(HI_TOTAL/1000)}K HI debt at start
         </div>
       </div>
@@ -2380,17 +2459,30 @@ export default function App(){
 
             {/* Restored v4.0.0-A: unrelated to the 5-group IA above -- SS timing,
                 work curve, and the liq-NW basis note stay here at the end. */}
+            {/* v4.4.0: replaced the stepped 65-70 "Your SS Start Age" toggle
+                with explicit year+month claim dates PER SPOUSE (staggered
+                claiming must be modelable) -- age is now a derived read-out,
+                not the input. */}
             <div style={{marginBottom:10,marginTop:14}}>
-              <div style={{fontSize:10,color:muted,marginBottom:5}}>Your SS Start Age</div>
-              {toggle(ssAge,setSsAge,
-                [65,66,67,68,69,70].map(a=>({v:a,l:`${a}`,c:a>=67?green:amber}))
-              )}
-              <div style={{fontSize:9,color:dim,marginTop:4}}>
-                {ssAge===65&&`$${BASE.yourSsEarly.toLocaleString()}/mo early`}
-                {ssAge===67&&`$${BASE.yourSsFRA.toLocaleString()}/mo FRA`}
-                {ssAge>67&&`~$${Math.round(BASE.yourSsFRA*(1+(ssAge-67)*0.08)).toLocaleString()}/mo delayed`}
-                {ssAge===66&&`~$${Math.round(BASE.yourSsEarly+(BASE.yourSsFRA-BASE.yourSsEarly)/2).toLocaleString()}/mo`}
+              <div style={{fontSize:10,color:muted,marginBottom:5}}>Your SS Start</div>
+              {slider("Your SS Start Year",ssStartYear,setSsStartYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`)}
+              {slider("Your SS Start Month",ssStartMonth,setSsStartMonth,1,12,1,v=>MONTH_ABBR[v-1])}
+              <div style={{fontSize:9,color:dim,marginTop:-4,marginBottom:4}}>
+                {ssStartYear} &middot; {MONTH_ABBR[ssStartMonth-1]} &rarr; age {yourSsAge.toFixed(1)}
+                {" -- "}${Math.round(yourSsAmountFromAge(yourSsAge)).toLocaleString()}/mo
               </div>
+              {yourSsAge<62 && <div style={{fontSize:9,color:amber}}>⚠ Below age 62 -- SS isn't claimable this early in practice</div>}
+            </div>
+
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:10,color:muted,marginBottom:5}}>Brenda SS Start</div>
+              {slider("Brenda SS Start Year",ssBrendaStartYear,setSsBrendaStartYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`)}
+              {slider("Brenda SS Start Month",ssBrendaStartMonth,setSsBrendaStartMonth,1,12,1,v=>MONTH_ABBR[v-1])}
+              <div style={{fontSize:9,color:dim,marginTop:-4,marginBottom:4}}>
+                {ssBrendaStartYear} &middot; {MONTH_ABBR[ssBrendaStartMonth-1]} &rarr; age {brendaSsAge.toFixed(1)}
+                {" -- "}${BASE.brendaSsFRA.toLocaleString()}/mo (flat, doesn't vary by claim age)
+              </div>
+              {brendaSsAge<62 && <div style={{fontSize:9,color:amber}}>⚠ Below age 62 -- SS isn't claimable this early in practice</div>}
             </div>
 
             <div style={{marginBottom:14}}>
@@ -2439,8 +2531,9 @@ export default function App(){
             {/* Row 2: SS earnings constraint */}
             {(()=>{
               const SS_CAP = 24480;
-              const isEarly = ssAge < 67;
-              const yourSsMonthly = ssAge>=67?BASE.yourSsFRA:ssAge===65?BASE.yourSsEarly:Math.round(BASE.yourSsEarly+(BASE.yourSsFRA-BASE.yourSsEarly)/2);
+              // v4.4.0: ssAge (stepped toggle) replaced by yourSsAge (continuous, birth-date-derived).
+              const isEarly = yourSsAge < 67;
+              const yourFraYear = BASE.yourBirthYear+67;  // real fact from birth date, not ssAge-relative
               const totalWorkAnnual = liveStats.launchRW * 12;
               const safeSplit = Math.round(SS_CAP / 12);
               const partnerShare = Math.max(0, liveStats.launchRW - safeSplit);
@@ -2455,7 +2548,7 @@ export default function App(){
               return (
                 <div style={{background:bg2,borderRadius:7,padding:"9px 12px",borderLeft:`3px solid ${overCap>0?red:amber}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                    <span style={{fontSize:10,color:overCap>0?red:amber,fontWeight:"bold"}}>SS at {ssAge} -- Earnings Test active until age 67 ({BASE.startYear+(67-ssAge)})</span>
+                    <span style={{fontSize:10,color:overCap>0?red:amber,fontWeight:"bold"}}>SS at {yourSsAge.toFixed(1)} -- Earnings Test active until age 67 ({yourFraYear})</span>
                     <span style={{fontSize:9,color:dim}}>2026 cap: <span style={{color:amber,fontFamily:mono}}>${SS_CAP.toLocaleString()}/yr</span></span>
                   </div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:6}}>
@@ -2476,7 +2569,7 @@ export default function App(){
                     </div>
                   </div>
                   <div style={{fontSize:8,color:dim,borderTop:`1px solid ${bdr}`,paddingTop:5}}>
-                    Cap ~4%/yr wage inflation: ${Math.round(SS_CAP*1.04).toLocaleString()} in 2027, ${Math.round(SS_CAP*1.04*1.04).toLocaleString()} in 2028 &middot; Disappears entirely at your FRA age 67 ({BASE.startYear+(67-ssAge)}) &middot; Brenda has no SS yet -- no limit on her 1099s
+                    Cap ~4%/yr wage inflation: ${Math.round(SS_CAP*1.04).toLocaleString()} in 2027, ${Math.round(SS_CAP*1.04*1.04).toLocaleString()} in 2028 &middot; Disappears entirely at your FRA age 67 ({yourFraYear}) &middot; Brenda has no SS yet -- no limit on her 1099s
                   </div>
                 </div>
               );
@@ -2489,7 +2582,7 @@ export default function App(){
               yDomain={[0, reqWorkMax]}
               refLines={[
                 {y:0,stroke:green,strokeDasharray:"3 3",label:{value:"Work-free",fill:green,fontSize:8,position:"insideTopLeft"}},
-                ...(ssAge<67?[{y:Math.round(24480/12),stroke:amber,strokeOpacity:0.4,strokeDasharray:"4 2",label:{value:"SS earnings cap",fill:amber,fontSize:7,position:"insideTopRight"}}]:[]),
+                ...(yourSsAge<67?[{y:Math.round(24480/12),stroke:amber,strokeOpacity:0.4,strokeDasharray:"4 2",label:{value:"SS earnings cap",fill:amber,fontSize:7,position:"insideTopRight"}}]:[]),
               ]}/>
             <Chart title="Free Cash Flow / mo" dataKey="surplus" pinKey="di" color={green} chartId="surplus"
               yDomain={[0, surplusMax]}
@@ -2672,13 +2765,16 @@ export default function App(){
 
               // Income events
               if(r.yourSs>0 && (!prev||prev.yourSs===0))
-                // v4.3.0: yr-BASE.startYear (was yr-2026, hardcoded) -- age is
-                // relative to BASE.myAge AT THE START date, matching the
-                // already-correct ageFrom/ageTo pattern below; a hardcoded 2026
-                // would misreport age once BASE.startYear is edited away from 2026.
-                evts.push({cat:"income", icon:"SS", desc:`Your SS starts (age ${65+(yr-BASE.startYear)})`, delta:r.yourSs, note:`$${r.yourSs.toLocaleString()}/mo`});
+                // v4.4.0: age is now the real birth-date-derived claiming age
+                // (yourSsAge, computed once above from the actual scenario
+                // settings) -- was `65+(yr-BASE.startYear)`, an approximation
+                // that assumed claiming always happened at exactly age 65.
+                evts.push({cat:"income", icon:"SS", desc:`Your SS starts (age ${yourSsAge.toFixed(1)})`, delta:r.yourSs, note:`$${r.yourSs.toLocaleString()}/mo`});
               if(r.brendaSs>0 && (!prev||prev.brendaSs===0))
-                evts.push({cat:"income", icon:"SS", desc:`Brenda SS spousal starts (FRA ${yr})`, delta:r.brendaSs, note:`$${r.brendaSs.toLocaleString()}/mo`});
+                // v4.4.0: was hardcoded "(FRA {yr})", assuming Brenda always
+                // claims at FRA -- she can now claim at any age, so this
+                // reports her actual derived claiming age instead.
+                evts.push({cat:"income", icon:"SS", desc:`Brenda SS starts (age ${brendaSsAge.toFixed(1)})`, delta:r.brendaSs, note:`$${r.brendaSs.toLocaleString()}/mo`});
               if(prev && r.workInc<prev.workInc && prev.workInc>0)
                 evts.push({cat:"income", icon:"WK", desc:"Work income glide (per work curve)", delta:r.workInc-prev.workInc, note:`$${prev.workInc.toLocaleString()} → $${r.workInc.toLocaleString()}/mo`});
               if(prev && r.rental !== prev.rental){
@@ -2721,15 +2817,13 @@ export default function App(){
               // off-plan year -- where the kids' premium doesn't change -- was missing)
               {
                 const _hlNames = evts.filter(e=>e.icon==="HL").map(e=>e.desc).join(" ");
-                // v4.3.0: yr===2026 (was yr===BASE.startYear) -- the real Medicare
-                // transition is a fixed Nov-2026 fact (see healthMonthly's own
-                // hardcoded 2026 check in engine.js), independent of the model's
-                // start-year setting. Comparing against BASE.startYear only
-                // happened to work while startYear was a hardcoded 2026 constant;
-                // now that it's Defaults-tab editable, a later startYear must NOT
-                // re-announce an already-past transition.
-                if(yr===2026)
-                  evts.push({cat:"cost", icon:"HL", desc:"You → Medicare", delta:0, note:`Ericsson $${BASE.healthYouEricsson} → Medicare ~$${BASE.healthYouMedicare}/mo (Nov 2026)`});
+                // v4.4.0: yr===BASE.medicareYouYear (was a hardcoded yr===2026)
+                // -- the Medicare transition is now birth-date-derived (Oct
+                // 2026, corrected from the old Nov-2026 assumption -- see
+                // session29 journal), not a bare literal independent of the
+                // model's start-year setting.
+                if(yr===BASE.medicareYouYear)
+                  evts.push({cat:"cost", icon:"HL", desc:"You → Medicare", delta:0, note:`Ericsson $${BASE.healthYouEricsson} → Medicare ~$${BASE.healthYouMedicare}/mo (${MONTH_ABBR[BASE.medicareYouMonth-1]} ${BASE.medicareYouYear})`});
                 if(yr===BASE.sophiaOff && !/Sophia/.test(_hlNames))
                   evts.push({cat:"cost", icon:"HL", desc:"Sophia → off health insurance", delta:0, note:`kids' premium continues while Nolan is on plan (through ${BASE.nolanOff-1})`});
                 if(yr===BASE.nolanOff && !/Nolan/.test(_hlNames))

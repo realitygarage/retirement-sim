@@ -117,8 +117,18 @@ export const DEFAULT_LOANS_SC = [
 // =============================================================================
 export const DEFAULTS = {
   payOffHI:      false,
-  ssStartYear:   2026,
+  // v4.4.0: ssStartMonth/ssBrendaStartYear/ssBrendaStartMonth are new (per-
+  // spouse, month-precision SS claiming). These engine-facing fallbacks only
+  // matter for a bare makeParams({}) call (e.g. tests) -- the live UI always
+  // passes computed values through. Defaults mirror the OLD default behavior
+  // exactly: Bob claims at exactly age 65 (his birth month, Oct 2026 -- was
+  // ssStartYear:2026 with an implicit "early" amount), Brenda claims at her
+  // derived FRA (Jan 2034 -- was the always-FRA-gated brendaFraYear default).
+  ssStartYear:   BASE.yourBirthYear+65,
+  ssStartMonth:  BASE.yourBirthMonth,
   ssAmount:      BASE.yourSsEarly,
+  ssBrendaStartYear:  BASE.brendaFraYear,
+  ssBrendaStartMonth: BASE.brendaFraMonth,
   workPts: [{yr:0,val:5417},{yr:2,val:3000},{yr:5,val:1000},{yr:8,val:0}],
   lifestyleSplit: 30,
   diCap:         1200,
@@ -185,14 +195,21 @@ export function makeParams(overrides={}){
 }
 
 export const PIN_COLORS = ["#f59e0b","#f472b6","#34d399","#60a5fa","#a78bfa","#fb923c"];
-export const SAVE_SCHEMA_VERSION = 4;  // v4.0.0-A: schema break, no back-compat with v3.x
+export const SAVE_SCHEMA_VERSION = 5;  // v4.4.0: schema break -- ssAge replaced by per-spouse ssStartYear/Month, no back-compat
 
 // =============================================================================
 // SC_DEFAULTS  --  UI-facing scenario snapshot (rates as %, ints where UI is int)
 // =============================================================================
 export const SC_DEFAULTS = {
   payOffHI:      false,
-  ssAge:         65,
+  // v4.4.0: ssAge (a stepped 65-70 toggle) replaced by explicit per-spouse
+  // year+month claiming dates -- the claiming AGE is now a derived read-out,
+  // not an input. Defaults preserve the old default scenario exactly: Bob at
+  // his birth month the year he turns 65, Brenda at her derived FRA.
+  ssStartYear:        BASE.yourBirthYear+65,
+  ssStartMonth:       BASE.yourBirthMonth,
+  ssBrendaStartYear:  BASE.brendaFraYear,
+  ssBrendaStartMonth: BASE.brendaFraMonth,
   workPts:       [{yr:0,val:5417},{yr:2,val:3000},{yr:5,val:1000},{yr:8,val:0}],
   lifestyleSplit:30,
   reApp:         4.0,
