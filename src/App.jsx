@@ -1,3 +1,16 @@
+// v4.3.1 -- 6th St selling-cost double-count fix: adjustedBasis ($899,550) already
+// capitalizes the agent's $88,550 closing costs, but disposeAsset was ALSO subtracting
+// DISPO_DEFAULTS.sellingCostsPct (6%) from the sale price before computing gain,
+// double-counting the cost and understating taxable gain ($174,950 vs CPA-correct
+// $275,450). Fixed via a structural split in disposeAsset (engine.js): the gain/tax
+// calc now uses the property's real (cost-inclusive) basis verbatim when
+// prop.sellingCostsInBasis is set, while cash net proceeds still deduct the real ~5%
+// selling cost (hold.sellingCostsPct override, 6th St only) -- gain reconciles to
+// $275,450 exactly, net within $803 of the CPA sheet's $708,881. sellingCostsInBasis
+// is a per-property opt-in, NOT a global default. 15th St/Barberry are UNCHANGED --
+// their basis is a 1031 carryover from the Bonair exchange with no documented
+// selling-cost component; applying the same fix to them moved their reconciliation
+// away from the CPA sheet, not toward it (see session28 journal for the full probe).
 // v4.3.0 -- explicit model start-date anchor: BASE.startMonth (new) + BASE.startYear
 // (promoted from a hardcoded constant to a Defaults-tab-editable field, alongside
 // startMonth) replace the old implicit Jan-1 assumption. buildScenario's yr=0 is now a
@@ -1770,7 +1783,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.3.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.3.1</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>

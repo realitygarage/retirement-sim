@@ -627,10 +627,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.3.0"', async ({ page }) => {
+  test('E5 — Version header shows "v4.3.1"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.3.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.3.0');
+    await expect(page.locator('text=v4.3.1').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.3.1');
   });
 
 });
@@ -1086,10 +1086,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.3.0', async ({ page }) => {
+  test('L1 — Version header shows v4.3.1', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.3.0').first()).toBeVisible();
-    console.log('  L1 — Version v4.3.0 confirmed');
+    await expect(page.locator('text=v4.3.1').first()).toBeVisible();
+    console.log('  L1 — Version v4.3.1 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1507,6 +1507,43 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     expect(full1031Text).not.toContain('Cash boot');
 
     console.log('  R14 — conditional rows verified for keep/primary/rental/1031');
+  });
+
+  test('R15 — v4.3.1: 6th St selling-cost double-count fixed; 15th St/Barberry unchanged', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      function sellOnly(id) {
+        // obligation:{amount:0} disables the default $525K same-year gain
+        // offset so this isolates the pure per-property disposition math --
+        // matches the codebase's own dispoResultsNoOffset/CPA-comparison
+        // convention (see App.jsx's "Reconciliation vs CPA" card).
+        const rows = buildScenario(makeParams({
+          properties: [{ id, hold: { mode: 'sell', year: 2026, quarter: 1 } }],
+          obligation: { amount: 0 },
+        }));
+        const d = rows.dispoResults[id];
+        return { gain: d.recognizedGain, tax: Math.round(d.totalTax), net: Math.round(d.afterTaxNetProceeds) };
+      }
+      return { sixth: sellOnly('sixth'), fifteenth: sellOnly('fifteenth'), barberry: sellOnly('barberry') };
+    });
+    console.log('  R15 — ' + JSON.stringify(result));
+
+    // 6th St: basis ($899,550) already capitalizes the agent's $88,550 closing
+    // costs -- pre-fix, DISPO_DEFAULTS.sellingCostsPct (6%) was ALSO subtracted
+    // from the sale price before computing gain, double-counting the cost and
+    // understating taxable gain ($174,950 instead of the CPA-correct $275,450).
+    // Locked to the exact CPA-reconciled gain, and net within the same ~$800
+    // (0.1%) gap verified during investigation -- the remainder is the
+    // separate, not-this-fix's-job CPA tax-rate-calibration backlog item.
+    expect(result.sixth.gain).toBe(275_450);
+    expect(Math.abs(result.sixth.net - 708_881)).toBeLessThan(1000);
+
+    // 15th St / Barberry: 1031-carryover basis, no documented selling-cost
+    // component -- must be BYTE-IDENTICAL to their pre-v4.3.1 values (applying
+    // the same treatment moves them AWAY from the CPA sheet, per investigation).
+    expect(result.fifteenth).toEqual({ gain: 868_191, tax: 310_256, net: 634_643 });
+    expect(result.barberry).toEqual({ gain: 404_457, tax: 146_018, net: 260_367 });
   });
 
 });

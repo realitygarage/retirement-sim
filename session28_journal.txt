@@ -1,0 +1,162 @@
+=== SESSION 28 JOURNAL — v4.3.1 (6th St Selling-Cost Double-Count Fix) ===
+
+Date: 2026-07-09
+
+Session goal: user flagged a calibration bug via the agent's real net sheet --
+6th St's disposition tax math was double-counting selling costs, understating
+taxable gain ($175K sim vs $275,450 CPA-correct). Asked for investigate-
+first-report-a-plan (no code) before touching anything: confirm whether all
+three properties' basis defaults already capitalize selling costs, and if
+so recommend the cleanest fix across all three, showing before/after
+numbers, before implementing anything.
+
+--- INVESTIGATION (before any code changed) ---
+
+Confirmed the double-count is REAL, but only for 6th St. Found the smoking
+gun in `v3_phase1_consolidated_spec.md` (the original v3.1.0 design spec),
+an inline comment at the exact basis line:
+
+    adjustedBasis: 899_550,  // $735K cost + $76K improvements + $88.55K closing
+
+Exact match to the user's $88,550 figure. 15th St and Barberry have NO such
+itemization anywhere in the codebase -- just "carryover after 1031, per
+sheet." That's not incidental: both were acquired via a 1031 exchange from
+Bonair, so their basis is a carryover basis from that original transaction
+-- mechanically it wouldn't normally include costs of a FUTURE anticipated
+sale of Barberry/15th themselves.
+
+Ran disposeAsset directly (not hand math) via a throwaway probe.spec.js
+(deleted before commit) to test candidate fixes against each property's
+stored cpaEstTax/cpaNetProceedsAfterTax:
+
+6th St: current sim (6% selling cost applied on top of cost-inclusive
+basis) gives gain $174,950 / net $719,669 vs CPA $275,450 gain / $708,881
+net. Naively zeroing sellingCostsPct fixes the gain exactly ($275,450) but
+OVERSTATES net proceeds by $83K ($791,828) -- because netSale was doing
+double duty: used both for the gain calc (should exclude selling costs,
+since basis already has them) AND for the cash net-proceeds calc (should
+still deduct the real ~5% cash cost of selling, which is a real outflow
+regardless of basis treatment). A structural split -- gain uses gross price
+verbatim, net proceeds separately deducts a real ~5% -- reconciles gain to
+$275,450 exactly and net to within $803 (0.1%) of CPA's $708,881.
+
+15th St / Barberry: tested the SAME "remove costs, apply real %" treatment
+using the user's stated embedded amounts ($72,750 / $34,050) -- it made
+BOTH properties' CPA reconciliation WORSE, not better, in every variant
+tested (current unchanged was closest to CPA every time). This is strong,
+reproducible evidence the fix does not apply to these two -- consistent
+with (1) above (no documented cost-inclusive basis, and a 1031 carryover
+basis mechanically shouldn't have one).
+
+User confirmed: proceed with the structural split for 6th St only; leave
+15th/Barberry untouched.
+
+--- WHAT SHIPPED (v4.3.1) ---
+
+engine.js:
+- `disposeAsset`: added `prop.sellingCostsInBasis` (per-property, defaults
+  falsy/false -- NOT a global toggle). `netSale` (= grossPrice - sellingCosts)
+  keeps its existing meaning UNCHANGED -- it's the CASH side, used for
+  afterTaxNetProceeds and partial_1031's freedEquity, and a dev-mode audit
+  in App.jsx already asserts netSale === grossPrice - sellingCosts, so its
+  semantics couldn't be repurposed without breaking that check. New
+  `gainBasisPrice` variable is the GAIN/TAX side: grossPrice verbatim when
+  sellingCostsInBasis is set (the cost is already embedded in the basis
+  input), else netSale as before (unchanged path for every other property).
+  `realizedGain` now derives from gainBasisPrice instead of netSale --
+  this one line change is the entire fix; everything downstream (§121,
+  sell/full_1031/partial_1031 branches) already consumed realizedGain, so
+  no other logic needed to change.
+- `computeDispo` (inside buildScenario): passes `sellingCostsInBasis:
+  hold.sellingCostsInBasis || false` into disposeAsset's prop object, and
+  `sellingCostsPct: hold.sellingCostsPct` into its opts (undefined for
+  every property except 6th St, so disposeAsset's existing `opts.sellingCostsPct
+  ?? cfg.sellingCostsPct` fallback keeps the global DISPO_DEFAULTS.sellingCostsPct
+  (6%, UNCHANGED) for 15th/Barberry -- the 6%->5% real-rate correction is
+  scoped to 6th St only, not a global default change, precisely so 15th/
+  Barberry stay byte-identical).
+
+defaults.js:
+- 6th St's `hold` block: added `sellingCostsInBasis: true` and
+  `sellingCostsPct: 0.05` (the real agent-net-sheet rate: 2x2.5% commission
+  + title + closing, ~$89K on $1.675M), both with comments explaining WHY
+  and explicitly noting 15th/Barberry do NOT get this treatment and why.
+  `basis: 899_550` itself is UNCHANGED (still cost-inclusive, per the
+  original spec) -- the fix is entirely in how disposeAsset now reads it,
+  not in the basis number itself.
+
+Result (verified end-to-end via buildScenario+dispoResults, obligation
+disabled to isolate the pure per-property math -- see R15):
+  6th St:      gain $174,950 -> $275,450 (exact CPA match)
+               net  $719,669 -> $708,078 (was $10,788 off CPA; now $803 off)
+  15th St:     gain $868,191 (unchanged)   net $634,643 (unchanged)
+  Barberry:    gain $404,457 (unchanged)   net $260,367 (unchanged)
+
+The remaining ~$15-16K tax gap on 6th St (our $77,677 vs CPA's $62,000) is
+the separate, already-known "CPA rate calibration" backlog item (session26)
+-- left untouched, per explicit instruction not to tune rates to close it
+here.
+
+retirement-simulator.spec.js:
+- E5/L1 version strings bumped to v4.3.1.
+- New R15 (Group R): locks 6th St to gain===275450 exactly and net within
+  $1000 of $708,881; asserts 15th St and Barberry are BYTE-IDENTICAL
+  ({gain,tax,net} toEqual) to their pre-fix values. Uses obligation:{amount:0}
+  to disable the default $525K same-year gain offset, isolating pure
+  disposition math -- same convention the codebase's own
+  dispoResultsNoOffset/CPA-comparison card already uses (confirmed via a
+  probe: without disabling the offset, selling only 6th St in 2026 zeroes
+  its recognizedGain entirely via the Kimbell/Arrowsmith offset, since the
+  default obligation is also year=2026).
+- Verified R6/R12/R13 (existing disposeAsset/reconciliation tests) are
+  unaffected: R6 uses synthetic prop objects with no sellingCostsInBasis
+  field (falsy -> unchanged path); R12 only checks grossPrice (untouched by
+  this fix); R13's netSale/afterTaxNetProceeds arithmetic-relationship
+  checks still hold (the RELATIONSHIPS between netSale/sellingCosts/
+  afterTaxNetProceeds are unchanged -- only the recognizedGain VALUE for
+  6th St changed, R13 doesn't hardcode dollar amounts).
+
+App.jsx:
+- Header comment (v4.3.1 entry) documents the fix; on-screen version badge
+  bumped to v4.3.1. No UI/rendering changes -- the itemized Disposition
+  breakdown card, "Proceeds summary vs CPA" line, and obligation-audit
+  console.warn all read disposeAsset's returned fields directly and needed
+  no changes (they already display grossPrice/totalTax/afterTaxNetProceeds
+  generically, not property-specific formulas).
+
+--- WHY 15th St / Barberry ARE EXCLUDED (for future sessions) ---
+
+Do NOT apply sellingCostsInBasis (or a basis reduction + rate correction)
+to 15th St or Barberry without new information. Both are 1031-carryover
+basis properties (from the Bonair exchange) with:
+  1. No documented selling-cost component in adjustedBasis anywhere in this
+     codebase's history (v3_phase1_consolidated_spec.md's comments for
+     these two just say "carryover after 1031, per sheet" -- no itemized
+     $ breakdown, unlike 6th St's explicit "$735K + $76K + $88.55K").
+  2. Numerically, EVERY variant of "remove costs from basis" tested this
+     session moved their CPA reconciliation WORSE (further from CPA), not
+     better -- the opposite of what happened for 6th St, where the fix
+     landed within $803 of the CPA net figure.
+If a future session gets NEW primary-source numbers (the actual Ottinger.xlsx
+CPA worksheet, not just the codebase's historical comments) showing these
+two DO have an itemized selling-cost component in their carryover basis,
+that would be grounds to revisit -- but absent that, leave them alone.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. sellingCostsInBasis and the per-property sellingCostsPct override are
+   both read from `hold`, not from the top-level property object -- if a
+   future disposition-related field needs the same "documented historical
+   fact, per-property" treatment, follow this same pattern (add to hold in
+   defaults.js with a comment citing the source, wire through computeDispo's
+   propObj/opts construction) rather than a global DISPO_DEFAULTS change.
+2. The "[P1] CPA rate calibration (6th sale tax still runs below the CPA
+   sheet)" backlog item (session26) is now PARTIALLY stale -- 6th St's tax
+   used to run below CPA ($49K vs $62K); after this fix it runs ABOVE CPA
+   ($77,677 vs $62,000), a bigger dollar gap in the opposite direction, but
+   working from a now-correct gain base. Re-baseline that backlog item's
+   framing before touching tax rates again -- the direction of the
+   discrepancy flipped.
+3. Nothing about the v4.3.0 (start-date anchor) work changed this session --
+   verified via a full test run (all 92 tests, including the 5 Group T
+   tests from session27) passing with no changes needed.

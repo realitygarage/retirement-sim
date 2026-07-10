@@ -24,7 +24,25 @@ export function freshPropertiesDefaults(){
       mortgage: { balance: 805_495, rate: 0.04875, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
       hold: {
         mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
+        // basis = $735K cost + $76K improvements + $88.55K closing costs (per the
+        // agent's net sheet, capitalized into the CPA's adjusted-basis worksheet
+        // figure) -- sellingCostsInBasis:true tells disposeAsset NOT to subtract
+        // DISPO_DEFAULTS.sellingCostsPct again when computing taxable gain (that
+        // would double-count the $88,550 already embedded here). Cash net
+        // proceeds still deduct the real ~5% selling cost regardless -- only the
+        // gain/tax side is affected. v4.3.1 fix; see engine.js's disposeAsset.
+        // 15th St / Barberry do NOT get this flag -- their basis is a 1031
+        // carryover from the Bonair exchange with no documented selling-cost
+        // component (confirmed: forcing the same treatment on them moves their
+        // reconciliation AWAY from the CPA sheet, not toward it).
         basis: 899_550, sec121Exclusion: 500_000, caSourceDeferredGain: 0, depreciationRecapture: 0,
+        sellingCostsInBasis: true,
+        // Real agent-net-sheet selling cost is ~5% (2x2.5% commission + title +
+        // closing, ~$89K), not DISPO_DEFAULTS.sellingCostsPct's global 6% --
+        // overridden here for 6th St ONLY (computeDispo passes this through to
+        // disposeAsset's opts.sellingCostsPct, falling back to the 6% global
+        // default for every other property, unaffected by this line).
+        sellingCostsPct: 0.05,
         cpaEstTax: 62_000, cpaNetProceedsAfterTax: 708_881,
       },
       units: [

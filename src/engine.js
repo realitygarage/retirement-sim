@@ -407,7 +407,7 @@ export function taxRecognized(recognized, opts = {}) {
 }
 
 // prop: { fmv, basis, mortgageBalance, isPrimary?, sec121Exclusion?,
-//         caSourceDeferredGain?, depreciationTaken? }
+//         caSourceDeferredGain?, depreciationTaken?, sellingCostsInBasis? }
 // mode: 'keep' | 'sell' (primary: no 1031) | 'full_1031' | 'partial_1031' (rentals)
 // opts: { saleMode?, cashBoot?, sellingCostsPct?, rates? }
 export function disposeAsset(prop, mode, opts = {}) {
@@ -418,9 +418,24 @@ export function disposeAsset(prop, mode, opts = {}) {
 
   const grossPrice   = prop.fmv * (forced ? (1 - cfg.forcedSaleDiscount) : 1);
   const sellingCosts = grossPrice * sellingCostsPct;
+  // netSale is the CASH side -- always nets the real cost of sale, regardless
+  // of basis treatment below. Used for afterTaxNetProceeds and (in
+  // partial_1031) freedEquity; a dev-mode audit elsewhere in the app asserts
+  // netSale === grossPrice - sellingCosts, so don't repurpose this field.
   const netSale      = grossPrice - sellingCosts;
   const mortgagePayoff = prop.mortgageBalance || 0;
-  const realizedGain = Math.max(0, netSale - (prop.basis || 0));
+  // v4.3.1: gainBasisPrice is the GAIN/TAX side, which can differ from netSale
+  // -- some properties' adjustedBasis default already capitalizes their own
+  // real-world selling costs (a documented historical fact per-property, e.g.
+  // 6th St's $88,550 closing-cost line -- see defaults.js and prop.sellingCostsInBasis).
+  // For THOSE properties only, subtracting sellingCostsPct again on top of an
+  // already-cost-inclusive basis double-counts the cost and understates
+  // taxable gain -- so the gain calc uses the gross price verbatim instead.
+  // This must stay an explicit per-property opt-in (not a global toggle):
+  // a property without a documented cost-inclusive basis must fall through
+  // to the normal netSale-based gain calc, same as before this fix.
+  const gainBasisPrice = prop.sellingCostsInBasis ? grossPrice : netSale;
+  const realizedGain = Math.max(0, gainBasisPrice - (prop.basis || 0));
 
   const r = {
     mode, grossPrice, sellingCosts, netSale, mortgagePayoff, realizedGain,
@@ -589,10 +604,18 @@ export function buildScenario(p) {
       sec121Exclusion: hold.sec121Exclusion || 0,
       caSourceDeferredGain: hold.caSourceDeferredGain || 0,
       depreciationTaken: depTaken,
+      // v4.3.1: per-property opt-in, NOT a global default -- see disposeAsset's
+      // comment. Only 6th St's hold.sellingCostsInBasis is true (defaults.js).
+      sellingCostsInBasis: hold.sellingCostsInBasis || false,
     };
     const res = disposeAsset(propObj, hold.mode, {
       saleMode: hold.saleMode,
       cashBoot: hold.cashBoot || 0,
+      // v4.3.1: per-property real-world rate override (6th St only, see
+      // defaults.js) -- undefined for every other property, so disposeAsset's
+      // `opts.sellingCostsPct ?? cfg.sellingCostsPct` falls through to the
+      // unchanged DISPO_DEFAULTS.sellingCostsPct (6%) global default.
+      sellingCostsPct: hold.sellingCostsPct,
     });
     return { ...res, year: hold.year, quarter: hold.quarter, mode: hold.mode, caSourceDeferredGain: hold.caSourceDeferredGain || 0 };
   }
