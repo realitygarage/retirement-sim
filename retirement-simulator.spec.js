@@ -630,10 +630,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.4.0"', async ({ page }) => {
+  test('E5 — Version header shows "v4.5.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.4.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.4.0');
+    await expect(page.locator('text=v4.5.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.5.0');
   });
 
 });
@@ -742,8 +742,9 @@ test.describe('Group F — v2.9.1 Features', () => {
 // ─── Helpers for Groups G+ ───────────────────────────────────────────────────
 
 async function openHiDebtBreakdown(page) {
-  // Find the HI Debt Balance chart and click its breakdown button
-  const hiDebtChart = page.locator('div').filter({ hasText: /^HI Debt Balance \(\$K\)$/ })
+  // v4.5.0: retitled "HI Debt Balance" -> "Debt Balances" (now shows both the
+  // HI trio and an LI-loans line) -- locator updated to match.
+  const hiDebtChart = page.locator('div').filter({ hasText: /^Debt Balances \(\$K\)$/ })
     .locator('xpath=ancestor::div[2]').first();
   await hiDebtChart.locator('button', { hasText: 'breakdown' }).click();
   await page.waitForTimeout(300);
@@ -1089,10 +1090,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.4.0', async ({ page }) => {
+  test('L1 — Version header shows v4.5.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.4.0').first()).toBeVisible();
-    console.log('  L1 — Version v4.4.0 confirmed');
+    await expect(page.locator('text=v4.5.0').first()).toBeVisible();
+    console.log('  L1 — Version v4.5.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1558,7 +1559,7 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
   const CHART_TITLES = [
     'Total Work Income Required / mo',
     'Free Cash Flow / mo',
-    'HI Debt Balance ($K)',
+    'Debt Balances ($K)',   // v4.5.0: was "HI Debt Balance ($K)"
     'Net Worth ($M)',
     'Fixed Costs / mo',
   ];
@@ -1701,11 +1702,11 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     expect(names).toContain('Live');                     // live series labeled too
   });
 
-  test('S5 — "debt clear" marker matches the HI Debt Balance chart\'s own zero-crossing, distinct from "sweep -> savings"', async ({ page }) => {
+  test('S5 — "debt clear" marker matches the Debt Balances chart\'s own zero-crossing, distinct from "sweep -> savings"', async ({ page }) => {
     await loadApp(page);
 
     // debtClearYear must equal the first year the ANNUAL engine's hiDebt (the
-    // same series the HI Debt Balance chart plots) reaches zero -- not a proxy
+    // same series the Debt Balances chart plots) reaches zero -- not a proxy
     // off the monthly engine's sweepToSavings (that was the pre-v4.1.2 bug).
     const check1 = await page.evaluate(() => {
       const liveRows = window.__liveRows || [];
@@ -2142,6 +2143,157 @@ test.describe('Group U — v4.4.0 Birth-Date Anchor / Per-Spouse SS / Medicare-F
     });
     console.log('  U7 — brendaFraYear after stale override attempt: ' + result);
     expect(result).toBe(2034);  // birth-date-derived value wins, not the stale override
+  });
+
+});
+
+// ─── Group V: v4.5.0 Debt Tiering ────────────────────────────────────────────
+// HI debt (CC/Sophia/Nolan, the named trio) and the generalized loans[] array
+// (LI = low-interest, user-added) now share one rate-ordered avalanche queue
+// for both the ongoing surplus-sweep and the one-time property-sale-closing
+// lump-sum. Tier membership is structural (HI = the named trio; LI = loans[])
+// -- never rate-based. Deliberately minimal ahead of the v5 single-engine
+// refactor: no rate thresholds, no payoff optimization, no tier auto-migration.
+test.describe('Group V — v4.5.0 Debt Tiering', () => {
+
+  test('V1 — retitled "Debt Balances" chart and breakdown show a distinct LI-loans line/subtotal, never merged into HI', async ({ page }) => {
+    await loadApp(page);
+    // Chart itself: secondary line legend always renders (LI total is 0 with no loans, still its own series).
+    await expect(page.locator('text=LI loans')).toBeVisible();
+    await openHiDebtBreakdown(page);
+    const bodyText = await page.locator('body').textContent();
+    expect(bodyText).toMatch(/Total HI debt/);
+    expect(bodyText).toMatch(/LI loans:/);   // dynamic label -- "LI loans: <names>", keeps individual loan names visible
+  });
+
+  test('V2 — closingEligible=false: an added loan is untouched by the one-time property-sale closing payoff, while HI debt still gets paid down', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      // Loan starts in 2026, sale/closing lands in 2028 -- gives the loan two years
+      // of its own real balance (buildScenario's pooled-routing block for a given
+      // year reads loan balances as they stand BEFORE that year's own monthly
+      // stepping, so a loan starting the SAME year as the sale hasn't accrued a
+      // balance yet at that point -- a pre-existing engine ordering detail, not
+      // something this test is trying to exercise).
+      const rows = buildScenario(makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2028, quarter: 2 } }],
+        obligation: { amount: 0, year: 2028, quarter: 2, offsetsCapitalGains: true },
+        loans: [{ label:'NotEligible', amount:50000, rate:0.25, months:120, startYear:2026, startMonth:7, sweepable:false, closingEligible:false }],
+      }));
+      const r28 = rows.find(r => r.cal === 2028);
+      return { famLoanBal: r28.famLoanBal, wfDebtPaid: r28.wfDebtPaid, hiDebt: r28.hiDebt };
+    });
+    console.log('  V2 — ' + JSON.stringify(result));
+    expect(result.wfDebtPaid).toBeGreaterThan(0);   // the closing lump-sum DID pay down debt...
+    expect(result.hiDebt).toBe(0);                  // ...fully clearing HI (large residual)...
+    expect(result.famLoanBal).toBeGreaterThan(35);  // ...but this loan (25% -- would be first in line if eligible) is essentially untouched (~2yr of its own amortization only)
+  });
+
+  test('V2b — closingEligible=true: a higher-rate added loan IS retired by the closing lump-sum, ahead of/alongside HI debt (unified rate-order)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      const rows = buildScenario(makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2028, quarter: 2 } }],
+        obligation: { amount: 0, year: 2028, quarter: 2, offsetsCapitalGains: true },
+        loans: [{ label:'Eligible', amount:50000, rate:0.25, months:120, startYear:2026, startMonth:7, sweepable:false, closingEligible:true }],
+      }));
+      const r28 = rows.find(r => r.cal === 2028);
+      return { famLoanBal: r28.famLoanBal, hiDebt: r28.hiDebt };
+    });
+    console.log('  V2b — ' + JSON.stringify(result));
+    expect(result.famLoanBal).toBe(0);   // wiped out (25% is higher than any HI rate, residual is large)
+    expect(result.hiDebt).toBe(0);       // residual was large enough to also clear HI after the loan
+  });
+
+  test('V3 — a sweepable loan keeps getting accelerated even after HI debt clears (not gated on HI specifically)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      // A 30-year term, sized so schedule-only amortization still has a large
+      // balance left at year 16 (2042) -- leaves real headroom to see the
+      // sweepable variant pull meaningfully ahead.
+      const base = { label:'LongLoan', amount:150000, rate:0.06, months:360, closingEligible:false };
+      // The DEFAULT scenario's annual engine sweeps ~$0 extra in every year (a
+      // known, separate, already-tracked characteristic -- baseDI never clears
+      // the split-protect floor for the default work-income curve, which
+      // fully tapers to $0 by year 8; see the session27 journal's T5 finding).
+      // A sustained higher work-income override plus a low diCap/discFloor/
+      // lifestyleSplit is needed here to free up real surplus for the
+      // avalanche to actually move, isolating THIS test's claim (sweep
+      // continues past HI-clear) from that separate, pre-existing fact.
+      const freeUpSurplus = { diCap:100, discFloor:100, lifestyleSplit:0, workPts:[{yr:0,val:15000}] };
+      const sweepRows = buildScenario(makeParams({ ...freeUpSurplus, loans:[{ ...base, sweepable:true }] }));
+      const schedRows = buildScenario(makeParams({ ...freeUpSurplus, loans:[{ ...base, sweepable:false }] }));
+      const hiClearYear = sweepRows.find(r => r.hiDebt === 0)?.cal;
+      const y = 2042;
+      return {
+        hiClearYear,
+        sweepBal: sweepRows.find(r => r.cal === y).famLoanBal,
+        schedBal: schedRows.find(r => r.cal === y).famLoanBal,
+      };
+    });
+    console.log('  V3 — ' + JSON.stringify(result));
+    expect(result.hiClearYear).toBeLessThan(2042);         // HI clears comfortably before the year we check
+    expect(result.sweepBal).toBeLessThan(result.schedBal); // sweepable loan is materially further paid down than schedule-only
+  });
+
+  test('V4 — a non-sweepable, non-closing-eligible loan is never touched by any debt mechanism (balance invariant to payOffHI)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildScenario, makeParams } = window.__engine;
+      const loan = { label:'Sched', amount:20000, rate:0.06, months:60, sweepable:false, closingEligible:false };
+      const withSweepActive   = buildScenario(makeParams({ loans:[loan], payOffHI:false }));
+      const withNoSweepAtAll  = buildScenario(makeParams({ loans:[loan], payOffHI:true }));
+      return {
+        y2026a: withSweepActive.find(r=>r.cal===2026).famLoanBal, y2026b: withNoSweepAtAll.find(r=>r.cal===2026).famLoanBal,
+        y2028a: withSweepActive.find(r=>r.cal===2028).famLoanBal, y2028b: withNoSweepAtAll.find(r=>r.cal===2028).famLoanBal,
+      };
+    });
+    console.log('  V4 — ' + JSON.stringify(result));
+    // If this loan were ever receiving extra sweep $, payOffHI (which toggles whether
+    // the WHOLE avalanche mechanism runs at all) would change its balance. It doesn't.
+    expect(result.y2026a).toBe(result.y2026b);
+    expect(result.y2028a).toBe(result.y2028b);
+  });
+
+  test('V5 — rankSweepQueue (shared helper) orders entries by rate descending, positive balances only', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { rankSweepQueue } = window.__engine;
+      let a=100, b=200, c=50, d=0;
+      const q = rankSweepQueue([
+        { g:()=>a, s:v=>{a=v;}, r:0.10 },
+        { g:()=>b, s:v=>{b=v;}, r:0.25 },
+        { g:()=>c, s:v=>{c=v;}, r:0.05 },
+        { g:()=>d, s:v=>{d=v;}, r:0.30 },   // zero balance -- must be excluded regardless of its (highest) rate
+      ]);
+      return q.map(e=>e.r);
+    });
+    console.log('  V5 — ' + JSON.stringify(result));
+    expect(result).toEqual([0.25, 0.10, 0.05]);
+  });
+
+  test('V6 — annual and monthly engines agree on the LI-loan total balance for a sweepable custom loan', async ({ page }) => {
+    await loadApp(page);
+    await page.locator('[data-testid="loan-add"]').click();
+    await page.waitForTimeout(300);
+    await page.locator('[data-testid="loan-sweepable-0"]').getByRole('button', { name: 'Sweepable' }).click();
+    await page.waitForTimeout(300);
+    const result = await page.evaluate(() => {
+      const liveRows = window.__liveRows;
+      const wfData = window.__wfData;
+      // Annual's r2027 is a START-of-2027 snapshot (== end of 2026, the v4.3.0
+      // pre-decrement convention) -- match it against wfData's LAST 2026 month
+      // (not the first 2027 month, which would already be one payment further
+      // along), so both sides describe the same real instant.
+      const r2027 = liveRows.find(r => r.cal === 2027);
+      const wfEnd2026 = wfData.filter(r => r.calYear === 2026).slice(-1)[0];
+      return { annual: r2027.famLoanBal, monthly: Math.round((wfEnd2026.loansBal||0) / 1000) };
+    });
+    console.log('  V6 — ' + JSON.stringify(result));
+    expect(Math.abs(result.annual - result.monthly)).toBeLessThanOrEqual(2);
   });
 
 });

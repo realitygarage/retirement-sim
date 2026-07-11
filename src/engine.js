@@ -431,6 +431,66 @@ export function splitResidual(residual, opts={}){
 }
 
 // =============================================================================
+// DEBT TIERING (v4.5.0) -- HI debt (CC/Sophia/Nolan, the named trio) and the
+// generalized loans[] array (LI = low-interest, user-added) share ONE
+// rate-ordered avalanche for both the ongoing surplus-sweep and the one-time
+// property-sale-closing lump-sum. Tier membership is STRUCTURAL, never rate-
+// based: HI is whatever's in the named trio (always closing-eligible and
+// sweepable, hardcoded -- no per-instance flag needed since there's no UI to
+// change it); LI is whatever's in loans[], each carrying its own explicit
+// closingEligible/sweepable flags (both default false for user-added loans).
+// A loan's rate governs PAYDOWN ORDER ONLY -- never which tier it belongs to,
+// and never the "Debt Balances" chart's line grouping (see App.jsx).
+// These three helpers are shared by buildScenario AND wfData (App.jsx) so the
+// avalanche can't diverge between the two engines -- this is deliberately the
+// LAST time this logic is written twice; a v5 single-engine refactor follows,
+// and centralizing it here (rather than re-duplicating the tiering logic
+// inline in both places, the way the pre-v4.5.0 mkDebts/applyPlan/q blocks
+// were) is what makes that collapse simpler later. Do NOT add rate
+// thresholds, payoff optimization, or auto-migration between tiers here --
+// out of scope for this pass, deferred to the v5 refactor.
+// =============================================================================
+
+// Builds the [{key,balance,rate}] list `planHiPaydown` consumes for a ONE-TIME
+// lump-sum payoff (the property-sale-closing routing) -- HI's three named
+// balances (skipped entirely if payOffHI) plus whichever loans[] entries have
+// `eligibleField` set (pass 'closingEligible' here). `hi` is
+// {cc:{bal,rate}, sophia:{bal,rate}, nolan:{bal,rate}}.
+export function buildDebtList(hi, loans, eligibleField, payOffHI){
+  const out=[];
+  if(!payOffHI){
+    if(hi.cc.bal>0)     out.push({key:'cc',     balance:hi.cc.bal,     rate:hi.cc.rate});
+    if(hi.sophia.bal>0) out.push({key:'sophia', balance:hi.sophia.bal, rate:hi.sophia.rate});
+    if(hi.nolan.bal>0)  out.push({key:'nolan',  balance:hi.nolan.bal,  rate:hi.nolan.rate});
+  }
+  for(const L of (loans||[])){
+    if(L[eligibleField] && L.bal>0) out.push({key:'loan:'+L.label, balance:L.bal, rate:L.rate});
+  }
+  return out;
+}
+
+// Applies a planHiPaydown() plan back onto live state -- HI via setter
+// closures (each engine's ccBal/sophiaBal/nolanBal are local `let`s), loans[]
+// entries mutated directly by label-keyed lookup (same as the pre-v4.5.0
+// applyPlan bodies this replaces).
+export function applyDebtPlan(plan, hiSetters, loans){
+  for(const [key,pay] of Object.entries(plan.perDebt||{})){
+    if(key==='cc')          hiSetters.cc(pay);
+    else if(key==='sophia') hiSetters.sophia(pay);
+    else if(key==='nolan')  hiSetters.nolan(pay);
+    else { const L=(loans||[]).find(l=>'loan:'+l.label===key); if(L) L.bal=Math.max(0,L.bal-pay); }
+  }
+}
+
+// Filters an ONGOING sweep queue (entries shaped {g:()=>balance, s:(v)=>void,
+// r:rate}, the getter/setter-closure shape both engines already used pre-
+// v4.5.0) to positive balances, highest-rate-first -- replaces the identical
+// `.filter(o=>o.g()>0).sort((a,b)=>b.r-a.r)` line duplicated in both engines.
+export function rankSweepQueue(entries){
+  return (entries||[]).filter(e=>e.g()>0).sort((a,b)=>b.r-a.r);
+}
+
+// =============================================================================
 // DISPOSITION MODEL (v3.1.0)  --  per-property sale / 1031 tax math
 // =============================================================================
 export const DISPO_DEFAULTS = {
@@ -577,11 +637,20 @@ export function buildScenario(p) {
   let debtClearedYr = p.payOffHI ? BASE.startYear-1 : null;
 
   // v3.2.0 generalized loan segments (replaces famLoanAmt/famLoanRate)
+  // v4.5.0: includeInSweep (one flag, doing double duty for both the ongoing
+  // sweep AND the one-time closing payoff) split into two independent flags --
+  // sweepable (ongoing surplus-sweep) and closingEligible (one-time property-
+  // sale-closing lump-sum). Both default false -- an added loan is LI by
+  // default: simple scheduled amortizing payments only, no acceleration
+  // unless explicitly opted in. These are genuinely amortizing loans (no
+  // mortgage IO/recast machinery) -- the monthly stepping loop below is
+  // unchanged from pre-v4.5.0.
   const loans = (p.loans||[]).map(l=>({
     label:  l.label||'Loan',
     rate:   l.rate||0,
     amount: l.amount||0,
-    includeInSweep: !!l.includeInSweep,
+    sweepable:       !!l.sweepable,
+    closingEligible: !!l.closingEligible,
     pmt:    loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
     // v4.3.0: was `-6`, a magic number that silently assumed absMo=0 was June of
     // startYear (copied from wfData's old hardcoded June anchor) -- now keyed to
@@ -590,7 +659,7 @@ export function buildScenario(p) {
     startAbs: Math.max(0, ((l.startYear||BASE.startYear)-BASE.startYear)*12 + ((l.startMonth||BASE.startMonth)-BASE.startMonth)),
     bal: 0, started:false,
   }));
-  const sweepLoanQ = ()=>loans.filter(L=>L.includeInSweep && L.bal>0)
+  const sweepLoanQ = ()=>loans.filter(L=>L.sweepable && L.bal>0)
     .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
 
   // v4.0.0-A: property-centric mortgage state, one machine per property (see
@@ -812,25 +881,20 @@ export function buildScenario(p) {
       const split = splitResidual(residual, {
         lifestyleDraw: cal===obligYr ? (p.settleLifestyleDraw||0) : 0,
       });
-      const mkDebts = ()=>[
-        ...(!p.payOffHI ? [
-          {key:'cc',     balance:ccBal,     rate:ccRate},
-          {key:'sophia', balance:sophiaBal, rate:sophiaRate},
-          {key:'nolan',  balance:nolanBal,  rate:nolanRate},
-        ]:[]),
-        ...loans.filter(L=>L.includeInSweep && L.bal>0)
-          .map(L=>({key:'loan:'+L.label, balance:L.bal, rate:L.rate})),
-      ];
-      const applyPlan = (plan)=>{
-        for(const [key,pay] of Object.entries(plan.perDebt)){
-          if(key==='cc')          ccBal     = Math.max(0, ccBal-pay);
-          else if(key==='sophia') sophiaBal = Math.max(0, sophiaBal-pay);
-          else if(key==='nolan')  nolanBal  = Math.max(0, nolanBal-pay);
-          else { const L=loans.find(l=>'loan:'+l.label===key); if(L) L.bal=Math.max(0,L.bal-pay); }
-        }
-      };
-      const plan = planHiPaydown(split.remainder, mkDebts());
-      applyPlan(plan);
+      // v4.5.0: mkDebts/applyPlan (identically duplicated in wfData below)
+      // replaced by the shared buildDebtList/applyDebtPlan helpers -- the
+      // one-time closing lump-sum now gates loan inclusion on
+      // `closingEligible` specifically (was the SAME `includeInSweep` flag
+      // the ongoing sweep used -- now two independent flags). HI debt is
+      // always closing-eligible (hardcoded, unchanged behavior).
+      const plan = planHiPaydown(split.remainder, buildDebtList(
+        {cc:{bal:ccBal,rate:ccRate}, sophia:{bal:sophiaBal,rate:sophiaRate}, nolan:{bal:nolanBal,rate:nolanRate}},
+        loans, 'closingEligible', p.payOffHI));
+      applyDebtPlan(plan, {
+        cc:     pay=>{ccBal     = Math.max(0, ccBal-pay);},
+        sophia: pay=>{sophiaBal = Math.max(0, sophiaBal-pay);},
+        nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
+      }, loans);
       // v3.4.0: the waterfall remainder passes through the mortgage-principal
       // bucket (capped per month) before landing in sweep savings.
       let survivor = split.remainder - plan.total;
@@ -866,6 +930,16 @@ export function buildScenario(p) {
     // not the sweep-PACE half.
     const hiDebt = p.payOffHI?0:(ccBal+sophiaBal+nolanBal);
     if(hiDebt<=0 && !debtCleared){ debtCleared=true; debtClearedYr=cal; }
+    // v4.5.0: same start-of-year snapshot timing as hiDebt, for the SAME
+    // reason -- the `accel`/`debtSweep` row field below needs to know whether
+    // there's any sweepable debt (HI or LI) to gate on, not just HI, or the
+    // displayed sweep total would silently drop to 0 the moment HI clears
+    // even while a sweepable loan is still visibly being paid down faster
+    // than schedule (loopDebt inside the mo-loop already reflects this
+    // correctly for the actual balances -- this is the matching fix for the
+    // row-level REPORTED total). hiDebt itself stays HI-only, unchanged --
+    // still the correct basis for the "HI debt clear" milestone above.
+    const sweepableLoanBal = p.payOffHI?0:loans.reduce((s,L)=>s+(L.sweepable?L.bal:0),0);
 
     // v4.3.0: this row's period length -- monthsThisYear<12 only for yr=0 (a
     // genuine partial first period). Every "$/mo rate -> this period's total"
@@ -1113,18 +1187,25 @@ export function buildScenario(p) {
         if(ccBal>0){    ccBal    =Math.max(0,ccBal   *(1+ccRate/12)   -_minCC0); }
         if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate/12)-_minSoph0);}
         if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
-        loopDebt=ccBal+sophiaBal+nolanBal;
+        // v4.5.0: was HI-only (ccBal+sophiaBal+nolanBal) -- now also counts
+        // sweepable loans[], so the avalanche below (and the mortgage-
+        // principal bucket's fromSurplus check just below) keeps sweeping a
+        // sweepable LI loan even after HI clears, instead of the sweep
+        // permanently going to 0 the moment HI's own balance hits 0.
+        loopDebt=ccBal+sophiaBal+nolanBal+loans.reduce((s,L)=>s+(L.sweepable?L.bal:0),0);
       }
       const _avail = (_incMoBase + _ssMo - _fixedMoNoHealth - _hlthMo - _mtgMo) - _minsMo - _loanMo;
       const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
       if(!p.payOffHI){
         xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
-        const q=[
+        // v4.5.0: .filter().sort() replaced by the shared rankSweepQueue --
+        // same {g,s,r} shape, same behavior, just no longer duplicated inline.
+        const q=rankSweepQueue([
           {g:()=>ccBal,    s:(v)=>{ccBal=v;},    r:ccRate},
           {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;}, r:sophiaRate},
           ...(nolanActive?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate}]:[]),
           ...sweepLoanQ(),
-        ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
+        ]);
         for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
       }
       // -- v3.4.0 mortgage-principal bucket (annual mirror): fed by leftover
@@ -1184,11 +1265,20 @@ export function buildScenario(p) {
     const baseOut=mtgPmt+healthAnnual+irmaaAdd+propCost+core+maint+famLoanAnnual+minDebt+taxAnnual;
     const baseDI =totalIncome-baseOut;
     const splitProtect = Math.max(p.diCap*monthsThisYear, baseDI*(p.lifestyleSplit/100));
-    const accel  =(!p.payOffHI&&hiDebt>0)?Math.max(0,baseDI-splitProtect):0;
+    // v4.5.0: hiDebt>0 -> (hiDebt>0||sweepableLoanBal>0) -- see the note above sweepableLoanBal.
+    const accel  =(!p.payOffHI&&(hiDebt>0||sweepableLoanBal>0))?Math.max(0,baseDI-splitProtect):0;
     const surplusAboveProtect = Math.max(0, baseDI - splitProtect);
     // v3.2.0: waterfall survivor of the sale-year remainder counts as sweep savings.
     // v3.4.0: minus whatever the mortgage-principal bucket took from that surplus.
-    const annualSweepToSav = Math.max(0, (debtCleared ? surplusAboveProtect : 0) - mtgExtraFromSurplusYr) + (wfSavByYear[cal]||0);
+    // v4.5.0: was `debtCleared` (HI-only, cumulative) -- must be the exact
+    // complement of accel's condition above (same hiDebt/sweepableLoanBal
+    // check, but per-row, not cumulative) or the same surplus dollars get
+    // double-counted as BOTH debt-sweep (accel) AND sweep-to-savings in a
+    // year where HI is cleared but a sweepable loan still has a balance.
+    // (debtCleared itself remains correct and unchanged for the HI-only
+    // "debt clear" milestone above -- only this savings-routing gate needed
+    // broadening.)
+    const annualSweepToSav = Math.max(0, ((!p.payOffHI&&(hiDebt>0||sweepableLoanBal>0)) ? 0 : surplusAboveProtect) - mtgExtraFromSurplusYr) + (wfSavByYear[cal]||0);
     const totalOut=baseOut+accel;
     const surplus =totalIncome-totalOut;
     // v4.1.5: chart-only FCF value that (a) excludes the one-time settlement

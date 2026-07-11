@@ -107,9 +107,13 @@ export function freshObligationDefaults(){
 // -----------------------------------------------------------------------------
 // LOANS (v3.2.0) -- generalized loan segments, unrelated to the v4 property
 // schema change; unchanged.
+// v4.5.0: includeInSweep split into two independent flags -- sweepable
+// (ongoing surplus-sweep) and closingEligible (one-time property-sale-
+// closing lump-sum). Both default false -- an added loan is LI (low-interest,
+// simple amortizing, no HI-style acceleration) unless explicitly opted in.
 // -----------------------------------------------------------------------------
 export const DEFAULT_LOANS_SC = [
-  { label:'Family loan', amount:25_000, startYear:2026, startMonth:6, months:8, rate:7.5, includeInSweep:false },
+  { label:'Family loan', amount:25_000, startYear:2026, startMonth:6, months:8, rate:7.5, sweepable:false, closingEligible:false },
 ];
 
 // =============================================================================
@@ -195,7 +199,7 @@ export function makeParams(overrides={}){
 }
 
 export const PIN_COLORS = ["#f59e0b","#f472b6","#34d399","#60a5fa","#a78bfa","#fb923c"];
-export const SAVE_SCHEMA_VERSION = 5;  // v4.4.0: schema break -- ssAge replaced by per-spouse ssStartYear/Month, no back-compat
+export const SAVE_SCHEMA_VERSION = 6;  // v4.5.0: schema break -- loans[].includeInSweep replaced by sweepable+closingEligible, no back-compat
 
 // =============================================================================
 // SC_DEFAULTS  --  UI-facing scenario snapshot (rates as %, ints where UI is int)

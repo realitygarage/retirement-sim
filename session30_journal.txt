@@ -1,0 +1,172 @@
+=== SESSION 30 JOURNAL — v4.5.0 (Debt Tiering, Minimal Schema-First Pass) ===
+
+Date: 2026-07-10
+
+Session goal: the debt model was binary -- debt was either "HI debt" (CC/
+Sophia/Nolan: revolving, aggressive avalanche, paid off at property-sale
+closing) or a mortgage. Adding a generalized loan wrongly dumped it into the
+HI bucket's treatment. User asked for a MINIMAL schema-first pass: add
+per-loan closingEligible/sweepable flags with smart defaults, a single
+unified rate-ordered avalanche spanning all debt, and a retitled "Debt
+Balances" chart showing HI and LI as two distinct line groups -- explicitly
+NOT a rate-threshold system, NOT payoff optimization, and explicitly the
+LAST time this logic gets written twice before a v5 single-engine refactor.
+
+--- DESIGN (before writing code) ---
+
+Read session29 first per house convention. Investigated the existing debt
+machinery in both engines (via a research-only Explore agent) before
+touching anything: HI (CC/Sophia/Nolan) are three named scalars, not part of
+the generalized loans[] array; the ONLY existing per-loan flag was
+`includeInSweep`, which did DOUBLE DUTY -- it gated BOTH the ongoing monthly
+sweep queue AND the one-time property-sale-closing lump-sum payoff (same
+flag, same filter, in both mkDebts() call sites). The sweep queue itself was
+ALREADY a single rate-ordered array spanning HI + sweepable loans (a nice
+pre-existing property) -- what was actually missing was making closing-
+eligibility and sweep-eligibility two INDEPENDENT flags, and fixing the
+chart/breakdown display to show LI loans as their own distinct group instead
+of a single combined "Loans: X" row squeezed between the HI trio and "Total
+HI debt" (i.e., visually reading as if it were part of HI).
+
+Key design decision: did NOT migrate CC/Sophia/Nolan into the generalized
+loans[] array. HI stays exactly what it already was (three named scalars,
+hardcoded always-closingEligible/always-sweepable, matching current
+unconditional behavior) -- LI is simply "whatever's in loans[]". This kept
+tier membership purely structural (as the user required -- "no rate
+threshold sorts loans into tiers") with zero risk to the six Group G tests
+that assert on literal "Credit card"/"Sophia loans"/"Nolan loans" labels,
+and avoided a much bigger, unrequested data-model migration.
+
+--- WHAT SHIPPED (v4.5.0) ---
+
+engine.js:
+- loans[] construction (both engines): `includeInSweep` split into two
+  independent flags -- `sweepable` (ongoing surplus-sweep) and
+  `closingEligible` (one-time property-sale-closing lump-sum). Both default
+  false for added loans; HI's equivalent is hardcoded true/true (unchanged
+  behavior, no per-instance flag needed since there's no UI to toggle it).
+- Three new shared helpers (used by BOTH buildScenario and wfData, replacing
+  duplicated inline mkDebts/applyPlan/q-filter-sort blocks): `buildDebtList`
+  (builds the [{key,balance,rate}] list for the one-time closing payoff,
+  gated on `closingEligible`), `applyDebtPlan` (applies a planHiPaydown()
+  plan back onto HI setters + loans[] by key), `rankSweepQueue` (the
+  filter-positive+sort-by-rate-descending step for the ongoing sweep queue,
+  now gated on `sweepable`). Deliberately the LAST time this logic is
+  written twice -- centralizing it here is meant to make the upcoming v5
+  single-engine collapse simpler.
+- Real correctness fix surfaced by testing, not by the user's spec directly:
+  the sweep-continuation gate (`xtra=loopDebt>0?...`in buildScenario,
+  `hasDebt=hiDebtNow>0` in wfData) was HI-ONLY -- meaning once HI debt hit
+  $0, the entire avalanche mechanism stopped forever, even for a still-
+  outstanding sweepable LI loan. Broadened both to
+  `hiBalance>0||anySweepableLoanBalance>0`, and found + fixed a matching
+  double-count in buildScenario's `annualSweepToSav` (which used the
+  cumulative HI-only `debtCleared` flag as accel's complement -- once
+  broadened, the same surplus dollars were being counted as BOTH debt-sweep
+  AND sweep-to-savings in a year where HI cleared but a sweepable loan
+  hadn't). Fixed by using the identical per-row broadened condition (not
+  cumulative) as accel's negation. hiDebt/debtCleared/hiDebtNow themselves
+  stay HI-only and untouched -- still correct for the "HI debt clear"
+  milestone, which is deliberately unaffected by LI loans.
+
+App.jsx:
+- "HI Debt Balance ($K)" chart retitled "Debt Balances ($K)" -- now shows
+  exactly 2 lines (per explicit user instruction, NOT one per loan): the HI
+  trio (main line, unchanged dataKey/pinKey/chartId to avoid touching pin
+  data plumbing) and famLoanBal (LI total, already an unconditional sum
+  across loans[] regardless of tier flags) as a secondary line.
+- Two real bugs found via the user's own manual testing (not caught by any
+  automated test) after the chart change:
+  1. `chartData` (the actual per-chart plotting dataset, distinct from
+     `liveRows`) builds its per-row object as an EXPLICIT FIELD ALLOWLIST,
+     not a spread of the underlying row -- `famLoanBal` was never copied
+     in, so the new LI-loans line's legend/tooltip rendered correctly but
+     the line itself had no data at all (invisible). Fixed by adding
+     `famLoanBal:r.famLoanBal` to that allowlist.
+  2. The shared `<Chart>` component had TWO FCF-chart-specific hardcodes
+     that had been harmless only because FCF was the sole chart with a
+     secondaryDataKey before this session: a tooltip/header-legend rewrite
+     hardcoded to always show "Free Cash" for the main line whenever
+     ANY secondaryDataKey was set (regardless of which chart), and a
+     pinned-scenario secondary line hardcoded to the literal key/label
+     "_sweep"/"sweep". Both generalized: new `mainName` prop (FCF chart
+     passes "Free Cash" explicitly, Debt Balances passes "HI debt", exact
+     old FCF behavior preserved byte-for-byte) and new `pinSecondaryKey`
+     prop (opt-in per chart -- FCF passes "sweep" preserving its existing
+     chartData pin_X_sweep field unchanged; Debt Balances doesn't pass it,
+     so it simply renders no pin-comparison LI line rather than a wrongly-
+     labeled empty one -- pin comparison for LI loans wasn't requested).
+- BREAKDOWNS.hiDebt table: HI trio + "Total HI debt" now grouped together,
+  THEN a separate LI row -- reordered so LI no longer visually reads as part
+  of HI. LI row label kept DYNAMIC ("LI loans: <name1>, <name2>, ..."), not
+  a static "Total LI loans" -- per explicit user correction mid-session
+  (first pass used a static label and lost the actual loan name(s), which
+  broke an existing test (G5) that located a row by "Family loan" text and
+  also genuinely regressed identifiability once more than one loan exists).
+  The CHART's own legend/tooltip label stays a clean static "LI loans"
+  (2-line design, not per-loan) -- the dynamic name list lives in the
+  breakdown table only, per explicit user clarification.
+- Loans & Debt sidebar: new second toggle per loan row ("Retire at
+  property-sale closing") alongside the renamed first toggle ("Join ongoing
+  debt-sweep avalanche"), both with data-testid for stable test targeting.
+  Description text above the loan list rewritten to explain both flags.
+- SAVE_SCHEMA_VERSION bumped 5->6 (loans[].includeInSweep renamed) -- old
+  pins discarded, not migrated, per project convention.
+
+--- BUGS FOUND VIA USER'S OWN MANUAL TESTING, NOT AUTOMATED TESTS ---
+
+This session is a good example of why the user asked (mid-session) to be
+prompted to manually spot-check BEFORE the full regression suite runs: the
+automated Group V suite (7 new tests) all passed on the first run using
+`buildScenario`/`makeParams` directly -- but the two real UI bugs above (the
+missing chartData field, the two FCF-hardcoded Chart internals) were only
+caught because the user actually looked at the rendered graph in a browser
+and noticed the LI line wasn't showing. Neither bug involved wrong NUMBERS
+(the underlying engine math was already correct, confirmed by Group V) --
+they were purely UI-wiring gaps between the correct engine output and the
+chart's own internal plumbing, which is exactly the kind of thing automated
+engine-level tests don't catch and a 30-second visual check does. Saved as a
+standing feedback memory (feedback_version_bump.md) for future sessions.
+
+--- VERIFICATION ---
+
+npm run lint: 30 problems (same as the v4.4.0 baseline) -- net zero new
+lint issues.
+npm run build: clean, no errors, both times (once mid-session after the
+initial debt-tiering pass, once again after all the chart-bug fixes).
+Full Playwright suite: 110/110 passed on the final run (after fixing 3
+issues surfaced by the FIRST full run this session -- S1's hardcoded old
+chart title, and two more subtle collisions: my own new prose text
+containing the word "never" collided with K2's loose `/debt.*Never/i`
+regex (matched across the ENTIRE flattened page text, not scoped to any
+specific status field) -- reworded the prose rather than loosening the
+test; and G5's row-locator broke when the LI breakdown label was briefly
+made static instead of dynamic, as noted above).
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Per the user's explicit scope discipline instruction, do NOT add: rate
+   thresholds for tier assignment, payoff optimization/prioritization
+   beyond simple rate order, or automatic tier migration. If a future
+   session is tempted, that's a v5 item -- flag it, don't build it here.
+2. Brenda's SS $ formula (session29) and LI loans' $ amount (this session)
+   share the same "flat amount regardless of timing/tier flags" pattern by
+   deliberate scope decision, not oversight -- both would need new real
+   input data (an early-claim $ figure for Brenda; nothing analogous is
+   needed for LI loans since they're just amortizing) to go further.
+3. The v5 single-engine refactor (mentioned throughout this session as the
+   reason to centralize debt-tiering helpers now) is NOT started -- this
+   session's shared buildDebtList/applyDebtPlan/rankSweepQueue helpers are
+   preparation for it, not a first step of it. buildScenario and wfData are
+   still two separate, hand-synchronized implementations.
+4. The chartData explicit-allowlist pattern (`pt={...specific fields...}`,
+   not a spread) is worth remembering for ANY future new chart field: adding
+   a new row field to buildScenario/wfData is NOT sufficient by itself for
+   it to show up on a chart -- it also needs a matching entry added to
+   chartData's `pt` object (App.jsx, the chartData useMemo), or the chart
+   legend will render but the line will silently have no data. This bit
+   this session once already; the next new debt-chart-adjacent field should
+   check chartData explicitly rather than assuming liveRows -> chart is
+   automatic.
+5. This session's diff has NOT been pushed yet as of this journal entry --
+   commit is ready pending the user's final go-ahead per house workflow.

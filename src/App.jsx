@@ -1,3 +1,26 @@
+// v4.5.0 -- debt tiering: per-loan closing/sweep flags, rate-ordered unified paydown queue,
+// LI loans distinct on graph. Every debt now carries two independent per-loan flags --
+// closingEligible (retired by the one-time property-sale-closing lump sum) and sweepable
+// (joins the ongoing surplus-sweep avalanche) -- replacing the single includeInSweep flag
+// that used to gate both. HI debt (CC/Sophia/Nolan, the named trio) is always both,
+// hardcoded, unchanged behavior; added (LI) loans default to neither. Tier membership is
+// STRUCTURAL (HI = the named trio; LI = whatever's in loans[]), never rate-based -- a
+// loan's rate governs payoff ORDER only. Both engines' one-time closing payoff and ongoing
+// sweep queue now route through shared engine.js helpers (buildDebtList/applyDebtPlan/
+// rankSweepQueue) instead of duplicated inline mkDebts/applyPlan/q blocks -- deliberately
+// the LAST time this logic is written twice; a v5 single-engine refactor collapses
+// buildScenario/wfData into one next. The "HI Debt Balance" chart is retitled "Debt
+// Balances" and now shows exactly 2 lines (HI debt, LI loans total) -- required adding
+// famLoanBal to chartData's explicit field allowlist (it was silently absent, so the new
+// LI line initially had a working legend but no actual data) and generalizing two
+// FCF-chart-specific hardcodes in the shared Chart component (a "Live"->"Free Cash"
+// tooltip/legend rewrite, and a "_sweep"-suffixed pin-comparison line) via new mainName/
+// pinSecondaryKey props so they don't misfire on other charts with a secondary line.
+// SAVE_SCHEMA_VERSION bumped (loans[].includeInSweep renamed) -- old pins discarded, not
+// migrated, per project convention. Deliberately minimal ahead of the v5 refactor -- no
+// rate thresholds, payoff optimization, or tier auto-migration; richer debt logic (e.g. an
+// early/delayed $ formula for Brenda-equivalent loan scenarios, per-individual-loan chart
+// lines) is explicitly deferred to post-v5.
 // v4.4.0 -- birth-date anchor, per-spouse SS year+month with derived age, Medicare/FRA
 // derived from birth date. BASE.yourBirthYear/Month (Bob, Oct 18 1961) and
 // BASE.brendaBirthYear/Month (Brenda, Jan 19 1967) are now the single source of truth
@@ -58,7 +81,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors } from "./engine.js";
+import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
 // v4.3.0: BASE.startYear/startMonth (imported above) are the single source
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
@@ -79,6 +102,7 @@ if (typeof window !== 'undefined') {
     freshPropertiesDefaults, freshObligationDefaults,
     monthsInYear, monthsElapsedBeforeYear,
     ssClaimAge, deriveAgeAnchors, healthMonthly,
+    buildDebtList, applyDebtPlan, rankSweepQueue,
   };
 }
 // v4.4.0: month-name labels for the SS/Medicare month-precision UI (year+month
@@ -541,9 +565,13 @@ export default function App(){
     const _paidYears = new Set();  // years where HI paydown has been applied
 
     // v3.2.0 generalized loans -- monthly state (rates already decimal in liveParams)
+    // v4.5.0: includeInSweep split into two independent flags -- sweepable
+    // (ongoing surplus-sweep) and closingEligible (one-time property-sale-
+    // closing lump-sum) -- see the identical note in engine.js's buildScenario.
     const _loans = (liveParams.loans||[]).map(l=>({
       label: l.label||'Loan', rate: l.rate||0, amount: l.amount||0,
-      includeInSweep: !!l.includeInSweep,
+      sweepable:       !!l.sweepable,
+      closingEligible: !!l.closingEligible,
       pmt: loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
       // v4.3.0: keyed to BASE.startYear/startMonth (was hardcoded 2026/6, which
       // only happened to match this engine's OLD hardcoded June startDate below --
@@ -552,7 +580,7 @@ export default function App(){
       startAbs: Math.max(0, ((l.startYear||BASE.startYear)-BASE.startYear)*12 + ((l.startMonth||BASE.startMonth)-BASE.startMonth)),
       bal: 0, started:false, startAnnounced:false, payoffAnnounced:false,
     }));
-    const _sweepLoanQ = ()=>_loans.filter(L=>L.includeInSweep && L.bal>0)
+    const _sweepLoanQ = ()=>_loans.filter(L=>L.sweepable && L.bal>0)
       .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
 
     // v4.0.0-A mortgage state, one machine per property (generalized from the
@@ -632,26 +660,20 @@ export default function App(){
           // v4.3.0: BASE.startYear (was hardcoded 2026) -- same fallback fix as above.
           lifestyleDraw: calYear===((liveParams.obligation||{}).year||BASE.startYear) ? (liveParams.settleLifestyleDraw||0) : 0,
         });
-        const mkDebts = ()=>[
-          ...(!payOffHI ? [
-            {key:'cc',     balance:ccBal,     rate:ccRate_},
-            {key:'sophia', balance:sophiaBal, rate:sophiaRate_},
-            {key:'nolan',  balance:nolanBal,  rate:nolanRate_},
-          ]:[]),
-          ..._loans.filter(L=>L.includeInSweep && L.bal>0)
-            .map(L=>({key:'loan:'+L.label, balance:L.bal, rate:L.rate})),
-        ];
-        const applyPlan = (plan)=>{
-          for(const [key,pay] of Object.entries(plan.perDebt)){
-            if(key==='cc')          ccBal     = Math.max(0, ccBal-pay);
-            else if(key==='sophia') sophiaBal = Math.max(0, sophiaBal-pay);
-            else if(key==='nolan')  nolanBal  = Math.max(0, nolanBal-pay);
-            else { const L=_loans.find(l=>'loan:'+l.label===key); if(L) L.bal=Math.max(0,L.bal-pay); }
-          }
-        };
+        // v4.5.0: mkDebts/applyPlan replaced by the shared buildDebtList/
+        // applyDebtPlan helpers (engine.js) -- identical change as
+        // buildScenario's, so the two engines' closing-payoff routing can't
+        // diverge. Gates loan inclusion on closingEligible (was the SAME
+        // includeInSweep flag the ongoing sweep used).
         // (b) debt-first: avalanche-pay the FULL remainder against HI debt/loans
-        const plan = planHiPaydown(split.remainder, mkDebts());
-        applyPlan(plan);
+        const plan = planHiPaydown(split.remainder, buildDebtList(
+          {cc:{bal:ccBal,rate:ccRate_}, sophia:{bal:sophiaBal,rate:sophiaRate_}, nolan:{bal:nolanBal,rate:nolanRate_}},
+          _loans, 'closingEligible', payOffHI));
+        applyDebtPlan(plan, {
+          cc:     pay=>{ccBal     = Math.max(0, ccBal-pay);},
+          sophia: pay=>{sophiaBal = Math.max(0, sophiaBal-pay);},
+          nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
+        }, _loans);
         _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
         // (c) whatever debt didn't absorb fills reserves/buckets to caps
         let rem = split.remainder - plan.total;
@@ -793,7 +815,13 @@ export default function App(){
       const surplusAboveFloor = Math.max(0, afterBuckets - cfSplitProtect);
       // While in debt: surplus sweeps debt. When clear: same amount goes to savings.
       // v3.2.0: the sale-month waterfall remainder joins whichever side applies.
-      const hasDebt = hiDebtNow > 0;
+      // v4.5.0: was hiDebtNow>0 only (HI-only) -- now also true while a
+      // sweepable LI loan still has a balance, so the sweep doesn't
+      // permanently stop the moment HI clears if a sweepable loan is still
+      // outstanding. hiDebtNow ITSELF stays HI-only (unchanged) -- it's still
+      // used below for the HI-specific debtClearedMo/hiDebtEnd fields, which
+      // must keep meaning "HI debt" specifically, not this broader tiering.
+      const hasDebt = hiDebtNow > 0 || _loans.some(L=>L.sweepable && L.bal>0);
       const sweep = hasDebt ? surplusAboveFloor + maintRedirect + _oneTimeSweep : 0;
       const _oneTimeToSavings = hasDebt ? 0 : _oneTimeSweep;
 
@@ -806,14 +834,15 @@ export default function App(){
       if(ccBal>0)    {ccBal    =Math.max(0,ccBal    *(1+ccRate_/12)    -minCC);}
       if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate_/12)-minSoph);}
       if(nolanOn&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate_/12)-minNol);}
-      // Avalanche sweep (only runs while in debt)
+      // Avalanche sweep (only runs while in debt -- see hasDebt/sweep above)
+      // v4.5.0: .filter().sort() replaced by the shared rankSweepQueue (engine.js).
       let xtra=sweep;
-      const q=[
+      const q=rankSweepQueue([
         {g:()=>ccBal,    s:(v)=>{ccBal=v;},     r:ccRate_},
         {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;},  r:sophiaRate_},
         ...(nolanOn?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate_}]:[]),
-        ..._sweepLoanQ(),   // v3.2.0: includeInSweep loans join the avalanche by rate
-      ].filter(o=>o.g()>0).sort((a,b)=>b.r-a.r);
+        ..._sweepLoanQ(),   // v4.5.0: sweepable loans join the avalanche by rate
+      ]);
       for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
 
       // Post-debt: redirect surplus-above-floor to savings (after grace period)
@@ -1040,6 +1069,13 @@ export default function App(){
         sweepSavK:savAccK,
         sweepToSavings:sweep,
         combinedSweep,
+        // v4.5.0: chartData is an explicit allowlist (not a spread of liveRows'
+        // r), so a chart reading a NEW secondaryDataKey needs its field added
+        // here explicitly too, or the line has no data to plot even though
+        // the legend still renders (exactly what happened before this fix --
+        // the Debt Balances chart's "LI loans" line/legend showed up but was
+        // empty because famLoanBal was never copied into chartData).
+        famLoanBal:r.famLoanBal,
         // NW breakdown fields (from annual engine, $K units — same as liveRows)
         reValue:r.reValue, reMortgage:r.reMortgage, reEquity:r.reEquity,
         hiDebtK:r.hiDebtK, invested:r.invested, savingsAccK:savAccK};
@@ -1151,7 +1187,7 @@ export default function App(){
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
     return Math.ceil(raw/mag)*mag;
   },[chartData]);
-  // True debt-clear year -- matches the HI Debt Balance chart's own zero-crossing
+  // True debt-clear year -- matches the Debt Balances chart's own zero-crossing
   // (same hiDebt series it plots), independent of the grace-period delay below.
   const debtClearYear = useMemo(()=>
     (chartData||[]).find(r=>(r.hiDebt||0)<=0)?.year ?? null,
@@ -1490,21 +1526,35 @@ export default function App(){
         {key:"core",      label:"Core living",    color:"#f97316", cost:true},
         {key:"maint",     label:"Maintenance",    color:"#ef4444", cost:true},
         {key:"minDebt",      label:"HI debt mins",  color:"#dc2626", cost:true},
-        {key:"debtSweep",    label:"HI debt sweep",  color:"#b91c1c", cost:true, hideZero:true},
+        // v4.5.0: was "HI debt sweep" -- the unified avalanche can now also
+        // accelerate a sweepable LI loan, so this total is no longer HI-only.
+        {key:"debtSweep",    label:"Debt sweep (HI+LI)",  color:"#b91c1c", cost:true, hideZero:true},
         {key:"surplus",   label:"Free Cash (net)",color:"#34d399", bold:true},
       ],
       note:"Income items build up; cost items reduce it. Net = what's left after everything.",
     },
+    // v4.5.0: retitled (was "HI Debt -- by loan type") and reordered so the
+    // two treatment TIERS read as two visually distinct groups -- the HI
+    // trio + its own "Total HI debt" subtotal, THEN a separate "Total LI
+    // loans" subtotal -- instead of famLoanBal sitting between the trio and
+    // the HI total as if it were part of HI. Grouping is by tier membership
+    // (HI = the named trio; LI = loans[]), never a rate cutoff -- a loan's
+    // rate never decides which group it's counted in here.
     hiDebt: {
-      label:"HI Debt -- by loan type ($K)",
+      label:"Debt Balances -- by loan type ($K)",
       series:[
         {key:"ccBal",      label:"Credit card",   color:"#f87171"},
         {key:"sophiaBal",  label:"Sophia loans",  color:"#fb923c"},
         {key:"nolanBal",   label:"Nolan loans",   color:"#fbbf24"},
-        {key:"famLoanBal", label:loans.length?("Loans: "+loans.map(l=>l.label).join(", ")):"Loans", color:"#a78bfa", hideZero:true},
         {key:"hiDebt",     label:"Total HI debt", color:"#ef4444", bold:true},
+        // v4.5.0: prefixed "LI loans:" (was a plain "Total HI debt"-style
+        // static label) -- keeps the actual loan name(s) visible (there can
+        // be more than one), not just the tier total, while still reading as
+        // its own distinct LI subtotal instead of "Loans: X" sitting inside
+        // the HI group the way it used to.
+        {key:"famLoanBal", label:loans.length?("LI loans: "+loans.map(l=>l.label).join(", ")):"LI loans", color:"#a78bfa", bold:true, hideZero:true},
       ],
-      note:"Avalanche method: highest rate first. CC (14%) attacked first, then Nolan (8.4%), then Sophia (8.1%). Family loan shown at start-of-year balance (paid off within 2026, not included in Total HI debt).",
+      note:"Two tiers, one rate-ordered avalanche: HI debt (CC/Sophia/Nolan) is always closing-eligible and sweepable. Added (LI) loans are simple scheduled amortizing payments unless individually marked sweepable and/or closing-eligible -- tier membership depends only on which set a loan belongs to, not its rate.",
     },
     fixedCosts: {
       label:"Fixed Costs / mo -- breakdown",
@@ -1536,7 +1586,7 @@ export default function App(){
     },
   };
 
-  const Chart=({title,dataKey,pinKey,color,unit,refLines,yFmt,chartId,yDomain,secondaryDataKey,secondaryColor,secondaryName,tertiaryDataKey,tertiaryColor,tertiaryName,quaternaryDataKey,quaternaryColor,quaternaryName,headerExtra})=>{
+  const Chart=({title,dataKey,pinKey,color,unit,refLines,yFmt,chartId,yDomain,mainName,secondaryDataKey,secondaryColor,secondaryName,pinSecondaryKey,tertiaryDataKey,tertiaryColor,tertiaryName,quaternaryDataKey,quaternaryColor,quaternaryName,headerExtra})=>{
     const isExpanded = expandedChart===chartId;
     const bd = BREAKDOWNS[chartId];
     const fmt = yFmt||(v=>v>=1000?`${(v/1000).toFixed(0)}K`:v);
@@ -1560,7 +1610,11 @@ export default function App(){
             {headerExtra}
             {secondaryDataKey&&<div style={{display:"flex",alignItems:"center",gap:6,fontSize:9,color:dim}}>
               <svg width="14" height="4"><line x1="0" y1="2" x2="14" y2="2" stroke={color} strokeWidth="2.5"/></svg>
-              <span>Free Cash</span>
+              {/* v4.5.0: was a hardcoded "Free Cash" -- correct for the FCF
+                  chart alone, but this header row renders for ANY chart with
+                  a secondaryDataKey now (Debt Balances too), so it needs the
+                  same mainName prop the tooltip/Line below already use. */}
+              <span>{mainName||"Live"}</span>
               <svg width="14" height="4" style={{marginLeft:4}}><line x1="0" y1="2" x2="14" y2="2" stroke={secondaryColor||blue} strokeWidth="1.5" strokeDasharray="4 2"/></svg>
               <span>{secondaryName||"→ Swept"}</span>
             </div>}
@@ -1607,7 +1661,13 @@ export default function App(){
                 const terLabel = tertiaryName||"Surplus";
                 if(name===secLabel||name===secondaryDataKey||name.endsWith("_sweep")) return [fmtV, secLabel];
                 if(tertiaryDataKey&&(name===terLabel||name===tertiaryDataKey)) return [fmtV, terLabel];
-                if(name==="Live") return [fmtV, "Free Cash"];
+                // v4.5.0: was a hardcoded `if(name==="Live") return [fmtV,"Free
+                // Cash"]` here -- correct for the FCF chart (its main line
+                // really is "Free Cash"), but wrong once a second chart (Debt
+                // Balances) also got a secondaryDataKey, since this rewrite
+                // wasn't scoped to any particular chart. The main line's own
+                // `name` (mainName below, defaulting to "Live") now carries
+                // the right label directly, so no rewrite is needed here.
               }
               return [fmtV, name];
             }}/>
@@ -1619,14 +1679,22 @@ export default function App(){
             ))}
             {showLive&&<Line type="monotone" dataKey={dataKey}
               stroke={color} strokeWidth={2.5} dot={false}
-              isAnimationActive={false} name="Live"/>}
+              isAnimationActive={false} name={mainName||"Live"}/>}
             {showLive&&secondaryDataKey&&<Line type="monotone" dataKey={secondaryDataKey}
               stroke={secondaryColor||"#60a5fa"} strokeWidth={1.5} strokeDasharray="5 3" dot={false}
               isAnimationActive={false} name={secondaryName||secondaryDataKey}/>}
-            {secondaryDataKey&&pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
-              <Line key={`${pin.id}_sweep`} type="monotone" dataKey={`pin_${pin.id}_sweep`}
+            {/* v4.5.0: pinSecondaryKey (was hardcoded "_sweep"/"sweep" -- only
+                ever correct for the FCF chart's Sweep line). Opt-in per chart
+                (FCF passes pinSecondaryKey="sweep", matching its existing
+                chartData pin_X_sweep field unchanged) so a chart that hasn't
+                wired up a per-pin secondary field (e.g. Debt Balances' LI
+                loans -- not requested for pin comparison, only the live line)
+                simply renders no pin secondary line, instead of a wrongly-
+                labeled empty one. */}
+            {secondaryDataKey&&pinSecondaryKey&&pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
+              <Line key={`${pin.id}_${pinSecondaryKey}`} type="monotone" dataKey={`pin_${pin.id}_${pinSecondaryKey}`}
                 stroke={pin.color} strokeWidth={1} strokeDasharray="2 4" dot={false}
-                isAnimationActive={false} name={`${pin.name} sweep`}/>
+                isAnimationActive={false} name={`${pin.name} ${secondaryName||pinSecondaryKey}`}/>
             ))}
             {showLive&&tertiaryDataKey&&<Line type="monotone" dataKey={tertiaryDataKey}
               stroke={tertiaryColor||"#f59e0b"} strokeWidth={1} strokeDasharray="2 2" dot={false}
@@ -1859,7 +1927,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.4.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.5.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2277,15 +2345,18 @@ export default function App(){
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Loans</span>
                 <button data-testid="loan-add"
-                  onClick={()=>setLoans(list=>[...list,{label:`Loan ${list.length+1}`,amount:25000,startYear:BASE.startYear,startMonth:BASE.startMonth,months:12,rate:7.5,includeInSweep:false}])}
+                  onClick={()=>setLoans(list=>[...list,{label:`Loan ${list.length+1}`,amount:25000,startYear:BASE.startYear,startMonth:BASE.startMonth,months:12,rate:7.5,sweepable:false,closingEligible:false}])}
                   style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
                     background:"transparent",border:`1px solid ${bdr}`,color:dim,cursor:"pointer"}}>
                   + add loan
                 </button>
               </div>
               <div style={{fontSize:8,color:dim,marginBottom:8}}>
-                Amortized payment from start month for the term; payment lands in Fixed costs.
-                "Sweepable" loans join the debt avalanche by rate (paid early by sweeps and sale paydowns).
+                Amortized payment from start month for the term; payment lands in Fixed costs -- these are
+                low-interest (LI) loans: simple amortizing only, not mortgage-style IO/recast. Off by default,
+                a loan can independently opt into "Sweepable" (joins the ongoing surplus-sweep avalanche by
+                rate) and/or "Closing-eligible" (also retired by a property-sale lump-sum, highest-rate-first
+                alongside HI debt) -- rate decides payoff ORDER only, not which tier a loan is in.
               </div>
               {loans.length===0&&(
                 <div style={{fontSize:9,color:bdr,fontStyle:"italic",textAlign:"center",padding:"8px 0"}}>No loans</div>
@@ -2318,10 +2389,16 @@ export default function App(){
                         {slider("Start month",L.startMonth||BASE.startMonth,v=>updL({startMonth:v}),1,12,1,v=>new Date(2000,v-1).toLocaleString('default',{month:'short'}))}
                       </div>
                     </div>
-                    <div style={{marginTop:2}}>
-                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Join debt-sweep avalanche (pay off early)</div>
-                      {toggle(!!L.includeInSweep, v=>updL({includeInSweep:v}), [
+                    <div style={{marginTop:2}} data-testid={`loan-sweepable-${li}`}>
+                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Join ongoing debt-sweep avalanche (pay off early)</div>
+                      {toggle(!!L.sweepable, v=>updL({sweepable:v}), [
                         {v:false,l:"Scheduled only"},{v:true,l:"Sweepable",c:amber}
+                      ])}
+                    </div>
+                    <div style={{marginTop:6}} data-testid={`loan-closing-${li}`}>
+                      <div style={{fontSize:9,color:muted,marginBottom:3}}>Retire at property-sale closing (one-time lump-sum)</div>
+                      {toggle(!!L.closingEligible, v=>updL({closingEligible:v}), [
+                        {v:false,l:"Not eligible"},{v:true,l:"Closing-eligible",c:amber}
                       ])}
                     </div>
                   </div>
@@ -2585,8 +2662,8 @@ export default function App(){
                 ...(yourSsAge<67?[{y:Math.round(24480/12),stroke:amber,strokeOpacity:0.4,strokeDasharray:"4 2",label:{value:"SS earnings cap",fill:amber,fontSize:7,position:"insideTopRight"}}]:[]),
               ]}/>
             <Chart title="Free Cash Flow / mo" dataKey="surplus" pinKey="di" color={green} chartId="surplus"
-              yDomain={[0, surplusMax]}
-              secondaryDataKey="combinedSweep" secondaryColor={blue} secondaryName="Sweep"
+              yDomain={[0, surplusMax]} mainName="Free Cash"
+              secondaryDataKey="combinedSweep" secondaryColor={blue} secondaryName="Sweep" pinSecondaryKey="sweep"
               tertiaryDataKey="surplusPool" tertiaryColor={amber} tertiaryName="Surplus"
               quaternaryDataKey={(fcfSchedule||[]).length>0?"floorLine":undefined} quaternaryColor={green} quaternaryName="Floor schedule"
               refLines={[
@@ -2602,7 +2679,21 @@ export default function App(){
                       label:{value:"sweep → savings",fill:blue,fontSize:7,position:"insideTopRight"}}]
                   : []),
               ]}/>
-            <Chart title="HI Debt Balance ($K)" dataKey="hiDebt" pinKey="debt" color={red} chartId="hiDebt"
+            {/* v4.5.0: retitled from "HI Debt Balance" -- now shows BOTH tiers:
+                the HI trio (main line, unchanged dataKey/pinKey/chartId to
+                avoid touching pin data plumbing) and a distinct "LI loans"
+                line (famLoanBal, already an unconditional sum across loans[]
+                regardless of sweepable/closingEligible -- LI membership is
+                "whatever's in loans[]", not a flag or rate cutoff). Mortgages
+                deliberately stay off this chart -- their ~$1.15M scale would
+                flatten the ~$260K HI/LI lines this chart exists to show. */}
+            {/* v4.5.0: exactly 2 lines on this chart -- HI debt (the named
+                trio, unconditional) and LI loans (one combined line/subtotal
+                for the WHOLE loans[] array, whatever it contains) -- no
+                per-individual-loan lines. The breakdown table row below (not
+                this chart legend) is where individual loan names show up. */}
+            <Chart title="Debt Balances ($K)" dataKey="hiDebt" pinKey="debt" color={red} chartId="hiDebt"
+              mainName="HI debt" secondaryDataKey="famLoanBal" secondaryColor="#a78bfa" secondaryName="LI loans"
               refLines={[{y:0,stroke:green,strokeDasharray:"3 3"}]}/>
             <Chart title="Net Worth ($M)" dataKey={nwMode==='liq'?'liqNW':'nw'} pinKey={nwMode==='liq'?'liqNW':'nw'} color={blue} chartId="nw"
               yFmt={v=>`$${v.toFixed(1)}M`}
