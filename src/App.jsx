@@ -1,3 +1,15 @@
+// v4.6.0 -- Work Income Curve gains quarter-precision point placement (was whole-year
+// only), so a curve point can align with the same quarter a property sale is scheduled
+// in. Pure UI change: workFromCurve() (engine.js) already interpolated on a continuous
+// fractional yr -- both buildScenario (elapsedYrs) and wfData (mo/12) already fed it
+// fractional elapsed-time -- so no engine change was needed. WorkCurveEditor's yr field
+// now allows exact quarter fractions (0/.25/.5/.75, always representable exactly in
+// binary floating point) via a new per-point Q1-4 button row (updatePtQuarter), separate
+// from the existing year text input (which still edits only the whole-year part, since
+// its parseInt-based parsing can't read "2027.25"). Point 0 (locked, always exactly "now")
+// shows its TRUE calendar quarter derived from BASE.startMonth for display, not a naive
+// Q1 default. No SAVE_SCHEMA_VERSION bump -- old integer-yr points remain valid (read as
+// Q1), and no dual-engine sync risk since both engines already share workFromCurve.
 // v4.5.0 -- debt tiering: per-loan closing/sweep flags, rate-ordered unified paydown queue,
 // LI loans distinct on graph. Every debt now carries two independent per-loan flags --
 // closingEligible (retired by the one-time property-sale-closing lump sum) and sweepable
@@ -1768,6 +1780,22 @@ export default function App(){
     const iW=SVG_W-PAD.l-PAD.r, iH=SVG_H-PAD.t-PAD.b;
     const YR_MIN=0, YR_MAX=10, VAL_MAX=8000;
     const START=BASE.startYear;   // v4.3.0: was hardcoded 2026 -- workPts.yr is an offset from the model's start year
+    // v4.6.0: quarter granularity -- workFromCurve() (engine.js) already
+    // interpolates on a CONTINUOUS fractional yr (both engines already pass
+    // fractional elapsed-years/months into it), so no engine change is
+    // needed here -- p.yr just needed to be allowed to land on quarter
+    // boundaries (whole + 0/0.25/0.5/0.75) instead of only whole numbers.
+    // qOf/wholeYrOf/composeYr keep that fractional value as an exact
+    // multiple of YR_STEP (0.25 is exactly representable in binary floating
+    // point, so repeated +/-YR_STEP edits don't drift).
+    const YR_STEP = 0.25;
+    const wholeYrOf = yr => Math.floor(yr + 1e-9);
+    const qOf       = yr => Math.round((yr - wholeYrOf(yr)) * 4) + 1;   // 1..4
+    const composeYr = (wholeYr, q) => wholeYr + (q-1)/4;
+    // Point 0 is locked at yr:0 (exactly "now", BASE.startYear/startMonth) --
+    // its TRUE calendar quarter depends on startMonth, not on qOf(0) (which
+    // would always read Q1). Display-only; point 0's quarter isn't editable.
+    const START_Q = Math.ceil((BASE.startMonth||1)/3);
 
     const toX = yr  => PAD.l + (yr-YR_MIN)/(YR_MAX-YR_MIN)*iW;
     const toY = val => PAD.t + (1-val/VAL_MAX)*iH;
@@ -1790,7 +1818,9 @@ export default function App(){
       for(let i=0;i<pts.length-1;i++){
         const g=pts[i+1].yr-pts[i].yr; if(g>bestGap){bestGap=g;best=i;}
       }
-      const midYr  = Math.round((pts[best].yr+pts[best+1].yr)/2);
+      // v4.6.0: snap to nearest QUARTER (was nearest whole year) -- matches
+      // the new quarter-precision editing below.
+      const midYr  = Math.round((pts[best].yr+pts[best+1].yr)/2/YR_STEP)*YR_STEP;
       const midVal = Math.round(workFromCurve(midYr, pts)/100)*100;
       onChange([...pts.slice(0,best+1), {yr:midYr, val:midVal}, ...pts.slice(best+1)]);
     };
@@ -1806,14 +1836,34 @@ export default function App(){
       const newPts = pts.map((p, j) => {
         if(j !== i) return p;
         if(field === 'yr') {
-          // Clamp year between neighbours, convert calendar year to offset
+          // Clamp year between neighbours, convert calendar year to offset.
+          // v4.6.0: the year TEXT INPUT still only edits the whole-year part
+          // (parseInt strips non-digits, so it can't parse "2027.25" or
+          // "2027 Q2" -- quarter is a separate control, updatePtQuarter
+          // below) -- preserve the point's existing quarter when the year
+          // field alone changes. Neighbour gap shrunk from a full year to
+          // YR_STEP (one quarter) to match quarter-precision editing.
           const offset = Math.max(0, Math.min(YR_MAX, num - START));
-          const lo = j===0 ? 0 : pts[j-1].yr+1;
-          const hi = j===pts.length-1 ? YR_MAX : pts[j+1].yr-1;
-          return {...p, yr: Math.max(lo, Math.min(hi, offset))};
+          const newYr = composeYr(offset, qOf(p.yr));
+          const lo = j===0 ? 0 : pts[j-1].yr+YR_STEP;
+          const hi = j===pts.length-1 ? YR_MAX : pts[j+1].yr-YR_STEP;
+          return {...p, yr: Math.max(lo, Math.min(hi, newYr))};
         } else {
           return {...p, val: Math.max(0, Math.min(VAL_MAX, num))};
         }
+      });
+      onChange(newPts);
+    };
+    // v4.6.0: quarter selector (separate from updatePt -- driven by a button
+    // click with an exact 1-4 value, not free-text parsing) -- preserves the
+    // point's existing whole-year part, only moves it within that year.
+    const updatePtQuarter = (i, q) => {
+      const newPts = pts.map((p, j) => {
+        if(j !== i) return p;
+        const newYr = composeYr(wholeYrOf(p.yr), q);
+        const lo = j===0 ? 0 : pts[j-1].yr+YR_STEP;
+        const hi = j===pts.length-1 ? YR_MAX : pts[j+1].yr-YR_STEP;
+        return {...p, yr: Math.max(lo, Math.min(hi, newYr))};
       });
       onChange(newPts);
     };
@@ -1890,14 +1940,37 @@ export default function App(){
               <div style={{fontSize:7,color:dim,textAlign:"center",marginBottom:1}}>year</div>
               <input
                 type="text"
-                defaultValue={START+p.yr}
-                key={`yr-${i}-${START+p.yr}`}
+                defaultValue={START+wholeYrOf(p.yr)}
+                key={`yr-${i}-${START+wholeYrOf(p.yr)}`}
                 disabled={i===0}
                 style={{...inputStyle, color: i===0?dim:amber, opacity: i===0?0.5:1}}
                 onFocus={e=>e.target.style.border=focusStyle}
                 onBlur={e=>{e.target.style.border=`1px solid ${bdr}`; updatePt(i,'yr',e.target.value);}}
                 onKeyDown={e=>{if(e.key==='Enter'){e.target.blur();}}}
               />
+              {/* v4.6.0: quarter selector -- point 0 shows its TRUE calendar
+                  quarter (from BASE.startMonth) but isn't editable, since
+                  point 0 is always exactly "now". Lets a work-income change
+                  line up with the same quarter a property sale is scheduled
+                  in (property sales already use this Q1-4 granularity). */}
+              <div style={{fontSize:7,color:dim,textAlign:"center",marginBottom:1}}>qtr</div>
+              <div style={{display:"flex",gap:1}}>
+                {[1,2,3,4].map(q=>{
+                  const active = (i===0 ? START_Q : qOf(p.yr)) === q;
+                  return (
+                    <button key={q} type="button" disabled={i===0}
+                      onClick={()=>updatePtQuarter(i,q)}
+                      style={{
+                        flex:1, fontSize:7, padding:"2px 0", borderRadius:2,
+                        cursor: i===0 ? "default" : "pointer", fontFamily:font,
+                        border:`1px solid ${active?amber:bdr}`,
+                        background: active ? amber+"33" : "transparent",
+                        color: active ? amber : dim,
+                        opacity: i===0 ? 0.5 : 1,
+                      }}>{q}</button>
+                  );
+                })}
+              </div>
               {/* Value input */}
               <div style={{fontSize:7,color:dim,textAlign:"center",marginBottom:1}}>$/mo</div>
               <input
@@ -1913,7 +1986,7 @@ export default function App(){
           ))}
         </div>
         <div style={{fontSize:8,color:dim,marginTop:4}}>
-          Click a value to edit -- press Enter or click away to apply
+          Click a value to edit -- press Enter or click away to apply. Tap a quarter to align a point with a property-sale timing.
         </div>
       </div>
     );
@@ -1927,7 +2000,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.5.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.6.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>

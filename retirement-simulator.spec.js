@@ -630,10 +630,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.5.0"', async ({ page }) => {
+  test('E5 — Version header shows "v4.6.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.5.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.5.0');
+    await expect(page.locator('text=v4.6.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v4.6.0');
   });
 
 });
@@ -1090,10 +1090,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.5.0', async ({ page }) => {
+  test('L1 — Version header shows v4.6.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.5.0').first()).toBeVisible();
-    console.log('  L1 — Version v4.5.0 confirmed');
+    await expect(page.locator('text=v4.6.0').first()).toBeVisible();
+    console.log('  L1 — Version v4.6.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -2294,6 +2294,82 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
     });
     console.log('  V6 — ' + JSON.stringify(result));
     expect(Math.abs(result.annual - result.monthly)).toBeLessThanOrEqual(2);
+  });
+
+});
+
+// ─── Group W: v4.6.0 Work Income Curve Quarter Granularity ──────────────────
+// workFromCurve() (engine.js) already interpolated on a continuous fractional
+// yr before this change -- both engines already fed it fractional elapsed-
+// time. This feature is a WorkCurveEditor UI change only (quarter-precision
+// point placement), not an engine change -- these tests lock in that the UI
+// edits actually reach a fractional yr and change the interpolated curve.
+test.describe('Group W — v4.6.0 Work Income Curve Quarter Granularity', () => {
+
+  test('W1 — workFromCurve interpolates correctly at a fractional (quarter) yr, no engine change needed', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { workFromCurve } = window.__engine;
+      // Two points a full year apart, quarter-precision samples in between.
+      const pts = [{ yr: 0, val: 4000 }, { yr: 1, val: 0 }];
+      return {
+        atStart: workFromCurve(0, pts),
+        atQ1:    workFromCurve(0.25, pts),
+        atQ2:    workFromCurve(0.5, pts),
+        atQ3:    workFromCurve(0.75, pts),
+        atEnd:   workFromCurve(1, pts),
+      };
+    });
+    console.log('  W1 — ' + JSON.stringify(result));
+    expect(result.atStart).toBe(4000);
+    expect(result.atEnd).toBe(0);
+    // Monotonically decreasing through the quarter samples (exact spline shape
+    // isn't the point here -- just confirming quarter-resolution sampling
+    // actually moves along the curve, not snapping to whole-year steps).
+    expect(result.atQ1).toBeLessThan(result.atStart);
+    expect(result.atQ2).toBeLessThan(result.atQ1);
+    expect(result.atQ3).toBeLessThan(result.atQ2);
+    expect(result.atEnd).toBeLessThan(result.atQ3);
+  });
+
+  test('W2 — clicking a quarter button on a work-curve point shifts the interpolated curve (UI reaches the engine)', async ({ page }) => {
+    await loadApp(page);
+    const before = await page.evaluate(() => {
+      const rows = window.__liveRows;
+      return { y2029: rows.find(r => r.cal === 2029).workInc };
+    });
+    const section = page.locator('text=Work Income Curve').locator('xpath=ancestor::div[3]');
+    // Point 0's quarter buttons are disabled but present -- nth(1) is point 1's Q3 button.
+    await section.locator('button', { hasText: /^3$/ }).nth(1).click();
+    await page.waitForTimeout(400);
+    const after = await page.evaluate(() => {
+      const rows = window.__liveRows;
+      return { y2029: rows.find(r => r.cal === 2029).workInc };
+    });
+    console.log('  W2 — before=' + before.y2029 + ' after=' + after.y2029);
+    expect(after.y2029).not.toBe(before.y2029);
+  });
+
+  test('W3 — point 0\'s quarter is locked and shows the TRUE calendar quarter derived from BASE.startMonth (not always Q1)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { BASE } = window.__engine;
+      return { startMonth: BASE.startMonth, expectedQuarter: Math.ceil((BASE.startMonth||1)/3) };
+    });
+    console.log('  W3 — ' + JSON.stringify(result));
+    // Default BASE.startMonth is July (7) -> Q3. If this were still hardcoded
+    // to always show Q1 for point 0 (the naive qOf(0) reading), this would
+    // read 1, not 3 -- this is the exact bug the point-0 special-case avoids.
+    expect(result.expectedQuarter).toBe(3);
+    const section = page.locator('text=Work Income Curve').locator('xpath=ancestor::div[3]');
+    const point0Q3 = section.locator('button', { hasText: /^3$/ }).first();
+    await expect(point0Q3).toBeDisabled();
+    // The disabled Q3 button (point 0's true quarter) should render as the
+    // active/highlighted one, not Q1.
+    const point0Q1 = section.locator('button', { hasText: /^1$/ }).first();
+    const q1Color = await point0Q1.evaluate(el => getComputedStyle(el).color);
+    const q3Color = await point0Q3.evaluate(el => getComputedStyle(el).color);
+    expect(q3Color).not.toBe(q1Color);
   });
 
 });

@@ -1,0 +1,94 @@
+=== SESSION 31 JOURNAL — v4.6.0 (Work Income Curve Quarter Granularity) ===
+
+Date: 2026-07-10
+
+Session goal: user asked for quarter-level granularity on Work Income Curve
+points (currently whole-year only), so a work-income change can be aligned
+with the same quarter a property sale is scheduled in (property sales
+already use year+quarter). Asked for an investigate-first-report-back pass
+before implementing.
+
+--- INVESTIGATION (before any code changed) ---
+
+Traced `workFromCurve()` (engine.js), the function both engines call to
+evaluate the curve. It already interpolates on a CONTINUOUS fractional yr --
+both call sites already feed it fractional elapsed-time (buildScenario's
+`elapsedYrs`, wfData's `mo/12`, both v4.3.0-era). Nothing about the point
+placement itself was constrained to whole years at the engine layer -- the
+constraint was entirely in WorkCurveEditor (App.jsx): `updatePt`'s year-
+field parsing/clamping and `addPoint`'s midpoint-insertion both operated in
+whole-year steps, and there was no quarter input at all. Reported back: this
+is a small, UI-only change, no engine.js changes, no SAVE_SCHEMA_VERSION
+bump needed (old integer-yr points remain valid, read as Q1), no dual-engine
+sync risk (both engines already share workFromCurve). Confirmed via grep
+that no existing Playwright test locks down the WorkCurveEditor's current
+UI shape, so zero regression risk from existing coverage. User approved
+after the report; implemented as scoped.
+
+--- WHAT SHIPPED (v4.6.0) ---
+
+App.jsx (WorkCurveEditor only -- no engine.js changes):
+- New helpers `wholeYrOf`/`qOf`/`composeYr` keep a point's `yr` field as an
+  exact multiple of `YR_STEP` (0.25) -- 0.25 is exactly representable in
+  binary floating point, so repeated quarter edits don't drift.
+- `updatePt`'s year TEXT INPUT still edits only the whole-year part (its
+  parseInt-based digit-stripping can't parse "2027.25" or "2027 Q2") --
+  now preserves the point's existing quarter (via qOf) instead of silently
+  resetting it to Q1 on every year-field edit.
+- New `updatePtQuarter(i, q)`: a separate handler driven by a new per-point
+  Q1-4 button row (compact custom buttons, not the general-purpose `toggle()`
+  helper used elsewhere -- that one's sized for full-width sidebar controls,
+  too wide for these narrow per-point cards). Preserves the point's whole-
+  year part, moves only the quarter.
+- Neighbor-gap clamping (both updatePt and updatePtQuarter) shrunk from a
+  full year to YR_STEP (one quarter), matching the new precision.
+- `addPoint`'s auto-inserted midpoint now snaps to the nearest QUARTER (was
+  nearest whole year).
+- Point 0 (locked, always exactly "now" -- BASE.startYear/startMonth) shows
+  its TRUE calendar quarter for display (`Math.ceil(BASE.startMonth/3)`),
+  not a naive `qOf(0)` reading which would always show Q1 regardless of the
+  model's actual start month. Point 0's quarter buttons stay disabled --
+  editing them would let it drift away from "now," which isn't a coherent
+  edit for that specific point.
+- SVG curve-drawing and X-axis gridlines needed NO changes -- `toX(p.yr)`
+  was already a plain linear scale over whatever numeric yr value it's
+  given; fractional values already plotted at the correct in-between x
+  position with zero code changes.
+
+retirement-simulator.spec.js:
+- E5/L1 version strings bumped to v4.6.0.
+- New Group W (3 tests): W1 locks workFromCurve's quarter-precision
+  interpolation directly (pure function, no UI); W2 drives an actual click
+  on a point's Q3 button and confirms a DOWNSTREAM engine value (workInc at
+  a specific year) changes, proving the UI edit reaches buildScenario, not
+  just a cosmetic re-render; W3 locks the point-0 true-calendar-quarter
+  display fix (asserts BASE.startMonth's default of July derives to Q3, not
+  Q1, and that the Q3 button -- not Q1 -- renders as the active one).
+
+--- VERIFICATION ---
+
+npm run lint: 30 problems, identical to the pre-session baseline -- net zero
+new lint issues.
+npm run build: clean, no errors.
+Manually verified end-to-end via a throwaway script (deleted before this
+journal) before writing the Playwright tests: clicking a work-curve point's
+Q3 button changed liveRows[cal=2029].workInc from 2744 to 3214, confirming
+the click reaches the engine and isn't just a UI-state no-op.
+Group W (3/3) and the version-bump tests (E5, L1) verified directly; the
+FULL regression suite has NOT been run yet as of this journal entry -- per
+the user's stated preference (this session confirmed it again), pausing
+for a manual spot-check before the full ~120-test run, not launching it
+automatically.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. This is a clean, small, additive feature -- no known follow-up items or
+   deferred scope, unlike the last two sessions' debt/SS work.
+2. If a future session wants MONTH-level (not just quarter) granularity on
+   work-curve points, the same finding applies: workFromCurve() already
+   supports it (any fractional yr works), so it would again be a
+   WorkCurveEditor-only change -- extend YR_STEP to a smaller fraction and
+   add a month selector in place of/alongside the quarter one. Not
+   requested this session, noted only as a reusable observation.
+3. This session's diff has NOT been committed yet as of this journal entry
+   -- pending the user's manual spot-check and go-ahead per house workflow.
