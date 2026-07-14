@@ -304,9 +304,10 @@ App.jsx:
 
 --- COMMITS ---
 
-Two commits landed, exactly as the user specified -- v5.0.0 (the refactor + rental/IRMAA
-restores, told as one story) and v5.0.1 (the zero-value fix, called out as an unrelated
-pre-existing v4-era bug) -- see git log for exact hashes/messages.
+Two commits landed, exactly as the user specified:
+  03dc664 -- v5.0.0 (the refactor + rental/IRMAA restores, told as one story)
+  e410cb3 -- v5.0.1 (the zero-value fix, called out as an unrelated pre-existing v4-era bug)
+Both pushed to origin/main.
 
 --- OPEN ITEMS FOR A FUTURE SESSION ---
 
