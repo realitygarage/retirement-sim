@@ -1,3 +1,10 @@
+// v5.0.1 -- pre-existing v4.6.0 bug, UNRELATED to the v5.0.0 refactor: `||` treats a
+// genuine 0 as falsy, so setting "STR platform fee"/"STR cleaning"/"LTR vacancy"/
+// "MTR cleaning flat $" to literal 0 silently fell back to the nonzero default
+// instead. Found while building a regression guard for v5.0.0's rentalOpCost fix
+// (A5 needed a working 0% lever). Fixed at both sc->engine-params conversion sites
+// (`||` -> `??`, nullish coalescing). Confirmed safe against all 3 real saved pins
+// (each uses the nonzero defaults for all 4 affected fields) before landing.
 // v5.0.0 -- SINGLE-ENGINE REFACTOR: the two-engine design (buildScenario annual +
 // wfData monthly, which had to be kept in sync by hand and periodically drifted --
 // see the v4.3.0/v4.3.1/v4.4.0 fixes above) is retired. buildMonthlyScenario
@@ -406,8 +413,14 @@ export default function App(){
       lifestyleDraws:(sc.lifestyleDraws||[]).filter(d=>d.enabled),
       ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
       loans:(sc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
-      strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
-      ltrVacancyPct:(sc.ltrVacancyPct||4)/100, mtrCleaningFlat:sc.mtrCleaningFlat||300,
+      // v5.0.1 (pre-existing v4.6.0 bug, unrelated to the v5 refactor -- found
+      // session33 while writing a regression guard for the rentalOpCost fix):
+      // `||` treats a genuine 0 as falsy, so setting any of these sliders to
+      // literal 0% silently fell back to the nonzero default instead. `??`
+      // only falls back on null/undefined, restoring the ability to actually
+      // set true zero.
+      strPlatformPct:(sc.strPlatformPct??3)/100, strCleanPct:(sc.strCleanPct??4)/100, mgrPct:(sc.mgrPct||0)/100,
+      ltrVacancyPct:(sc.ltrVacancyPct??4)/100, mtrCleaningFlat:sc.mtrCleaningFlat??300,
     });
     const wfRows = buildMonthlyScenario(params);
     const rows = aggregateMonthlyToAnnual(wfRows, params);
@@ -492,8 +505,10 @@ export default function App(){
     lifestyleDraws:sc.lifestyleDraws.filter(d=>d.enabled),
     ccRate:sc.ccRate/100, sophiaRate:sc.sophiaRate/100, nolanRate:sc.nolanRate/100,
     loans:(sc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
-    strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
-    ltrVacancyPct:(sc.ltrVacancyPct||4)/100, mtrCleaningFlat:sc.mtrCleaningFlat||300,
+    // v5.0.1 (pre-existing v4.6.0 bug, unrelated to the v5 refactor) -- see
+    // the identical note at buildRowsFromSnapshot's equivalent conversion above.
+    strPlatformPct:(sc.strPlatformPct??3)/100, strCleanPct:(sc.strCleanPct??4)/100, mgrPct:(sc.mgrPct||0)/100,
+    ltrVacancyPct:(sc.ltrVacancyPct??4)/100, mtrCleaningFlat:sc.mtrCleaningFlat??300,
   }),[sc, diCap, maintRate, defaultsRev]);   // defaultsRev: engines read mutated BASE/DISPO objects
 
   // v5.0.0: single monthly engine is the sole source of truth -- wfData
@@ -1592,7 +1607,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.1</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
