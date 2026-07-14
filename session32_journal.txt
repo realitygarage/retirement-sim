@@ -1,0 +1,239 @@
+=== SESSION 32 JOURNAL — v5.0.0 single-engine refactor: Phase 0 complete, Phase 1
+    implemented through Checkpoint 1a (NOT YET COMMITTED) ===
+
+Date: 2026-07-12
+
+Session goal: execute v5_single_engine_spec.md (written just before this session, not yet
+acted on) -- collapse the two-engine design (buildScenario annual + wfData monthly) into one
+monthly engine, with the annual/Simulator view rebuilt as pure aggregation of monthly output.
+User set explicit ground rules up front: test-run discipline (never run the Playwright suite
+without being asked; targeted fixture comparison only until Checkpoint 1b), and a phased
+approval gate -- Phase 0 (investigate, no code) must be reviewed and approved before Phase 1
+(build) starts, and Phase 1 itself pauses at Checkpoint 1a (targeted verification) for review
+before Checkpoint 1b (full suite) or any commit.
+
+This was an unusually long, multi-part session -- Phase 0 investigation, a user-directed
+reclassification pass, Phase 1 implementation, Checkpoint 1a verification, and then two rounds
+of the user catching me being wrong about my own analysis (not the engine) before approving
+anything. Both catches were legitimate and both are documented below because they materially
+changed the final numbers reported.
+
+--- PHASE 0: INVESTIGATION (no code changes) ---
+
+Read engine.js's buildScenario (annual engine, ~830 lines) and App.jsx's wfData block (monthly
+engine, ~470 lines) in full. Captured baseline fixtures for the user's 3 actual pinned
+scenarios by having the user export their real pins JSON, importing it into the running dev
+server via Playwright (headless, NOT the test suite -- just browser automation for data
+capture), loading each pin into live, and reading window.__liveRows/__wfData/__chartData/
+__chartMarkers/keyStats -- the same test-scaffolding hooks Playwright itself uses. Saved to
+v5_fixtures/pin_{35,36,37}_*.json (still untracked -- these are Phase-0-captured regression
+baselines, not shipped code).
+
+Produced an initial 10-item known-exceptions list (0a), then quantified everything against the
+real fixture data rather than just reading code -- this surfaced several concrete numbers (a
+25-50% sale-year tax overstatement, a pin_37 debt-clear-year divergence, a $52K sale-year
+"savings" figure that was actually 100% reserve fill) that reading the code alone wouldn't have
+caught.
+
+User asked for a reclassification pass: split the 10 items into four buckets -- (A) modeling
+decisions needing explicit user input, (B) latent bugs (one engine simply wrong, fixtures
+SHOULD move), (C) clean aggregation exceptions (monthly more precise, small expected shift),
+(D) new capability to build. This surfaced a genuine new finding during the reclassification
+itself: tracing WHY sale-year tax was off 25-50% found a real, specific bug (B3) -- the annual
+engine's year-level `keepMap` gate zeroed the sold property's mortgage-interest tax deduction
+for the ENTIRE sale year, even for months it was still genuinely owned -- split out of the
+original "C1 tax resampling" item once the mechanism was traced with real numbers, not just
+asserted.
+
+User then asked two clarifying questions before finalizing: (a) surplus vs. fcfChart
+definitional difference, (b) whether cashAst was a real gap or dead code, (c) the sale-year tax
+mechanism. Investigation found: fcfChart was already dead code for live scenarios (chartData's
+own fallback to it never fired, since wfData always covers live) -- it only mattered for
+pinned-scenario comparison lines, tying A4 directly to A2. cashAst was confirmed empirically
+inert (exactly $0 across all 21 rows, all 3 pins) -- the "shortfall exceeds proceeds" branch it
+exists for never fires given current pooled-routing design.
+
+--- CATEGORY A DECISIONS (user, with input) ---
+
+A1 (maintenance): structure-value basis (Cash-Flow-tab struct6/15/Laf sliders), UNCAPPED,
+ongoing, inflated -- drop the old 5-year reserve cap. Structure value is the right driver, not
+market value; uncapped is the honest lifetime treatment. A capped reserve-FUNDING readout may
+return later as a display-only view -- not built this session.
+A2 (pins): pins now run the full monthly engine, same as live -- not annual-only anymore.
+A3 (cashAst): aggregation treats as a constant 0; no shortfall-funding ledger built (confirmed
+inert, not worth building for a case with no real scenario to validate against).
+A4 (fcfChart): the VARIABLE is deleted, not the chart -- FCF chart continues rendering, now
+sourced from wfData's `disc` field for every scenario (live + pins) instead of two different
+paths. reqWork stays on the surplus/totalOut basis, unaffected.
+
+CHECKPOINT 0 cleared; proceeded to a Phase 1 plan (five build steps + an explicit
+expected-fixture-deltas table) which the user reviewed and asked to see the two key sections
+verbatim before approving, plus one specific addition: A1's late-horizon NW effect had to be
+quantified with a rough magnitude in the expected-deltas table, not left as a vague "will move
+a lot." Computed directly against the Phase 0 fixtures: pin_35 ≈ $142K, pin_36 ≈ $161K, pin_37
+≈ $142K cumulative extra maintenance cost by year 20 (this estimate turned out to be
+directionally right but built on the wrong comparison -- see below).
+
+--- PHASE 1: IMPLEMENTATION ---
+
+engine.js additions (buildScenario's ~830-line body deleted entirely, replaced with):
+- computeDispositions(p): extracted from inside buildScenario -- the property-disposition /
+  CA-cap / obligation-offset / same-year-bump computation, now a standalone pure function of
+  params only. Needed so the monthly engine's sale-year pooled routing no longer depends on
+  buildScenario's output (which would have been circular once buildScenario is gone).
+- buildMonthlyScenario(p): the single engine. Built from wfData's logic, ported to a pure
+  function taking the full params object directly (turns out liveParams already carried every
+  Cash-Flow-tab field wfData used to read from separate component-scoped variables -- no
+  separate "cfSettings" bundle needed). Implements A1 (maintenance folded into tier1, uncapped,
+  inflated, res6/res15/resLaf retired entirely, sale-year pooled routing narrowed from 5
+  reserve/buffer buckets to 2 (rd/ob only)); adds D1 (continuous per-property appreciation
+  tracking, using true mo/12 instead of buildScenario's frozen once-per-row elapsedYrs); adds
+  D2 (per-debt ccBal/sophiaBal/nolanBal exposure, generalized per-property mortgage/rental
+  breakdown including the previously-missing Lafayette balance); adds D3 (totalOut assembled
+  from tier1+sweep+mtgExtra, deliberately excluding rd/ob top-ups since those are discretionary
+  and never compete with "does income cover costs"); adds D4 (structured loan/mortgage event
+  objects alongside the existing display strings).
+- aggregateMonthlyToAnnual(wfRows, p): the annual/Simulator view, now pure rollup. Stocks =
+  first-of-calendar-year snapshot (pre-decrement, matching the existing v4.3.0 convention
+  automatically since wfData's own rows already carry this snapshot property); flows = summed
+  over the year's real months. Produces the same field names buildScenario used to, so most of
+  App.jsx's UI layer needed zero changes.
+
+App.jsx: wfData now calls buildMonthlyScenario(liveParams) directly; liveRows is now
+aggregateMonthlyToAnnual(wfData, liveParams) -- reordered so wfData computes first (it no
+longer depends on liveRows the way the old sale-year routing did). buildRowsFromSnapshot (pins)
+now returns {rows, wfRows} and runs the full monthly engine per A2. addPin simplified to reuse
+live's already-computed rows/wfData instead of a redundant second buildScenario call.
+chartData's fcfChart/sweepChart usage removed per A4 -- pin_<id>_di/sweep now read the pin's
+own aggregated surplus/debtSweep/sweepToSavings fields, sourced identically to live. Fixed the
+dev-mode conservation audit and the pooled-routing display line to include the new
+wfReserveFill term (B2's fix: reserve top-ups and true sweep are no longer conflated).
+window.__engine no longer exposes buildScenario; exposes buildMonthlyScenario/
+aggregateMonthlyToAnnual/computeDispositions instead.
+
+Five bugs found and fixed during my OWN implementation, before ever showing results:
+1. Hardcoded 252-month loop bound only equals 21 calendar years when startMonth is January --
+   for the actual default (July) it overshoots into a spurious 22nd partial year. This was
+   ALREADY a latent bug in the pre-v5 wfData block too; it just never surfaced because the old
+   chartData only ever visited years present in the separately-bounded 21-row buildScenario
+   output. Fixed via the existing monthsElapsedBeforeYear(21, startMonth) helper.
+2. First draft of aggregateMonthlyToAnnual forgot to fold savingsAcc into nw at all -- caught
+   because it made nwYr10 suspiciously identical across all 3 scenarios.
+3. The serious one: propMtgBal wasn't gated by ownership, so a sold property's mortgage state
+   (which simply stops being stepped once sold, staying frozen at its pre-sale balance) was
+   being read unconditionally -- wrongly subtracting a paid-off $805K mortgage from NW for
+   every year after 6th St's 2027 sale. This is what produced the alarmingly large NW deltas in
+   my first smoke test.
+4. famLoanBal missing a /1000 (reporting $21,432K instead of $21K).
+5. cumDraw dropped the one-time settlement draw -- the old engine blended it into the same
+   drawInc field before computing cumDraw; the new drawInc only covers scheduled ad-hoc draws.
+
+--- CHECKPOINT 1a: VERIFICATION ---
+
+Wrote a pure-Node comparison script (not Playwright) diffing the new engine's output against
+the Phase 0 fixture files field-by-field, all 21 years, all ~70 fields per row, for all 3 pins.
+Result after the 5 fixes above: zero unexpected deltas across all 3 scenarios. Two
+newly-discovered (not in the original 0a list) small precision items surfaced during this pass:
+dplxBalRaw/lafBalRaw drift a few hundred dollars a year (two independently hand-written
+mortgage steppers pre-v5, never deduplicated, now resolve to one) and primBalRaw has a direct
+sibling of the B3 bug (same year-level keepMap gate, this time corrupting the sale-year
+mortgage balance feeding NW, not just the tax deduction). npm run build clean; a headless
+smoke test confirmed the app loads, all 3 tabs navigate, zero console errors. Lint went 30->36
+problems but investigated directly -- confirmed the increase is entirely pre-existing
+react-hooks "React Compiler" issues in code never touched (the Chart component, an unrelated
+setState call), newly surfaced because deleting the old wfData block's mutable-closure pattern
+apparently let the linter analyze further into the file than before; issues in code actually
+touched went DOWN (no-unused-vars 17->15, exhaustive-deps 9->8).
+
+User's two specific Checkpoint-1a requirements, both delivered: a standalone
+per-property-per-year maintenance report (verified the real new formula against actual engine
+output, not a hand reimplementation -- added propMaintYr/propMaintMo fields to the engine for
+this), and an explicit trace of pin_37's B1 debt-clear-year question. That trace found the
+original Phase 0 framing itself was imprecise: debtClearYr uses a first-of-calendar-year
+snapshot convention on BOTH engines, always -- and for pin_37 specifically, both the old and
+new engine's snapshot land on the same year (2028) despite the true underlying monthly clearing
+happening in different months. debtClearYr genuinely does not move for pin_37. workFreeYr DID
+move (2028->2027), driven by the A1/A4/C1/C2 basket, not the debt-avalanche pace.
+
+--- THE TWO CATCHES (both legitimate, both changed the reported numbers) ---
+
+Catch 1: I reported "A1's real effect is tiny (+$7-10K cumMaint), NW actually goes UP not
+down, the opposite of the Phase 0 estimate" as a "correction." User pushed back, asking for a
+full per-scenario NW reconciliation (named, sized line items summing to the total, no
+"baskets") and an explanation of a savingsAcc-in-nw discrepancy I'd mentioned in passing. Built
+real counterfactual engine variants (not formulas on paper) to isolate each factor's marginal
+NW contribution. This process itself surfaced that my "correction" was ALSO wrong: I had only
+isolated A1's direct cost-line basis swap (small), missing that A1 has a second, dominant
+mechanism -- the old capped reserve system redirected its ENTIRE ongoing maintenance amount
+into the savings sweep once each reserve filled (~2028-2031), and removing the cap removes
+that redirect too. Building the full counterfactual (which reintroduces the old res6/res15/
+resLaf/maintRedirect mechanism) found a real double-counting bug in my own analysis script
+(maintenance was being subtracted twice -- once via an uncapped tier1 line, again via a capped
+reserve accrual -- something the real old dual-engine architecture never did, since those were
+two fully separate, non-interacting computations). Fixed, then validated: A1's true full effect
+is -$197K to -$267K at year 20, matching the ORIGINAL Phase 0 direction and within range of the
+original magnitude -- the "correction" had been the wrong one, not the original estimate.
+
+Also answered directly: was the user's actual, currently-committed, pre-refactor displayed NW
+ever wrong? No -- checked precisely. Live scenarios' displayed NW already included savingsAcc
+correctly (added back in at the old chartData layer). Pinned comparison lines used a cruder
+annual-compounding approximation instead of true monthly compounding, but measured against the
+user's actual 3 saved pins, that approximation was only off by $8-44K (1-4%) -- nowhere near
+the six-figure swings that came from comparing against the never-displayed internal liveRows.nw
+field. The user's past decisions based on displayed numbers were not meaningfully wrong.
+
+User also asked for an audit of whether any OTHER 0a prediction was similarly mis-framed.
+Found: B1's predicted "debtClearYr may shift up to ~1yr" didn't materialize for ANY of the 3
+tested pins (mechanism is real, just never straddles a year boundary in these scenarios) -- and
+a genuinely new, previously-unflagged finding: maxDI (a keyStats headline figure) swings 75-85%
+lower under the new disc-based surplus definition, which I hadn't attached a magnitude to in
+Phase 0.
+
+Catch 2 (smaller): before approving commit, user asked (1) for maxDI's old vs. new definitions
+side by side with what decision each supports, and (2) to re-rank the 3 pinned scenarios on the
+corrected NW to see if the honest maintenance treatment changes which scenario looks best.
+Investigating (1) found maxDI is not read anywhere in the current UI at all -- a live
+definitional question for a currently-dormant field, changing the stakes of the decision (user
+left to decide, not resolved this session). Investigating (2) required computing the OLD
+*displayed* NW (raw liveRows.nw + wfData's real savings, matching what chartData actually
+rendered) rather than reusing the internal-field comparison from before -- found the NW ranking
+is unchanged at both year 10 and year 20 for all 3 pins (margins compress, order doesn't flip),
+though workFreeYr's ranking did flip for one scenario (pin_37, last -> tied-first).
+
+--- CURRENT STATE ---
+
+v5_phase0_findings.md (project root, untracked) is the full record: 0a/0b/0c deliverables,
+the four-bucket reclassification, all Category A decisions, the Phase 1 plan, the Checkpoint 1a
+report, and the corrected (twice) NW decomposition with the maxDI and re-ranking sections added
+at the end. v5_fixtures/*.json (also untracked) are the Phase 0 regression baselines.
+
+engine.js and App.jsx are MODIFIED but NOT COMMITTED. Version is still v4.6.0 (no bump yet --
+per the spec, that happens only after final user confirmation, alongside the commit). No test
+suite has been run this session (per explicit instruction throughout). Nothing pushed.
+
+--- HOW TO PICK UP FROM HERE ---
+
+1. Two things are awaiting the user's decision before Checkpoint 1b: (a) maxDI's definition
+   going forward (dormant field, not urgent, but should be decided before it's ever wired up to
+   display -- my recommendation is the new disc-based definition for consistency, not decided
+   unilaterally), (b) general go-ahead on the corrected NW picture now that both catches are
+   resolved and the decomposition is validated.
+2. Once approved: Checkpoint 1b is the full Playwright suite. Expect real failures needing
+   updates, not just re-runs -- retirement-simulator.spec.js references window.__engine.
+   buildScenario directly (now gone), and the pooled-routing display text
+   (data-testid="pooled-routing-result") now includes a reserve-fill term per B2 that wasn't
+   there before. Per house convention, update tests to the single-engine truth and flag each
+   changed test and why -- don't silence failures.
+3. Phase 2 (user's own manual verification -- pin charts match screenshots, spot-check a fresh
+   scenario) has NOT happened yet; per the spec this comes before the version bump/commit, not
+   after.
+4. The version bump to v5.0.0, the commit, and a proper session-closing commit message
+   documenting the aggregation mapping / approved exceptions / test changes all happen together,
+   at the end, only after 1b is green and the user has done their own visual check -- not before.
+5. Two small deferred items, mentioned but not built this session: a capped
+   reserve-FUNDING *display* (separate from the now-uncapped cost line) if it turns out to have
+   value (A1's explicit deferral), and testing a genuine "keep everything, never sell" scenario
+   against the corrected engine -- the re-ranking this session only covered 3 scenarios that all
+   sell 6th St in 2027, so a never-sell scenario's A1 exposure (compounding for the full 21
+   years instead of ~19) is untested and could plausibly shift its relative ranking more than
+   what was observed here.

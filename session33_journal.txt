@@ -1,0 +1,328 @@
+=== SESSION 33 JOURNAL — v5.0.0 single-engine refactor: Checkpoint 1b (full suite),
+    three audit-caught bugs fixed, v5.0.0 + v5.0.1 COMMITTED ===
+
+Date: 2026-07-13 to 2026-07-14
+
+Session goal: pick up where session32 left off -- Phase 1 of the single-engine refactor was
+implemented and verified at Checkpoint 1a (zero unexpected fixture deltas), but nothing was
+committed and Checkpoint 1b (full Playwright suite) had not been run. This session's job was to
+clear the two items session32 left open for review (maxDI's definition, the 3-pin re-ranking on
+corrected NW), then run Checkpoint 1b, get the suite green, and land the commit -- in practice
+this became a much larger session because getting to a trustworthy green suite required finding
+and fixing three real bugs the refactor had introduced, none of which the suite itself caught
+until they were specifically dug for.
+
+--- PRE-CHECKPOINT: maxDI AND THE 3-PIN RE-RANKING (carried over from session32) ---
+
+Presented both items session32 left pending review:
+- maxDI (a keyStats field, confirmed NOT read anywhere in the current UI): OLD definition was
+  totalIncome-totalOut with the debt-sweep term forced to 0 once HI debt clears (a "capacity
+  ceiling" question); NEW is disc-based (same field the Cash Flow tab's Free Cash line already
+  shows), a "realistic forecast" question. User agreed: keep the NEW disc-based definition, don't
+  revive the old meaning under this name -- if the capacity-ceiling question is wanted later,
+  it's a deliberately different stat added under its own name, not decided here.
+- Re-ranking the 3 real pins on the corrected (post-A1) NW: order unchanged at both yr10 and
+  yr20 for all 3 pins (margins compress, nothing flips); `workFreeYr` ranking DID flip for one
+  scenario. User accepted this as the reassuring outcome.
+
+User then raised a sharper concern before approving: all 3 real pins sell 6th St in 2027, so
+they only test A1's maintenance-modeling effect on ~19 years of post-sale exposure, not a
+never-sell scenario's full 21-year exposure. Asked for a never-sell scenario check before
+treating the pin-based re-ranking as the committed baseline.
+
+--- NEVER-SELL A1-EXPOSURE CHECK ---
+
+Built the check as a real counterfactual engine run (not a formula): extracted the pre-v5
+engine.js from git HEAD into a scratchpad, wrote a patched copy of the CURRENT engine with ONLY
+the A1 maintenance mechanism reverted to the old capped-reserve + `maintRedirect`-to-sweep
+design (everything else -- D1-D4, bug fixes -- left as-is), then ran both the real v5 engine and
+this counterfactual against the coded defaults themselves (which are already a genuine
+never-sell scenario -- `freshPropertiesDefaults()`'s `hold.mode` is `'keep'` for all 3
+properties out of the box).
+
+Result: A1's isolated effect on the never-sell scenario at yr20 is -$189K -- actually SMALLER
+than all 3 real pins (-$197K to -$267K), not larger. Mechanism: the old capped reserve is a
+FIXED dollar amount (5yrs x flat monthly rate) that fills at roughly the same wall-clock point
+(~2031-2032) whether or not a sale's lump sum accelerates it -- full 21-year ownership doesn't
+compound the redirect-years the way more years of INFLATED maintenance would, because the old
+formula was capped and flat (uninflated) to begin with. maxDI unaffected (floor-driven in this
+scenario, not maintenance-driven). User accepted this as clearing the concern.
+
+--- CHECKPOINT 1b: FIRST FULL-SUITE RUN ---
+
+Started the dev server, ran the full 113-test suite. Result: 96 passed, 17 failed. Diagnosed
+every failure by reading the actual test code (not guessing from names):
+
+- 13 tests (R7,R8,R9,R12,R13,R15,T1,T3,U2,V2,V2b,V3,V4): called `window.__engine.buildScenario`
+  directly -- deleted. Fixed with a one-line shim at each call site
+  (`buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params)`)
+  so every existing `buildScenario(makeParams({...}))` call site works unchanged.
+- R8: conservation formula needed `wfReserveFill` added -- B2's approved reserve-fill/true-sweep
+  split, exactly the CLAUDE.md-flagged expected test update.
+- S6: read the deleted `fcfChart` field (silently evaluated to 0, making a broken assertion look
+  like it passed) -- switched to `surplus` (A4's unified disc-based field), dropped a now-
+  meaningless self-comparison assertion.
+- R1: was comparing annual `rental`'s NET-implied delta against a single spot-check month
+  (`wfData[0]`) -- neither the netting basis nor the single-month-vs-period-average comparison
+  was still valid once `rental` became gross and monthly rent growth became continuous (C2).
+  Fixed to compare gross-to-gross, averaged over the same real months on both sides.
+- T3: comparing the annual (averaged) `core` field between a Jan-start and Jul-start scenario --
+  a real, small, expected difference now that continuous CPI compounding makes a 12-month
+  average genuinely differ from a 6-month average. Fixed to read `wfData[0].fc_core` directly
+  (identical growth factor at mo=0 regardless of calendar month), removing the precision
+  question entirely instead of picking an arbitrary tolerance.
+- B8: was checking the DEFAULT scenario's NW-breakdown "Sweep savings" row is non-zero -- but
+  under the approved A1 decision, the default (never-sell) scenario's sweep-to-savings is
+  genuinely $0 for the full horizon (uncapped ongoing maintenance permanently consumes what the
+  old capped-then-freed reserve used to redirect), so the row is correctly hidden by hideZero.
+  Tried the "0% keep" lever first (matches test A1's own technique) -- verified via a standalone
+  engine run that this produces exactly $0 sweep regardless of the split% dial in this scenario
+  (afterBuckets never exceeds the floor at all). Switched to an unambiguous lever instead: sell
+  15th St in 2028, verified via the same standalone check to produce >$1M in savings.
+
+--- THE RENTALOPCOST BUG (found via re-run, not by design) ---
+
+Re-running after those fixes surfaced R1 still failing with a real (not precision-sized)
+mismatch, and T3 failing on a real dollar gap too big to be rounding. Traced R1 precisely: old
+engine's annual `rental` field was built via `unitSegmentNet()` -- already NET of rental
+operating costs (STR platform/cleaning%, LTR vacancy%, etc). New engine's `rental` field is
+GROSS (`avgMo('rental')`, sourced from wfData's own gross `rental`; `rentalOpCost` is a fully
+separate field). Nothing else picked up the slack: `rentalOpCost` was in neither `tier1` nor
+`totalOut` nor `passive`. It was just dropped.
+
+Quantified against the real default scenario (which already has an active STR segment, so this
+wasn't hypothetical): `reqWork` (the headline "Total Work Income Required" stat) was understated
+by the full dropped op-cost amount every year -- ~$460-620/mo at launch, growing to make the
+model claim "work-free" a year earlier than the true net-of-op-cost figure supports at yr10
+($0 shown vs. the correct ~$1,131).
+
+Presented this to the user with two fix options (net `rentalOpCost` out of `passive`, restoring
+exact pre-v5 semantics; or make `rental` a documented gross line plus a new explicit `totalOut`
+charge). User chose option 1 explicitly, ruling out option 2 as an unnecessary structure/behavior
+change with double-count risk, out of scope for the v5 commit gate. Fixed:
+`aggregateMonthlyToAnnual`'s `passive = avgMo('rental')+avgMo('pension')+avgMo('yourSs')+
+avgMo('brendaSs') - avgMo('rentalOpCost')`. Verified the residual gap between old and new
+`reqWork` at every sampled year is now fully explained by ALREADY-approved differences (B1's
+debt-pace correction dominates, e.g. -$745/mo in `minDebt` at yr10, offset by small C1/C2/A1
+precision effects of +$350/mo, netting to exactly the observed -$395 `totalOut` difference) --
+decomposed component-by-component, not just asserted.
+
+--- THE SYSTEMATIC AUDIT AND IRMAA ---
+
+User's response to the rentalOpCost bug: since it wasn't in the original Phase 0 exceptions list
+and the 113-test suite hadn't caught it, do a COMPLETE audit -- every field the pre-v5 annual
+engine computed or netted, confirmed present and correct in the new engine, not a spot-check.
+
+Method: read old `buildScenario`'s full body (not just the row-push object) end-to-end; cross-
+checked every distinct `BASE.*` constant referenced in old vs. new (two full sorted lists,
+compared -- identical sets); cross-checked every distinct `p.*` params-field referenced in old
+vs. new (only two differences, both confirmed as approved/superseded, not drops: `p.diCap`
+replaced by the correct direct rd/ob/discFloor treatment that avoids old's own documented
+double-counting bug; `p.maintRate` replaced by A1's approved new formula).
+
+This surfaced a second real, confirmed drop: `irmaaAdd` (the Medicare IRMAA surcharge, triggered
+2 years after any taxable property disposition with `recognizedGain>0` and `mode!=='full_1031'`)
+was a separate additive term in old's `baseOut`. The new engine's `computeDispositions()` still
+computes the exact same trigger-year set (`irmaaYears`, verified identical logic/condition to
+old's), but `buildMonthlyScenario` never actually charged it anywhere -- computed but silently
+unused. User: this matters specifically for this household (sale years can spike MAGI into
+IRMAA brackets on the 2-year lookback) -- port it back verbatim, same minimal restore-old-
+semantics approach as rental.
+
+Fixed: added `irmaaAddMo = _irmaaYears.has(calYear) ? BASE.irmaaSurge*2 : 0` to `tier1`, exposed
+as `fc_irmaa` (monthly) / `irmaa` (annual). Verified on a real trigger scenario (sell 15th St
+2028 Q2, recognized gain ~$868K) via a standalone engine run: fires at exactly $700/mo for all
+of calendar 2030 (2028+2) and nowhere else -- matching `BASE.irmaaSurge(350) x 2 persons`, flat,
+single year, exactly the old mechanism.
+
+--- THE ZERO-VALUE BUG (found while building IRMAA/rentalOpCost's regression guards) ---
+
+Added R16 (a direct engine-level IRMAA regression test) -- passed cleanly first try. Building
+A5 into an actual regression guard (it previously asserted `rwZero <= rwBase`, trivially
+satisfied even when nothing moved) surfaced something new: setting the "STR platform fee"
+slider to 0% produced the EXACT SAME reqWork as the 3% default, to the dollar, in the real
+browser. Traced it to App.jsx's `sc -> engine params` conversion:
+`strPlatformPct:(sc.strPlatformPct||3)/100` -- `||` treats a literal 0 as falsy, so setting the
+slider to 0% silently fell back to the 3% default. Confirmed via a standalone engine check with
+the SAME buggy pattern reproduced (delta=0) and then fixed (delta=$84/mo, matching the real
+expected 3% platform fee on 15th St's ~$33.6K/yr STR gross).
+
+This is present at BOTH sc->params conversion sites in App.jsx (`buildRowsFromSnapshot` for
+pins, and the live `liveParams` useMemo), for FOUR fields with the same `||nonzero-default`
+pattern: `strPlatformPct`(->3), `strCleanPct`(->4), `ltrVacancyPct`(->4), `mtrCleaningFlat`
+(->300). `mgrPct` is unaffected only because its default already is 0. Confirmed this predates
+the v5 refactor entirely (the conversion lines are untouched by the single-engine collapse) --
+a real, live v4.6.0 bug, found only because a regression-test rewrite happened to need a working
+0% lever.
+
+User's explicit decision: fix now (mechanical, same restore-correct-semantics pattern as the
+other two), but as its OWN separately-versioned commit (v5.0.1), not folded into the v5.0.0
+refactor story, since this one CHANGES v4.6.0 behavior rather than restoring a v5 regression.
+Required checking the 3 real baseline pins first for safety -- confirmed all three use the
+non-zero defaults for all 4 affected fields (strPlatformPct:3, strCleanPct:4, ltrVacancyPct:4,
+mtrCleaningFlat:300 in every pin's `liveSc`), so the fix doesn't move any committed fixture.
+Fixed: `||` -> `??` (nullish coalescing) at both call sites, for all 4 fields.
+
+A5 (strengthened threshold + `setSliderExact('STR platform fee', ...)` instead of the fuzzy
+`setSlider`, which was silently grabbing a wrong/unrelated slider under the real label mismatch)
+now doubles as the regression guard for BOTH the rentalOpCost fix and the zero-value fix
+simultaneously -- it can only pass if the slider genuinely reaches 0% (needs the v5.0.1 fix) AND
+that 0% genuinely nets into reqWork (needs the v5.0.0 fix). A6 fixed the same way for consistency.
+
+--- THE EXHAUSTIVE CHECKLIST AND THE FOURTH FINDING ---
+
+User's bar for commit: three bugs found by audit (two of them the identical "old engine netted
+a cost, new engine silently drops it" pattern) with a 114-test green suite catching none of
+them cleanly is not sufficient assurance. Required a complete, positive-confirmation checklist:
+every income line, cost, tax, surcharge, credit, and adjustment the old engine computed, mapped
+to where it lands in the new engine, explicitly flagging anything computed differently or that
+can't be fully accounted for.
+
+Produced the full table (see below, "OLD -> NEW FIELD CHECKLIST" -- this is the artifact, kept
+here verbatim for the record) covering every income line, every term of old's `baseOut`/new's
+`tier1` (all nine now match, including the restored IRMAA term), the debt-sweep/one-time-pool-
+routing mechanism, and every NW component. While tracing the one-time pool-year routing in
+detail, found a fourth item: old's pool-year block had its OWN mortgage-principal-bucket step
+(routing sale-proceeds residual through extra mortgage paydown, gated on `p.mtgPrincipalOn`,
+BEFORE it could reach savings); new's pool-year block has no equivalent step -- only the ONGOING
+per-month `mtgPrincipalOn` block exists.
+
+Verified this precisely with a constructed scenario (sell 15th St 2026, `mtgPrincipalOn:true,
+uncapped`, `payOffHI:true` to isolate the mechanism) and traced the TRUE resulting mortgage
+balance one year out (not the same-year snapshot, which differs in timing convention between
+the two engines' pool-year-vs-ordinary-month capture points and would have been a false alarm).
+Old: 6th St ends at $229,424. New: ends at $278,718 (~$49K higher, i.e. less paid down). The
+ongoing per-month `mtgPrincipalOn` block DOES catch the one-time residual (via `toSavings`'s
+`_oneTimeToSavings` blend) -- this is NOT a case of money vanishing like rental/IRMAA. The ~$49K
+gap is fully explained by the ALREADY-approved B2 fix: old's annual pool-year routing never
+modeled reserve/buffer fills at all ("annual approximation: reserve buckets aren't modeled
+here"), while new correctly fills rd/ob ($45,000 in this trace) before the mortgage bucket gets
+a turn -- accounting for nearly all of the difference. User agreed this is the B2 fix working
+correctly, not a bug.
+
+A narrower, real issue DID surface from the same trace: the DISPLAYED `wfToSavings`/
+`oneTimeSweep` field is captured from `_oneTimeSweep` at the top of the pool-year block, BEFORE
+the ongoing `mtgPrincipalOn` block (which runs later in the same month) can reduce it via
+`_takenFromSavings`. The actual money flow is correct -- `sweepToSavings`/`savingsAcc` (and
+therefore NW) use the properly-reduced `toSavings` value -- but the displayed conservation-check
+field (`settleDraw+wfDebtPaid+wfReserveFill+wfToSavings === residual`) overstates how much
+reached true savings whenever `mtgPrincipalOn` is combined with a sale year, since it doesn't
+account for the slice that actually went to mortgage paydown instead.
+
+User's decision: do NOT fix in this commit. `mtgPrincipalOn` defaults off and is confirmed off
+in all 3 baseline pins -- doesn't touch the committed baseline, and NW/reqWork/savingsAcc are
+unaffected (only a display/conservation-check label is wrong in this narrow combination). Log
+it as a named, diagnosed follow-up instead (see OPEN ITEMS below) so it isn't lost.
+
+--- OLD -> NEW FIELD CHECKLIST (the artifact, kept verbatim for future reference) ---
+
+Income lines:
+  pension -> pension (avgMo)                                    -- identical
+  workInc -> workInc/workIncome (avgMo)                          -- identical
+  yourSs, brendaSs (calendar-pegged period totals) -> same        -- identical
+  rental (NET, unitSegmentNet) -> rental (GROSS, unitSegmentGross) -- intentional per fix-#1
+    scope; passive nets it back out instead of rental itself carrying the old convention
+  drawInc (scheduled + blended settlement draw) -> drawInc (scheduled only) + settleDraw
+    (separate) -- intentional, already tested (A4/S3/S6 explicitly verify disc/surplus exclude
+    the one-time draw)
+
+Cost lines (baseOut -> tier1), all nine terms now match:
+  mtgPmt -> mtg | healthAnnual -> health | irmaaAdd -> irmaa/fc_irmaa (FIXED this session,
+  was completely absent) | propCost -> propCost | core -> core | maint(value x maintRate) ->
+  maint(struct x maintStr%, A1 approved formula change) | famLoanAnnual -> famLoan |
+  minDebt -> hiMins | taxAnnual -> tax/fc_tax (C1/B3 approved precision gains)
+
+Debt sweep / one-time pool routing:
+  accel -> sweep/debtSweep (B1 approved fix)
+  splitProtect (diCap-bundled) -> cfSplitProtect/effectiveFloor (direct discFloor/rd/ob,
+    approved -- old's bundling was the cruder mechanism, self-documented as double-counting-prone)
+  annualSweepToSav -> sweepToSavings + wfToSavings/wfReserveFill (B2 approved split)
+  drawByYear/wfDebtByYear/wfSavByYear -> settleDraw/wfDebtPaid/wfReserveFill+wfToSavings
+  mtgExtraBoundaryByYear (pool-year mortgage-principal-bucket step) -> NO dedicated pool-year
+    step (only the ongoing per-month mtgPrincipalOn block) -- FLAGGED, not fixed, see OPEN ITEMS
+
+NW components:
+  valById/primVal/dplxVal/lafVal -> propValue (D1, continuous mo/12, approved new capability)
+  balById/primBal/dplxBal/lafBal -> propMtgBal (sale-year ownership-gating bug already fixed
+    pre-this-session)
+  cashAst -> hardcoded 0 (A3, approved, confirmed inert)
+  nw -> includes savingsAcc (own Phase-1 bug, already fixed)
+
+Everything else (invested, hiDebtK, ccBal/sophiaBal/nolanBal, ioMode, dispoTax/dispoNet/
+settlementOut, loanStarts/loanPayoffs, mtgTransitions/mtgPayoffs [upgraded to structured, D4],
+mtgExtra, primBalRaw/dplxBalRaw/lafBalRaw, propRentalYr [gross, same root cause as rental, not
+separately actionable], all 15 cumulative fields, dispoResults/dispoResultsNoOffset): matches.
+
+Cross-check method (not just manual reading): every BASE.* constant referenced in old vs. new
+engine.js -- extracted both as sorted lists, compared, IDENTICAL sets (28 constants each,
+including BASE.irmaaSurge now actually used). Every p.* params-field referenced in old vs. new
+-- only 2 genuine differences (diCap, maintRate), both confirmed approved/superseded above, not
+drops. Nothing else in the old engine is unaccounted for.
+
+--- CHECKPOINT 1b: FINAL STATE ---
+
+Full suite, after all fixes (rentalOpCost, IRMAA, zero-value, all test corrections, R16 added):
+114/114 passed (114 because R16 is new). Confirmed each previously-failing test now passes for
+the right reason (real behavior fixed), not a loosened assertion -- re-verified explicitly for
+R1, T3, A5/A6, B8, R16, S6 against real numbers, not just green checkmarks.
+
+--- CHANGED/ADDED TESTS, FULL LIST ---
+
+Mechanical (buildScenario shim only, no assertion change): R7, R9, R12, R13, R15, T1, U2, V2,
+V2b, V3, V4.
+R8: shim + conservation formula now includes wfReserveFill (B2).
+S6: reads surplus instead of deleted fcfChart; dropped a self-comparison assertion made
+  meaningless by A4's unification.
+R1: gross-to-gross comparison, same real months averaged on both sides (was net-vs-gross,
+  single-month-vs-period-average -- two unrelated invalid assumptions stacked).
+T3: reads wfData[0].fc_core directly instead of the annual-averaged core field -- removes the
+  partial-year-averaging-window precision question entirely instead of picking a tolerance.
+B8: lever changed to an actual property sale (verified 0%-split lever produces genuine $0 in
+  this scenario; sale lever verified to produce >$1M).
+A5: strengthened <= to a real magnitude floor (>50, ~$84 expected); switched to
+  setSliderExact('STR platform fee', ...) -- the fuzzy setSlider('Platform fee', ...) was
+  silently grabbing a wrong/unrelated slider (label never matched). Now doubles as the
+  regression guard for both the rentalOpCost fix and the zero-value fix.
+A6: same slider-label fix as A5, for consistency.
+R16 (new): IRMAA regression guard -- fires exactly 2yrs post-disposition, $700/mo, nowhere else.
+E5, L1: version-string assertions updated v4.6.0 -> v5.0.0.
+
+--- ENGINE/APP CHANGES ---
+
+engine.js:
+  - aggregateMonthlyToAnnual's `passive` nets avgMo('rentalOpCost') back out (v5.0.0 fix).
+  - buildMonthlyScenario computes irmaaAddMo from computeDispositions' irmaaYears (already
+    computed, previously unused), folds it into tier1, exposes fc_irmaa (monthly)/irmaa
+    (annual) (v5.0.0 fix).
+
+App.jsx:
+  - v5.0.0 changelog entry prepended documenting the refactor + both restores.
+  - Version badge + header: v4.6.0 -> v5.0.0.
+  - v5.0.1 (separate concern, own changelog note at each site): `||` -> `??` for
+    strPlatformPct/strCleanPct/ltrVacancyPct/mtrCleaningFlat at both sc->params conversion
+    sites (buildRowsFromSnapshot, live liveParams useMemo).
+
+--- COMMITS ---
+
+Two commits landed, exactly as the user specified -- v5.0.0 (the refactor + rental/IRMAA
+restores, told as one story) and v5.0.1 (the zero-value fix, called out as an unrelated
+pre-existing v4-era bug) -- see git log for exact hashes/messages.
+
+--- OPEN ITEMS FOR A FUTURE SESSION ---
+
+1. mtgPrincipalOn + pool-year wfToSavings display inconsistency (named this session, NOT
+   fixed): when a discretionary extra-mortgage-principal sweep (mtgPrincipalOn, off by default)
+   is enabled AND a property sale lands in the same year as any pooled residual, the DISPLAYED
+   `wfToSavings`/`oneTimeSweep` figure (and the pooled-routing conservation check that sums
+   against it) overstates true savings, because it's captured before the ongoing
+   mtgPrincipalOn block's later interception reduces it. The actual money (savingsAcc, NW,
+   reqWork) is correct -- only the display/audit label is wrong. Confirmed: off in all 3 real
+   pins, doesn't touch the committed baseline. Fix, if pursued, is narrow: capture wfToSavings/
+   oneTimeSweep AFTER the mtgPrincipalOn block's toSavings reduction, not before.
+2. Nolan-loan grace-period gate real-world calendar accuracy (carried forward from v4.3.0,
+   still unverified -- unrelated to this session's work).
+3. A capped reserve-FUNDING display (separate from the now-uncapped A1 cost line), deferred
+   from A1's original decision in session32 -- not built, no new information this session.
+4. A genuine "keep everything, never sell" scenario is still not one of the 3 saved pins --
+   this session's counterfactual-engine check covers the modeling question (A1 exposure) but
+   isn't a saved, reusable pin. Consider adding one if this comparison is wanted again.

@@ -617,106 +617,24 @@ export function disposeAsset(prop, mode, opts = {}) {
 }
 
 // =============================================================================
-// ANNUAL PROJECTION ENGINE
+// DISPOSITIONS (v5.0.0) -- extracted from the old buildScenario so BOTH the
+// monthly engine (for its sale-year pooled-routing timing) and the annual
+// aggregation layer (for the Reconciliation/Disposition-breakdown cards) can
+// call the SAME computation, instead of the monthly engine depending on the
+// annual engine's output (which is what created the circularity risk once
+// the annual view became an aggregation OF the monthly engine, rather than
+// the other way around). Pure function of params only -- no month-by-month
+// state, so it's cheap to call once per engine run.
 // =============================================================================
-export function buildScenario(p) {
-  const rows=[];
-  // v4.3.0: explicit start-date anchor (see monthsInYear/monthsElapsedBeforeYear above).
-  const startMonth = Math.min(12, Math.max(1, Math.round(BASE.startMonth||1)));
-  let ccBal      = p.payOffHI ? 0 : (p.ccBal||CC_BAL);
-  let sophiaBal  = p.payOffHI ? 0 : (p.sophiaBal||SOPHIA_LOANS.reduce((s,l)=>s+l.bal,0));
-  let nolanBal   = p.payOffHI ? 0 : (p.nolanBal||NOLAN_LOANS.reduce((s,l)=>s+l.bal,0));
-  const ccRate   = p.ccRate    || CC_RATE;
-  const ccMin    = p.ccMin     || 1200;
-  const sophiaRate= p.sophiaRate|| 0.0814;
-  const sophiaMin = p.sophiaMin || 737;
-  const nolanRate = p.nolanRate || 0.084;
-  const nolanMin  = p.nolanMin  || 1787;
-  let nolanActive=false;
-  let debtCleared = p.payOffHI ? true : false;
-  let debtClearedYr = p.payOffHI ? BASE.startYear-1 : null;
-
-  // v3.2.0 generalized loan segments (replaces famLoanAmt/famLoanRate)
-  // v4.5.0: includeInSweep (one flag, doing double duty for both the ongoing
-  // sweep AND the one-time closing payoff) split into two independent flags --
-  // sweepable (ongoing surplus-sweep) and closingEligible (one-time property-
-  // sale-closing lump-sum). Both default false -- an added loan is LI by
-  // default: simple scheduled amortizing payments only, no acceleration
-  // unless explicitly opted in. These are genuinely amortizing loans (no
-  // mortgage IO/recast machinery) -- the monthly stepping loop below is
-  // unchanged from pre-v4.5.0.
-  const loans = (p.loans||[]).map(l=>({
-    label:  l.label||'Loan',
-    rate:   l.rate||0,
-    amount: l.amount||0,
-    sweepable:       !!l.sweepable,
-    closingEligible: !!l.closingEligible,
-    pmt:    loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
-    // v4.3.0: was `-6`, a magic number that silently assumed absMo=0 was June of
-    // startYear (copied from wfData's old hardcoded June anchor) -- now keyed to
-    // the real explicit start month so a loan's absolute offset matches BOTH
-    // engines' absMo, which likewise now count from BASE.startMonth.
-    startAbs: Math.max(0, ((l.startYear||BASE.startYear)-BASE.startYear)*12 + ((l.startMonth||BASE.startMonth)-BASE.startMonth)),
-    bal: 0, started:false,
-  }));
-  const sweepLoanQ = ()=>loans.filter(L=>L.sweepable && L.bal>0)
-    .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
-
-  // v4.0.0-A: property-centric mortgage state, one machine per property (see
-  // mortgageBalanceClosed/mortgagePaymentClosed for the closed-form equivalent
-  // used by disposeAsset). ioYears:0 (Barberry/Lafayette) recasts immediately.
+export function computeDispositions(p){
   const properties = p.properties || [];
-  const mtgStates = properties.map(prop=>({
-    id: prop.id, label: prop.label, isPrimary: prop.isPrimary,
-    p: { ...prop.mortgage }, bal: prop.mortgage.balance,
-    recast: null, ioPmtAtRecast: 0, transAnnounced: false, payoffAnnounced: false,
-  }));
-  const mtgById = Object.fromEntries(mtgStates.map(s=>[s.id,s]));
-  const mtgTransByYear = {}, mtgPayoffByYear = {};
-  // One month of scheduled mortgage activity; returns the payment made.
-  function stepMtg(st, calYear, mo0to11, owned){
-    const m=st.p;
-    const k=(calYear-m.originYear)*12 + ((mo0to11+1)-m.originMonth);
-    if(k<0 || !owned || st.bal<=0) return 0;
-    const interest = st.bal*m.rate/12;
-    if(k < m.ioYears*12) return interest;              // IO: pay interest, balance flat
-    if(st.recast==null){                                // first P&I month: recast on ACTUAL balance
-      st.recast = loanMonthlyPmt(st.bal, m.rate, Math.max(1, m.termYears*12 - k));
-      st.ioPmtAtRecast = interest;
-      // Only an emit event when there was a genuine IO period (ioYears>0) --
-      // ioYears:0 properties recast on their very first stepped month, which
-      // isn't a "transition" worth telling the user about.
-      if(m.ioYears>0) (mtgTransByYear[calYear]=mtgTransByYear[calYear]||[]).push({label:st.label, delta:Math.round(st.recast-interest)});
-    }
-    const pmt = Math.min(st.recast, st.bal + interest);
-    st.bal = Math.max(0, st.bal + interest - pmt);
-    return pmt;
-  }
-  // Extra principal (bucket / annual mirror); flags early payoff.
-  function mtgExtraPrincipal(st, calYear, owned, amount){
-    if(!st || !owned || st.bal<=0 || amount<=0) return 0;
-    const pay=Math.min(amount, st.bal);
-    st.bal-=pay;
-    if(st.bal<=0 && !st.payoffAnnounced){
-      st.payoffAnnounced=true;
-      (mtgPayoffByYear[calYear]=mtgPayoffByYear[calYear]||[]).push(st.label);
-    }
-    return pay;
-  }
-  // Mortgage-principal waterfall bucket (v3.4.0, carried): held 6th & 15th
-  // only, in that priority order -- Lafayette/Barberry excluded by design.
-  const MTG_PRINCIPAL_ELIGIBLE_IDS = ['sixth','fifteenth'];
-
-  // -----------------------------------------------------------------
-  // v4.0.0-A per-property sale / 1031 disposition (generalized over
-  // properties[] -- no more hardcoded sixth/barberry/fifteenth).
-  // -----------------------------------------------------------------
   function computeDispo(prop){
     const hold = prop.hold||{mode:'keep'};
     if(hold.mode==='keep') return {mode:'keep', year:Infinity, afterTaxNetProceeds:0, totalTax:0, recognizedGain:0, caSourceDeferredGain:0};
     // v4.2.5: disposition sale price is the entered property value, used verbatim --
-    // appreciation is NEVER applied to sale price (see the appreciating valById calc
-    // below for held properties, which is the correct place for appreciationPct).
+    // appreciation is NEVER applied to sale price (see buildMonthlyScenario's own
+    // continuously-appreciating propValue for held properties, the correct place
+    // for appreciationPct).
     const fmv = prop.value;
     const saleMonth = quarterStartMonth(hold.quarter);
     const mtgB = mortgageBalanceClosed(prop.mortgage, mortgageMonthsSince(prop.mortgage, hold.year||2055, saleMonth));
@@ -729,17 +647,11 @@ export function buildScenario(p) {
       sec121Exclusion: hold.sec121Exclusion || 0,
       caSourceDeferredGain: hold.caSourceDeferredGain || 0,
       depreciationTaken: depTaken,
-      // v4.3.1: per-property opt-in, NOT a global default -- see disposeAsset's
-      // comment. Only 6th St's hold.sellingCostsInBasis is true (defaults.js).
       sellingCostsInBasis: hold.sellingCostsInBasis || false,
     };
     const res = disposeAsset(propObj, hold.mode, {
       saleMode: hold.saleMode,
       cashBoot: hold.cashBoot || 0,
-      // v4.3.1: per-property real-world rate override (6th St only, see
-      // defaults.js) -- undefined for every other property, so disposeAsset's
-      // `opts.sellingCostsPct ?? cfg.sellingCostsPct` falls through to the
-      // unchanged DISPO_DEFAULTS.sellingCostsPct (6%) global default.
       sellingCostsPct: hold.sellingCostsPct,
     });
     return { ...res, year: hold.year, quarter: hold.quarter, mode: hold.mode, caSourceDeferredGain: hold.caSourceDeferredGain || 0 };
@@ -773,16 +685,11 @@ export function buildScenario(p) {
     capUsed += cappedCaSlice;
   }
 
-  // v3.1.1 (carried): snapshot per-property results BEFORE the obligation's
-  // gain offset and same-year bump -- the CPA sheet assumes no offset, so the
-  // Reconciliation-vs-CPA card must compare against these regardless.
+  // Snapshot per-property results BEFORE the obligation's gain offset and
+  // same-year bump -- the CPA sheet assumes no offset, so the Reconciliation-
+  // vs-CPA card must compare against these regardless.
   const dispoResNoOffset = Object.fromEntries(Object.entries(dispoRes).map(([k,v])=>[k,{...v}]));
 
-  // One-Time Obligation (v4.0.0-A, was Settlement/§4.4). Assumed-100% gain
-  // offset: obligation.amount reduces recognized gain (capped at the year's
-  // gains pool) when offsetsCapitalGains is true -- no percentage slider.
-  // The offset only ever applies to the obligation's own year (single-year
-  // pooled model; there's no cross-year ambiguity to disambiguate anymore).
   const obligation   = p.obligation || {};
   const obligYr       = obligation.year || BASE.startYear;
   const obligAmt      = obligation.amount || 0;
@@ -826,7 +733,7 @@ export function buildScenario(p) {
     }
   }
 
-  // Per-year cash inflows / outflows -- pooled routing (§3.4): all same-year
+  // Per-year cash inflows / outflows -- pooled routing: all same-year
   // dispositions feed one pool; the obligation is a cash outflow from that pool.
   const yearCashAdd = {};   // dispo year -> $ inflow (Σ afterTaxNetProceeds)
   const yearCashSub = {};   // year -> $ outflow (one-time obligation)
@@ -836,9 +743,6 @@ export function buildScenario(p) {
   if(obligAmt > 0){
     yearCashSub[obligYr] = (yearCashSub[obligYr] || 0) + obligAmt;
   }
-  const drawByYear = {}, wfDebtByYear = {}, wfSavByYear = {};
-  const paydownDetailByYear = {}, loanStartsByYear = {}, loanPayoffsByYear = {};
-  const mtgExtraBoundaryByYear = {};
 
   // IRMAA fires 2 yrs after any taxable dispo (mode != 'full_1031', recognized gain > 0)
   const irmaaYears = new Set();
@@ -848,594 +752,646 @@ export function buildScenario(p) {
     }
   }
 
-  for(let yr=0;yr<=20;yr++){
-    const cal=BASE.startYear+yr;
-    // v4.0.0-A: "still owned this whole year" gate, generalized per property
-    // (same boolean convention as pre-v4: false for the sale year itself --
-    // NW/tax/maintenance drop out the year of sale, matching the disposition
-    // proceeds landing that same year). Income proration uses the finer
-    // per-quarter yearHeldFraction separately, below.
-    const keepMap = {};
-    for(const prop of properties){
-      const hold = prop.hold||{mode:'keep'};
-      keepMap[prop.id] = cal < (hold.mode==='keep' ? Infinity : (hold.year||2055));
-    }
-    const keepPrimary  = keepMap.sixth;
-    const keepDuplex   = keepMap.fifteenth;
-    const keepLafOwned = keepMap.barberry;
+  return { dispoRes, dispoResNoOffset, yearCashAdd, yearCashSub, obligYr, obligAmt, irmaaYears };
+}
 
-    // -- v4.0.0-B residual routing at the sale-year boundary, via the SHARED
-    //    helpers (splitResidual + planHiPaydown) so the monthly wfData block
-    //    applies the identical plan: (a) one-time draw, (b) the FULL post-draw
-    //    remainder cascades debt-first (avalanche) then the mortgage-principal
-    //    bucket then sweep savings. (Pre-v4.0.0-B this had a dedicated
-    //    hiPaydownPct pre-split before the avalanche; removed as redundant --
-    //    the avalanche already puts every dollar of the remainder against debt
-    //    before any of it reaches savings, so a separate "% to debt" dial
-    //    changed nothing except which bucket a dollar was logged under.)
-    //    Annual approximation: reserve buckets aren't modeled here, so the
-    //    one-time inflow goes straight to the debt sweep; what debt doesn't
-    //    absorb becomes sweep savings (chartData compounds it). --
-    if(yearCashAdd[cal] != null){
-      const residual = Math.max(0, (yearCashAdd[cal] - (yearCashSub[cal]||0)));
+// =============================================================================
+// SINGLE MONTHLY ENGINE (v5.0.0) -- the sole source of truth for all financial
+// logic: income, expenses, dispositions, taxes, debt paydown (HI + LI +
+// mortgage), the cash-flow waterfall, net worth components. Replaces the old
+// two-engine design (this function absorbs what both buildScenario's monthly
+// mirror loop AND the pre-v5 wfData block did, reconciling every known
+// divergence found in the v5 Phase 0 investigation -- see
+// v5_phase0_findings.md for the full before/after catalog). The annual/
+// Simulator view is now a pure aggregation of this function's output (see
+// aggregateMonthlyToAnnual below), not an independent calculation.
+//
+// A1 (v5.0.0): maintenance is now `struct6/15/Laf x maintStr% x propCPI`,
+// UNCAPPED, folded directly into Tier 1 (fixed costs) as an ordinary ongoing
+// cost line -- the old capped 5-year reserve-fund concept (res6/res15/resLaf)
+// is retired entirely, per the user's explicit decision: structure value is
+// the right driver (not market value), and uncapped is the honest lifetime
+// cost treatment. A capped reserve-FUNDING readout may return later as a
+// separate display-only view -- not built here. Direct, measured consequence:
+// the one-time sale-year pooled-proceeds routing's "reserve/buffer top-up"
+// step narrows from 5 buckets to 2 (rd/ob only), since there's no longer a
+// capped maintenance bucket to top off.
+// =============================================================================
+export function buildMonthlyScenario(p){
+  const dispo = computeDispositions(p);
+  const _yearCashAdd = dispo.yearCashAdd;
+  const _yearCashSub = dispo.yearCashSub;
+  const _irmaaYears = dispo.irmaaYears;
+
+  const _properties = p.properties || [];
+  const _propById = Object.fromEntries(_properties.map(pr=>[pr.id, pr]));
+  const ownedMo = (propId, calYear, mo1to12) => unitOwnedThisMonth(_propById[propId]?.hold, calYear, mo1to12);
+
+  // A1: uncapped, inflated, ongoing maintenance -- structure-value-based
+  // (Cash-Flow-tab struct6/15/Laf sliders, NOT properties[].value).
+  const _maint6Base   = (p.struct6  ||600)*1000*(p.maintStr||0.75)/100/12;
+  const _maint15Base  = (p.struct15 ||500)*1000*(p.maintStr||0.75)/100/12;
+  const _maintLafBase = (p.structLaf||250)*1000*(p.maintStr||0.75)/100/12;
+  const PROP_TAX_INS = {
+    sixth:     { tax: BASE.primTaxMo, ins: BASE.primInsMo },
+    fifteenth: { tax: BASE.dplxTaxMo, ins: BASE.dplxInsMo },
+    barberry:  { tax: BASE.lafTaxMo,  ins: BASE.lafInsMo  },
+  };
+
+  // Segment cost profile (§1 table) -- same helper used everywhere else.
+  const costOpts = {
+    strPlatformPct: p.strPlatformPct||0, strCleanPct: p.strCleanPct||0, mgrPct: p.mgrPct||0,
+    ltrVacancyPct: p.ltrVacancyPct||0, mtrCleaningFlat: p.mtrCleaningFlat||0,
+  };
+
+  const _paidYears = new Set();  // years where the sale-year pooled routing has been applied
+
+  // Generalized loans -- monthly state (rates already decimal in p).
+  const _loans = (p.loans||[]).map(l=>({
+    label: l.label||'Loan', rate: l.rate||0, amount: l.amount||0,
+    sweepable:       !!l.sweepable,
+    closingEligible: !!l.closingEligible,
+    pmt: loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
+    startAbs: Math.max(0, ((l.startYear||BASE.startYear)-BASE.startYear)*12 + ((l.startMonth||BASE.startMonth)-BASE.startMonth)),
+    bal: 0, started:false, startAnnounced:false, payoffAnnounced:false,
+  }));
+  const _sweepLoanQ = ()=>_loans.filter(L=>L.sweepable && L.bal>0)
+    .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
+
+  // Mortgage state, one machine per property.
+  const _mkMtg = (m,label)=>({p:{...m}, label, bal:m.balance, recast:null, ioPmt:0, transAnnounced:false, payoffAnnounced:false});
+  const _mtgSt = {};
+  for(const prop of _properties) _mtgSt[prop.id] = _mkMtg(prop.mortgage, prop.label);
+  const MTG_PRINCIPAL_ELIGIBLE_IDS = ['sixth','fifteenth'];
+  const _stepMtg = (st, calYear, calMonth1to12, owned)=>{
+    const m=st.p;
+    const k=(calYear-m.originYear)*12 + (calMonth1to12-m.originMonth);
+    if(k<0 || !owned || st.bal<=0) return 0;
+    const interest = st.bal*m.rate/12;
+    if(k < m.ioYears*12) return interest;              // IO: interest only, balance flat
+    if(st.recast==null){                                // recast on ACTUAL remaining balance
+      st.recast = loanMonthlyPmt(st.bal, m.rate, Math.max(1, m.termYears*12 - k));
+      st.ioPmt  = interest;
+    }
+    const pmt = Math.min(st.recast, st.bal + interest);
+    st.bal = Math.max(0, st.bal + interest - pmt);
+    return pmt;
+  };
+
+  const payOffHI = !!p.payOffHI;
+  const rdCap=p.rdCap||0, obCap=p.obCap||0, rdTopUp=p.rdTopUp||0, obTopUp=p.obTopUp||0;
+  const discFloor=p.discFloor||0, bufferMode=p.bufferMode||'seq', sweepDelay=p.sweepDelay||0;
+  const lifestyleSplit=p.lifestyleSplit||0, fcfSchedule=p.fcfSchedule||[];
+
+  // Running balances
+  let ccBal    = payOffHI ? 0 : (p.ccBal||60000);
+  let sophiaBal= payOffHI ? 0 : (p.sophiaBal||58057);
+  let nolanBal = payOffHI ? 0 : (p.nolanBal||141117);
+  const ccRate_    = p.ccRate    || 0.14;
+  const ccMin_     = p.ccMin     || 1200;
+  const sophiaRate_= p.sophiaRate|| 0.0814;
+  const sophiaMin_ = p.sophiaMin || 737;
+  const nolanRate_ = p.nolanRate || 0.084;
+  const nolanMin_  = p.nolanMin  || 1787;
+  let nolanOn = false;
+  let rdBal   = 0;   // rainy day balance
+  let obBal   = 0;   // operating buffer balance
+  let debtClearedMo = payOffHI ? 0 : -1;
+  let savingsAcc = 0;
+
+  const rows = [];
+  const _startMonthClamped = Math.min(12, Math.max(1, Math.round(BASE.startMonth||1)));
+  const startDate = new Date(BASE.startYear, _startMonthClamped-1);
+  // v5.0.0 bugfix: the old hardcoded 252 (=21*12) only covers exactly through
+  // December of year 20 when startMonth is January -- for any other start
+  // month (the actual default is July) it overshoots 252-monthsElapsedBeforeYear(21,startMonth)
+  // months PAST December of year 20, spilling into a spurious 22nd partial
+  // calendar year. This was a latent bug in the pre-v5 wfData block too (just
+  // never surfaced, because the old chartData only ever visited years present
+  // in the separately-bounded 21-row buildScenario output and silently
+  // ignored wfData's trailing overshoot months). monthsElapsedBeforeYear(21,
+  // startMonth) is the exact month count through Dec of year 20, matching the
+  // annual view's intended 21-year (yr 0-20) horizon precisely for any start month.
+  const _totalMonths = monthsElapsedBeforeYear(21, _startMonthClamped);
+  for(let mo=0; mo<_totalMonths; mo++){
+    const d = new Date(startDate.getFullYear(), startDate.getMonth()+mo);
+    const calYear = d.getFullYear();
+    const calMonth1to12 = d.getMonth()+1;
+    const inf    = Math.pow(1+p.inflation,   mo/12);
+    const coreinf= Math.pow(1+(p.coreCpi||p.inflation), mo/12);
+    const rg     = Math.pow(1+p.rentGrowth,  mo/12);
+    const pinf   = Math.pow(1+(p.propCpi||p.propInflation), mo/12);
+
+    // -- Pooled routing, applied once at the start of the pool year:
+    //    (a) one-time draw, (b) FULL post-draw remainder pays HI debt first
+    //    (avalanche), (c) rd/ob buffers fill to caps [A1: narrowed from 5
+    //    buckets to 2 -- res6/res15/resLaf retired], (d) survivor joins this
+    //    month's sweep/savings.
+    let _oneTimeSweep = 0, _settleDrawMo = 0, _oneTimeReserveFill = 0, _payDetailMo = null;
+    if((_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
+      const residual = Math.max(0, (_yearCashAdd[calYear] - (_yearCashSub[calYear]||0)));
       const split = splitResidual(residual, {
-        lifestyleDraw: cal===obligYr ? (p.settleLifestyleDraw||0) : 0,
+        lifestyleDraw: calYear===((p.obligation||{}).year||BASE.startYear) ? (p.settleLifestyleDraw||0) : 0,
       });
-      // v4.5.0: mkDebts/applyPlan (identically duplicated in wfData below)
-      // replaced by the shared buildDebtList/applyDebtPlan helpers -- the
-      // one-time closing lump-sum now gates loan inclusion on
-      // `closingEligible` specifically (was the SAME `includeInSweep` flag
-      // the ongoing sweep used -- now two independent flags). HI debt is
-      // always closing-eligible (hardcoded, unchanged behavior).
       const plan = planHiPaydown(split.remainder, buildDebtList(
-        {cc:{bal:ccBal,rate:ccRate}, sophia:{bal:sophiaBal,rate:sophiaRate}, nolan:{bal:nolanBal,rate:nolanRate}},
-        loans, 'closingEligible', p.payOffHI));
+        {cc:{bal:ccBal,rate:ccRate_}, sophia:{bal:sophiaBal,rate:sophiaRate_}, nolan:{bal:nolanBal,rate:nolanRate_}},
+        _loans, 'closingEligible', payOffHI));
       applyDebtPlan(plan, {
         cc:     pay=>{ccBal     = Math.max(0, ccBal-pay);},
         sophia: pay=>{sophiaBal = Math.max(0, sophiaBal-pay);},
         nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
-      }, loans);
-      // v3.4.0: the waterfall remainder passes through the mortgage-principal
-      // bucket (capped per month) before landing in sweep savings.
-      let survivor = split.remainder - plan.total;
-      if(p.mtgPrincipalOn && survivor>0){
-        const _cap = p.mtgPrincipalUncapped ? Infinity : (p.mtgPrincipalCap||0);
-        const room = Math.min(_cap, survivor);
-        let paid = 0;
-        for(const id of MTG_PRINCIPAL_ELIGIBLE_IDS) paid += mtgExtraPrincipal(mtgById[id], cal, keepMap[id], room - paid);
-        survivor -= paid;
-        mtgExtraBoundaryByYear[cal] = paid;
-      }
-      drawByYear[cal]          = split.draw;
-      wfDebtByYear[cal]        = plan.total;
-      wfSavByYear[cal]         = survivor;
-      paydownDetailByYear[cal] = plan.perDebt;
+      }, _loans);
+      _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
+      let rem = split.remainder - plan.total;
+      const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
+      const _rdFill = _fill(rdBal, rdCap); rdBal += _rdFill;
+      const _obFill = _fill(obBal, obCap); obBal += _obFill;
+      _oneTimeReserveFill = _rdFill+_obFill;
+      _oneTimeSweep = rem;    // (d) joins debt sweep if debt remains, else savings
+      _settleDrawMo = split.draw;
+      _paidYears.add(calYear);
     }
 
-    // v4.3.0: snapshot BEFORE this iteration's mo-loop runs -- row `yr`'s
-    // hiDebt is the balance as of the START of period yr (after any start-of-
-    // period pool routing above, before this period's ordinary monthly
-    // paydown), not the end-of-year value the old post-loop read produced.
-    // yr=0 -> no mo-loop has executed yet -> exact as-entered settings value
-    // (this is the fix for the "$60K setting shows $46K on the chart" bug).
-    // Mortgage balances (balById, below) already worked this way -- only HI
-    // debt was reading post-loop. wfData's hiDebtNow is likewise captured
-    // pre-decrement each month, so both engines now share the same START-OF-
-    // PERIOD snapshot convention/anchor -- but they can still report
-    // DIFFERENT calendar years for when debt clears entirely, because their
-    // avalanche/sweep amounts genuinely differ in magnitude for the same
-    // scenario (see the "[P1] Unify annual sweep model with wfData" backlog
-    // item -- a separate, larger, still-open issue this session did not
-    // touch). This fix closes the snapshot-TIMING half of that divergence,
-    // not the sweep-PACE half.
-    const hiDebt = p.payOffHI?0:(ccBal+sophiaBal+nolanBal);
-    if(hiDebt<=0 && !debtCleared){ debtCleared=true; debtClearedYr=cal; }
-    // v4.5.0: same start-of-year snapshot timing as hiDebt, for the SAME
-    // reason -- the `accel`/`debtSweep` row field below needs to know whether
-    // there's any sweepable debt (HI or LI) to gate on, not just HI, or the
-    // displayed sweep total would silently drop to 0 the moment HI clears
-    // even while a sweepable loan is still visibly being paid down faster
-    // than schedule (loopDebt inside the mo-loop already reflects this
-    // correctly for the actual balances -- this is the matching fix for the
-    // row-level REPORTED total). hiDebt itself stays HI-only, unchanged --
-    // still the correct basis for the "HI debt clear" milestone above.
-    const sweepableLoanBal = p.payOffHI?0:loans.reduce((s,L)=>s+(L.sweepable?L.bal:0),0);
+    // -- INCOME --
+    const pension  = BASE.pensionMonthly;
+    const _ssAbsMo = calYear*12 + calMonth1to12;
+    const yourSsMo = (p.ssStartYear && _ssAbsMo>=p.ssStartYear*12+(p.ssStartMonth||1)) ? p.ssAmount : 0;
+    const brendaSsMo = (p.ssBrendaStartYear && _ssAbsMo>=p.ssBrendaStartYear*12+(p.ssBrendaStartMonth||1)) ? BASE.brendaSsFRA : 0;
 
-    // v4.3.0: this row's period length -- monthsThisYear<12 only for yr=0 (a
-    // genuine partial first period). Every "$/mo rate -> this period's total"
-    // annualization below uses monthsThisYear instead of a flat 12, and the
-    // row.push conversions back to a displayed monthly rate divide by the
-    // same monthsThisYear -- net effect: the DISPLAYED monthly rate is
-    // unchanged from before this change, but the internal "total for this
-    // row's period" (tax estimate input, cumulative sums, debt-clear check)
-    // correctly reflects only the months actually simulated.
-    const monthsThisYear = monthsInYear(yr, startMonth);
-    const monthOffset = yr===0 ? startMonth-1 : 0;   // 0-based calendar-month offset within this row's year
-    const monthsElapsedBeforeYr = monthsElapsedBeforeYear(yr, startMonth);
-
-    // v4.3.0: growth/appreciation exponents use ELAPSED REAL YEARS SINCE THE
-    // TRUE START DATE (fractional for the partial first period), not the
-    // plain integer `yr` -- collapses to the old behavior exactly when
-    // startMonth===1. This is what keeps a mid-year start from front-loading
-    // a full year of growth at the first Jan-1 boundary, and matches the
-    // monthly wfData engine's continuous mo/12 elapsed-time basis.
-    const elapsedYrs = monthsElapsedBeforeYear(yr, startMonth)/12;
-    const inf    =Math.pow(1+p.inflation,elapsedYrs);
-    const coreinf=Math.pow(1+(p.coreCpi||p.inflation),elapsedYrs);
-    const propinf=Math.pow(1+(p.propCpi||p.propInflation),elapsedYrs);
-    const rg  =Math.pow(1+p.rentGrowth,elapsedYrs);
-    const pinf=propinf;
-    const app =Math.pow(1+p.reAppreciation,elapsedYrs);
-
-    // v4.4.0: SS is calendar-pegged like Medicare -- each spouse switches on
-    // at its own absolute calendar month (year*12+month), not a year-only
-    // boundary. yourSs/brendaSs are now this ROW'S PERIOD DOLLAR TOTAL (like
-    // healthAnnual below), summed month-by-month over the real months in
-    // this period (monthOffset+1..12, same convention as the healthAnnual
-    // loop further down) -- NOT a flat $/mo rate -- so a spouse's claim
-    // starting mid-period is prorated correctly instead of all-or-nothing
-    // for the whole row. Every downstream use of yourSs/brendaSs below
-    // (totalIncome, estimateTax, passive, row.push) has been adjusted to
-    // match this "period total" convention (see each site's own comment).
-    let yourSs=0, brendaSs=0;
-    for(let hm=monthOffset+1; hm<=12; hm++){
-      const absCalMo = cal*12+hm;
-      if(p.ssStartYear && absCalMo >= p.ssStartYear*12+(p.ssStartMonth||1)) yourSs += p.ssAmount;
-      if(p.ssBrendaStartYear && absCalMo >= p.ssBrendaStartYear*12+(p.ssBrendaStartMonth||1)) brendaSs += BASE.brendaSsFRA;
-    }
-    // v4.3.0: *monthsThisYear (was *12) -- these are $/mo rates annualized to
-    // "this row's period total"; yr=0 only covers the months actually
-    // simulated, matching the row.push conversions back to $/mo below.
-    const pension =BASE.pensionMonthly*monthsThisYear;
-    const workInc =workFromCurve(elapsedYrs, p.workPts)*monthsThisYear*inf;
-
-    // -- Rental income (v4.0.0-A: property/unit/segment model) --
-    // For each held property, for each unit, sum income across ALL covering
-    // segments (concurrent segments SUM), each netted by its kind's cost
-    // profile, prorated by quarters held in the sale year.
-    const costOpts = {
-      strPlatformPct: p.strPlatformPct||0, strCleanPct: p.strCleanPct||0, mgrPct: p.mgrPct||0,
-      ltrVacancyPct: p.ltrVacancyPct||0, mtrCleaningFlat: p.mtrCleaningFlat||0,
-    };
-    let rental = 0;
-    const propRentalYr = {};   // per-property annual $ this year (monthly mirror reuses this)
-    for(const prop of properties){
-      const heldFrac = yearHeldFraction(prop.hold, cal);
-      let propGross = 0;
-      if(heldFrac>0){
+    // -- Rental income: for each held property, for each unit, sum GROSS +
+    //    NET across all covering segments, per-property broken out (D2).
+    let rentalMo = 0, _rentalNetMo = 0;
+    const propRentalMo = {};
+    for(const prop of _properties){
+      let propGross = 0, propNet = 0;
+      if(ownedMo(prop.id, calYear, calMonth1to12)){
         for(const unit of (prop.units||[])){
           for(const seg of (unit.segments||[])){
             const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
-            if(cal<f || cal>t) continue;
-            propGross += unitSegmentNet(seg, costOpts)*rg;
+            if(calYear<f || calYear>t) continue;
+            propGross += unitSegmentGross(seg)/12*rg;
+            propNet   += unitSegmentNet(seg, costOpts)/12*rg;
           }
         }
       }
-      // v4.3.0: yearHeldFraction only prorates for a mid-YEAR SALE -- it has
-      // no notion of a mid-year SIM START, so multiply by monthsThisYear/12
-      // for the partial first period (yr=0) to avoid counting rental income
-      // for months before the model's start date. Approximate for the (rare,
-      // and separately flagged for validation) case of a sale scheduled
-      // earlier in the start year than the start month itself -- heldFrac
-      // would then still count those already-past months as "held."
-      const propAnnual = propGross*heldFrac*(monthsThisYear/12);
-      propRentalYr[prop.id] = propAnnual;
-      rental += propAnnual;
+      propRentalMo[prop.id] = Math.round(propGross);
+      rentalMo += propGross; _rentalNetMo += propNet;
     }
+    const rentalOpCost = Math.round(rentalMo - _rentalNetMo);
+    const wkInc     = workFromCurve(mo/12, p.workPts)*inf;
+    // A3: ad-hoc scheduled lifestyle draws used to be funded from `cashAst`
+    // (guarded by `min(d.amount, cashAst+d.amount)`) -- since cashAst is
+    // retired as inert (measured $0 in every scenario, see A3), that guard
+    // never actually bound in practice, so injecting the full amount
+    // unconditionally in the scheduled year's first month is behaviorally
+    // identical to the old path for every real scenario, just simpler.
+    const yrIndexNow = calYear - BASE.startYear;
+    const isFirstMonthOfYr = mo===0 || calMonth1to12===1;
+    const drawInc = isFirstMonthOfYr
+      ? (p.lifestyleDraws||[]).reduce((s,dr)=>s+(dr && dr.yr===yrIndexNow && dr.amount>0 ? dr.amount : 0), 0)
+      : 0;
+    const totalInc  = pension+yourSsMo+brendaSsMo+rentalMo+wkInc-rentalOpCost+drawInc;
 
-    // -- cashAst: rerun from y=0..yr. v3.2.0: sale proceeds no longer land in
-    //    invested cash (direct-to-invested shortcut removed) -- they route
-    //    through settlement -> draw -> paydown -> waterfall, and the waterfall
-    //    survivor shows up as sweep savings. Only a settlement year WITHOUT
-    //    covering proceeds still pulls from invested cash (shortfall). --
-    // v4.3.0: y<yr (was y<=yr) -- cashAst for row `yr` reports the balance as
-    // of the START of period yr (before that period's own contribution),
-    // matching the hiDebt/mortgage-balance snapshot convention below so a
-    // row's NW components all describe the same instant. yr=0 -> empty range
-    // -> 0, i.e. the exact as-entered starting cash position.
-    let cashAst = 0;
-    for(let y=0; y<yr; y++){
-      const yCal = BASE.startYear + y;
-      cashAst -= Math.max(0, (yearCashSub[yCal]||0) - (yearCashAdd[yCal]||0));
-      // Floor at 0: if the settlement exceeds available cash, the shortfall
-      // is funded outside the model (loan / retirement acct / deferral). Not modeled explicitly.
-      if(cashAst < 0) cashAst = 0;
-      if(y>0) cashAst *= (1+p.investReturn);
-      for(const d of (p.lifestyleDraws||[])){
-        if(d && y===d.yr && d.amount>0) cashAst = Math.max(0, cashAst - d.amount);
-      }
-    }
-
-    // Lifestyle draws as income + v3.2.0 settlement lifestyle draw (from residual)
-    let drawInc = 0;
-    for(const d of (p.lifestyleDraws||[])){
-      if(d && yr===d.yr && d.amount>0){
-        const preDraw = cashAst + d.amount;
-        drawInc += Math.min(d.amount, preDraw);
-      }
-    }
-    drawInc += (drawByYear[cal] || 0);
-    // v4.4.0: no *monthsThisYear here -- yourSs/brendaSs are now already this
-    // row's period DOLLAR TOTAL (summed month-by-month above), unlike
-    // pension/workInc which are still flat $/mo rates needing the multiply.
-    const totalIncome=pension+workInc+(yourSs+brendaSs)+rental+drawInc;
-
-    // -- NW pieces (per-property, gated) --
-    // v4.2.5: this is the one place appreciationPct should compound prop.value --
-    // Net Worth for a still-held property grows over time; disposition sale price
-    // (computeDispo above) intentionally does NOT do this (entered value, verbatim).
-    const valById = {};
-    for(const prop of properties){
+    // -- D1: property appreciation -- continuous monthly compounding
+    //    (mo/12), gated 0 once sold. Sale price itself never uses this (see
+    //    computeDispositions -- entered value verbatim, unaffected).
+    const propValue = {};
+    for(const prop of _properties){
       const appPct = prop.appreciationPct ?? p.reAppreciation;
-      // v4.3.0: elapsedYrs (fractional, real time since the true start date),
-      // not plain `yr` -- see the note above `elapsedYrs`. yr=0 -> factor 1 ->
-      // entered value verbatim (no appreciation yet), matching computeDispo's
-      // fmv convention above by construction, not by coincidence.
-      valById[prop.id] = keepMap[prop.id] ? prop.value*Math.pow(1+appPct,elapsedYrs) : 0;
+      propValue[prop.id] = ownedMo(prop.id, calYear, calMonth1to12) ? prop.value*Math.pow(1+appPct, mo/12) : 0;
     }
-    const primVal = valById.sixth, dplxVal = valById.fifteenth, lafVal = valById.barberry;
-    // v4.0.0-A: balances come from the per-property mortgage STATE (flat through
-    // IO absent extra principal, then amortizing from the recast -- ioYears:0
-    // properties amortize from origination).
-    const balById = {};
-    for(const prop of properties) balById[prop.id] = keepMap[prop.id] ? mtgById[prop.id].bal : 0;
-    const primBal = balById.sixth, dplxBal = balById.fifteenth, lafBal = balById.barberry;
-    const _mtgInt = properties.reduce((s,prop)=>s+balById[prop.id]*mtgById[prop.id].p.rate, 0);
-    // v4.4.0: /monthsThisYear -- estimateTax expects a $/mo SS rate (it does
-    // its own internal *12), so yourSs/brendaSs's new period-dollar-total
-    // convention needs averaging back down to a rate first. This preserves
-    // estimateTax's existing (already slightly approximate for a partial
-    // first year) *12 treatment unchanged -- not attempting to fix that
-    // separate, pre-existing approximation as part of this change.
-    const taxAnnual=estimateTax(p,pension,workInc,yourSs/monthsThisYear,brendaSs/monthsThisYear,rental,_mtgInt);
 
-    // -- Monthly mirror (same gating): reuse the annual rental figure directly --
-    const _inf0 = Math.pow(1+p.inflation, elapsedYrs);
-    const _pinf0= Math.pow(1+p.propInflation, elapsedYrs);
-    // v4.3.0: /monthsThisYear (was /12) -- `rental` above is already this
-    // PERIOD's total (partial for yr=0), so recovering its average $/mo rate
-    // divides by the months actually in the period, not a flat 12.
-    const _rental0 = rental/monthsThisYear;
-    const _work0  = workFromCurve(elapsedYrs, p.workPts)*_inf0;
-    // v4.4.0: SS moved OUT of this row-level constant -- it's now computed
-    // live inside the mo-loop below (as `_ssMo`, using the loop's own real
-    // calMonth1to12) so the debt-availability gauge sees the exact calendar
-    // month a spouse's SS switches on, not a year-level approximation.
-    const _incMoBase = BASE.pensionMonthly + _rental0 + _work0;
-    const _propC0 = (keepDuplex?(BASE.dplxTaxMo+BASE.dplxInsMo):0)
-                  + (keepPrimary?(BASE.primTaxMo+BASE.primInsMo):0)
-                  + (keepLafOwned?(BASE.lafTaxMo+BASE.lafInsMo):0);
-    const _pinf0perMo = _pinf0/12;
-    const _maint0 = properties.reduce((s,prop)=>s+(keepMap[prop.id]?prop.value*p.maintRate*_pinf0perMo:0), 0);
-    const _core0  = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*_inf0;
-    // v4.1.3: health is no longer flattened to a single per-year figure here --
-    // it varies within the year (You -> Medicare, birth-date-derived -- Oct
-    // 2026, v4.4.0), computed per exact month inside the loop below via
-    // healthMonthly(cal, calMonth1to12, p).
-    // v4.0.0-A: mortgage payments are state-driven per month (IO -> recast)
-    // inside the loop below, for ALL properties (Lafayette/Barberry included).
-    // v4.3.0: taxAnnual/monthsThisYear (was /12) -- taxAnnual is this period's
-    // total, so its $/mo rate divides by the months actually in the period.
-    const _fixedMoNoHealth = _propC0 + _core0 + _maint0 + taxAnnual/monthsThisYear;
+    // -- TIER 1: FIXED COSTS (A1: maintenance folded in here, uncapped) --
+    const health = healthMonthly(calYear, calMonth1to12, p);
+    const hiDebtNow = ccBal+sophiaBal+nolanBal;
+    // D2: per-debt balances, same pre-decrement snapshot convention as hiDebtNow.
+    const ccBalNow=ccBal, sophiaBalNow=sophiaBal, nolanBalNow=nolanBal;
+    let mtg = 0;
+    const propMtgBal = {}, propIoMode = {};
+    for(const prop of _properties){
+      const owned = ownedMo(prop.id, calYear, calMonth1to12);
+      mtg += _stepMtg(_mtgSt[prop.id], calYear, calMonth1to12, owned);
+      // Gated by ownership (0 once sold) -- matches the old annual engine's
+      // `balById[id] = keepMap[id] ? mtgById[id].bal : 0` convention. Without
+      // this gate, a sold property's mortgage state simply stops being
+      // stepped (stays frozen at its pre-sale balance forever, since
+      // _stepMtg's `owned` guard returns early without touching st.bal) --
+      // reading it ungated would wrongly keep subtracting a paid-off
+      // mortgage from NW for every year after the sale.
+      propMtgBal[prop.id] = owned ? Math.round((_mtgSt[prop.id]?.bal)||0) : 0;
+      // D2/aggregation: still inside its contractual IO window (recast hasn't
+      // happened yet) -- same definition the old annual engine's `ioMode` used.
+      propIoMode[prop.id] = owned && _mtgSt[prop.id].recast==null && _mtgSt[prop.id].bal>0 && (prop.mortgage?.ioYears||0)>0;
+    }
+    const core      = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf;
+    let famLoan = 0;
+    const loanStartLabels=[], loanPayoffLabels=[];
+    for(const L of _loans){
+      if(!L.started && mo>=L.startAbs && L.amount>0){ L.bal=L.amount; L.started=true; }
+      if(L.bal>0){
+        L.bal *= (1+L.rate/12);
+        const pay = Math.min(L.pmt, L.bal);
+        L.bal -= pay;
+        famLoan += pay;
+        if(L.bal < 0.5) L.bal = 0;
+      }
+      if(L.started && !L.startAnnounced){ L.startAnnounced=true; loanStartLabels.push(L.label); }
+      if(L.started && L.bal<=0 && !L.payoffAnnounced){ L.payoffAnnounced=true; loanPayoffLabels.push(L.label); }
+    }
+    if(mo>=5) nolanOn=true;   // v4.3.0 follow-up: still an elapsed-months gate, unchanged from pre-v5
+    const minCC  = ccBal>0?ccMin_:0;
+    const minSoph= sophiaBal>0?sophiaMin_:0;
+    const minNol = nolanOn&&nolanBal>0?nolanMin_:0;
+    const hiMins = payOffHI?0:minCC+minSoph+minNol;
+    const propCost = Math.round(
+      _properties.reduce((s,prop)=>{
+        if(!ownedMo(prop.id, calYear, calMonth1to12)) return s;
+        const ti = PROP_TAX_INS[prop.id];
+        return s + (ti ? (ti.tax+ti.ins)*pinf : 0);
+      }, 0)
+    );
+    const _mtgInt = _properties.reduce((s,prop)=>{
+      if(!ownedMo(prop.id, calYear, calMonth1to12)) return s;
+      const st = _mtgSt[prop.id];
+      return s + st.bal*st.p.rate;
+    }, 0);
+    const taxMo = Math.round(estimateTax(p, BASE.pensionMonthly*12, wkInc*12, yourSsMo, brendaSsMo, rentalMo*12, _mtgInt) / 12);
+    // A1: maintTotal folds directly into tier1 -- no separate capped-reserve tier.
+    const maint6Mo   = ownedMo('sixth', calYear, calMonth1to12)     ? _maint6Base  *pinf : 0;
+    const maint15Mo  = ownedMo('fifteenth', calYear, calMonth1to12) ? _maint15Base *pinf : 0;
+    const maintLafMo = ownedMo('barberry', calYear, calMonth1to12)  ? _maintLafBase*pinf : 0;
+    const maintTotal = maint6Mo+maint15Mo+maintLafMo;
+    // Per-property breakdown -- exposed on the row (propMaintMo below) so any
+    // report/audit of the A1 maintenance change can read the real engine
+    // computation directly instead of re-deriving the formula separately.
+    const propMaintMo = { sixth: Math.round(maint6Mo), fifteenth: Math.round(maint15Mo), barberry: Math.round(maintLafMo) };
+    // v5.0.0 fix: IRMAA (Medicare Part B/D surcharge, triggered 2 years after
+    // any taxable property disposition -- mode!=='full_1031', recognizedGain>0)
+    // was a separate cost term (`irmaaAdd`) in the pre-v5 annual engine's
+    // baseOut, computed from the identical irmaaYears trigger logic now shared
+    // via computeDispositions -- ported here verbatim (flat $/mo, no inflation,
+    // matching old's `BASE.irmaaSurge*2*monthsThisYear` annual-then-prorated
+    // form exactly, just evaluated per month instead of per year).
+    const irmaaAddMo = _irmaaYears.has(calYear) ? BASE.irmaaSurge*2 : 0;
+    const tier1  = mtg+health+core+famLoan+hiMins+propCost+taxMo+maintTotal+irmaaAddMo;
 
-    // Start-of-year loan balance (loans starting this year count at full amount)
-    // v4.3.0: boundary is monthsElapsedBeforeYear(yr+1,...) (total real months
-    // elapsed through the end of this iteration), not (yr+1)*12 which assumed
-    // every year -- including a partial yr=0 -- contributes a full 12 months.
-    const loansBalPre = loans.reduce((s,L)=>s + (L.started ? L.bal : (L.startAbs < monthsElapsedBeforeYear(yr+1,startMonth) ? L.amount : 0)), 0);
-    let loanPmtYrTotal = 0, mtgPmtYrTotal = 0, mtgExtraYr = 0, mtgExtraFromSurplusYr = 0;
-    // v4.3.0: monthsThisYear/monthOffset/monthsElapsedBeforeYr (declared above,
-    // near the hiDebt snapshot) replace the old flat "always 12 months, mo+1
-    // is the calendar month" assumption -- yr=0 only steps through the real
-    // months remaining in the start year, and absMo is now TRUE elapsed
-    // months since BASE.startYear/startMonth (not yr*12+mo, which assumed
-    // every prior year contributed exactly 12 months).
-    for(let mo=0;mo<monthsThisYear;mo++){
-      const calMonth1to12 = monthOffset+mo+1;
-      const absMo=monthsElapsedBeforeYr+mo;
-      // -- v4.0.0-A mortgages: step monthly (IO -> recast) for ALL properties,
-      //    regardless of HI state. Uses TRUE monthly ownership (not the coarse
-      //    annual keepMap) so a mid-year sale stops payments at the exact
-      //    quarter boundary -- this is what keeps the annual engine agreeing
-      //    with the monthly wfData mirror in the sale year. --
-      let _mtgMo = 0;
-      for(const prop of properties){
-        const ownedMo = unitOwnedThisMonth(prop.hold, cal, calMonth1to12);
-        _mtgMo += stepMtg(mtgById[prop.id], cal, monthOffset+mo, ownedMo);
-      }
-      mtgPmtYrTotal += _mtgMo;
-      // -- v3.2.0 loans: step monthly regardless of HI debt state --
-      let _loanMo = 0;
-      for(const L of loans){
-        if(!L.started && absMo>=L.startAbs && L.amount>0){
-          L.bal=L.amount; L.started=true;
-          (loanStartsByYear[cal]=loanStartsByYear[cal]||[]).push(L.label);
-        }
-        if(L.bal>0){
-          L.bal *= (1+L.rate/12);
-          const pay = Math.min(L.pmt, L.bal);
-          L.bal -= pay;
-          _loanMo += pay;
-          if(L.bal < 0.5) L.bal = 0;
-        }
-      }
-      loanPmtYrTotal += _loanMo;
-      const _hlthMo = healthMonthly(cal, calMonth1to12, p);
-      // v4.4.0: live per-month SS (was the row-level `_ss0` constant) --
-      // reuses this loop's own calMonth1to12/cal, same absolute-calendar-
-      // month comparison as the row-total loop above, so the debt-
-      // availability gauge sees the exact month a spouse's SS switches on.
-      const _absCalMoNow = cal*12+calMonth1to12;
-      const _ssMo = (p.ssStartYear && _absCalMoNow>=p.ssStartYear*12+(p.ssStartMonth||1) ? p.ssAmount : 0)
-                  + (p.ssBrendaStartYear && _absCalMoNow>=p.ssBrendaStartYear*12+(p.ssBrendaStartMonth||1) ? BASE.brendaSsFRA : 0);
-      let _minsMo = 0, loopDebt = 0, xtra = 0;
-      if(!p.payOffHI){
-        // v4.3.0 FOLLOW-UP (deferred, not fixed here -- see journal): `absMo`
-        // is now TRUE elapsed months since BASE.startYear/startMonth (was
-        // yr*12+mo, Jan-anchored). This threshold's real-world meaning shifts
-        // with it -- e.g. for the current startMonth=7 default, "absMo<5"
-        // now reads as "before December of the start year" (Jul-Nov grace),
-        // where before this change it read as "before June of startYear"
-        // (Jan-May grace). Needs an explicit absolute-calendar-date decision,
-        // not a threshold tweak -- see wfData's twin gate in App.jsx.
-        if(absMo<5){ nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)); }
-        else{ nolanActive=true; }
-        const _minCC0  = ccBal>0?ccMin:0;
-        const _minSoph0= sophiaBal>0?sophiaMin:0;
-        const _minNol0 = nolanActive&&nolanBal>0?nolanMin:0;
-        _minsMo  = _minCC0+_minSoph0+_minNol0;
-        if(ccBal>0){    ccBal    =Math.max(0,ccBal   *(1+ccRate/12)   -_minCC0); }
-        if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate/12)-_minSoph0);}
-        if(nolanActive&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate/12)-_minNol0);}
-        // v4.5.0: was HI-only (ccBal+sophiaBal+nolanBal) -- now also counts
-        // sweepable loans[], so the avalanche below (and the mortgage-
-        // principal bucket's fromSurplus check just below) keeps sweeping a
-        // sweepable LI loan even after HI clears, instead of the sweep
-        // permanently going to 0 the moment HI's own balance hits 0.
-        loopDebt=ccBal+sophiaBal+nolanBal+loans.reduce((s,L)=>s+(L.sweepable?L.bal:0),0);
-      }
-      const _avail = (_incMoBase + _ssMo - _fixedMoNoHealth - _hlthMo - _mtgMo) - _minsMo - _loanMo;
-      const _splitProtect = Math.max(p.diCap, _avail*(p.lifestyleSplit/100));
-      if(!p.payOffHI){
-        xtra=loopDebt>0?Math.max(0,_avail-_splitProtect):0;
-        // v4.5.0: .filter().sort() replaced by the shared rankSweepQueue --
-        // same {g,s,r} shape, same behavior, just no longer duplicated inline.
-        const q=rankSweepQueue([
-          {g:()=>ccBal,    s:(v)=>{ccBal=v;},    r:ccRate},
-          {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;}, r:sophiaRate},
-          ...(nolanActive?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate}]:[]),
-          ...sweepLoanQ(),
-        ]);
-        for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
-      }
-      // -- v3.4.0 mortgage-principal bucket (annual mirror): fed by leftover
-      //    debt-sweep, or by the post-debt monthly surplus (which otherwise
-      //    becomes sweep savings -- subtracted from savings after the loop).
-      //    6th (4.875%) before 15th (4.35%); only while the property is held. --
-      if(p.mtgPrincipalOn){
-        const _cap = p.mtgPrincipalUncapped ? Infinity : (p.mtgPrincipalCap||0);
-        const fromSurplus = loopDebt<=0;
-        let room = Math.min(_cap, fromSurplus ? Math.max(0, _avail - _splitProtect) : Math.max(0, xtra));
-        let paid = 0;
-        for(const id of MTG_PRINCIPAL_ELIGIBLE_IDS){
-          const prop = properties.find(pr=>pr.id===id);
-          const ownedMo = prop ? unitOwnedThisMonth(prop.hold, cal, calMonth1to12) : false;
-          paid += mtgExtraPrincipal(mtgById[id], cal, ownedMo, room - paid);
-        }
-        mtgExtraYr += paid;
-        if(fromSurplus) mtgExtraFromSurplusYr += paid;
+    // -- FCF FLOOR: check schedule first, fall back to global discFloor --
+    const _fcfSched = fcfSchedule.find(s=>calYear>=s.yrFrom&&calYear<=s.yrTo);
+    const effectiveFloor = _fcfSched ? _fcfSched.floor : discFloor;
+
+    // -- TIER 2 & 3: SAVINGS BUCKETS (rd/ob only -- A1 retired the maintenance
+    //    reserve tier, so `available` no longer subtracts a separate maintTotal --
+    //    it's already inside tier1 above) --
+    const available = totalInc-tier1;
+    let rdAdd = 0;
+    if(rdBal<rdCap){
+      rdAdd = Math.min(rdTopUp, rdCap-rdBal, Math.max(0,available-effectiveFloor));
+    }
+    let obAdd = 0;
+    const rdFull = rdBal>=rdCap;
+    if(bufferMode==="par"||(bufferMode==="seq"&&rdFull)){
+      if(obBal<obCap){
+        obAdd = Math.min(obTopUp, obCap-obBal, Math.max(0,available-rdAdd-effectiveFloor));
       }
     }
-    // Loan payoff events from state (catches scheduled, sweep, and boundary-paydown payoffs)
-    for(const L of loans){
-      if(L.started && L.bal<=0.5 && !L.payoffAnnounced){
-        L.bal=0; L.payoffAnnounced=true;
-        (loanPayoffsByYear[cal]=loanPayoffsByYear[cal]||[]).push(L.label);
+
+    // -- TIER 4 & 5: FCF FLOOR + SURPLUS SWEEP --
+    const afterBuckets = available-rdAdd-obAdd;
+    const cfSplitProtect = Math.max(effectiveFloor, afterBuckets*(lifestyleSplit/100));
+    const surplusAboveFloor = Math.max(0, afterBuckets - cfSplitProtect);
+    const hasDebt = hiDebtNow > 0 || _loans.some(L=>L.sweepable && L.bal>0);
+    // A1: maintRedirect term removed -- nothing is capped anymore, so nothing
+    // is ever "freed" from a full maintenance reserve into the sweep.
+    const sweep = hasDebt ? surplusAboveFloor + _oneTimeSweep : 0;
+    const _oneTimeToSavings = hasDebt ? 0 : _oneTimeSweep;
+
+    // Apply interest & payments to debt balances
+    const intCC    = ccBal>0     ? ccBal*ccRate_/12       : 0;
+    const intSoph  = sophiaBal>0 ? sophiaBal*sophiaRate_/12 : 0;
+    const intNolan = nolanOn&&nolanBal>0 ? nolanBal*nolanRate_/12 : 0;
+    const interestPaid = intCC + intSoph + intNolan;
+    const minPmt = (ccBal>0?minCC:0) + (sophiaBal>0?minSoph:0) + (nolanOn&&nolanBal>0?minNol:0);
+    if(ccBal>0)    {ccBal    =Math.max(0,ccBal    *(1+ccRate_/12)    -minCC);}
+    if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate_/12)-minSoph);}
+    if(nolanOn&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate_/12)-minNol);}
+    let xtra=sweep;
+    const q=rankSweepQueue([
+      {g:()=>ccBal,    s:(v)=>{ccBal=v;},     r:ccRate_},
+      {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;},  r:sophiaRate_},
+      ...(nolanOn?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate_}]:[]),
+      ..._sweepLoanQ(),
+    ]);
+    for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
+
+    if(debtClearedMo<0 && hiDebtNow<=0) debtClearedMo = mo;
+    const debtWasCleared = debtClearedMo >= 0;
+    const graceDone = debtWasCleared && !hasDebt && (mo - debtClearedMo) >= sweepDelay;
+    let toSavings = (graceDone ? surplusAboveFloor : 0) + _oneTimeToSavings;
+    let mtgExtraMo = 0;
+    if(p.mtgPrincipalOn){
+      const _mcap = p.mtgPrincipalUncapped ? Infinity : (p.mtgPrincipalCap||0);
+      const _leftover = Math.max(0, xtra);
+      const room = Math.min(_mcap, _leftover + toSavings);
+      for(const id of MTG_PRINCIPAL_ELIGIBLE_IDS){
+        if(room - mtgExtraMo <= 0) break;
+        const st = _mtgSt[id];
+        if(!st || !ownedMo(id, calYear, calMonth1to12) || st.bal<=0) continue;
+        const pay = Math.min(room - mtgExtraMo, st.bal);
+        st.bal -= pay; mtgExtraMo += pay;
+      }
+      const _takenFromSavings = Math.max(0, mtgExtraMo - _leftover);
+      toSavings = Math.max(0, toSavings - _takenFromSavings);
+    }
+    const sweepToSavings = toSavings;
+    if(savingsAcc>0) savingsAcc *= (1+(p.investReturn||0.055)/12);
+    if(sweepToSavings>0) savingsAcc += sweepToSavings;
+
+    rdBal  = Math.min(rdCap,  rdBal+rdAdd);
+    obBal  = Math.min(obCap,  obBal+obAdd);
+
+    const hiDebtEnd = hiDebtNow;
+    const disc = graceDone
+      ? cfSplitProtect
+      : Math.max(effectiveFloor, afterBuckets - (sweep - _oneTimeSweep));
+
+    // D3: totalOut -- necessary spending only (tier1 incl. maint, the debt
+    // avalanche, and mortgage-principal extra); deliberately excludes rd/ob
+    // top-ups, which are discretionary and only ever funded from surplus
+    // already above the floor, never competing with "does income cover costs."
+    const totalOut = tier1 + sweep + mtgExtraMo;
+
+    // D4: structured events (label/delta), alongside the existing display
+    // strings, at the same points those strings are already emitted -- avoids
+    // ever needing to parse the display text back into structured data.
+    const mtgTransitionEvents=[], mtgPayoffLabels=[];
+
+    // Detect key events
+    const events=[];
+    if(mo===0) events.push("Launch");
+    if(calYear===BASE.medicareYouYear && calMonth1to12===BASE.medicareYouMonth) events.push("You -> Medicare");
+    if(mo===5) events.push("Nolan loan payments begin");
+    for(const lbl of loanStartLabels) events.push(`${lbl} starts -- $${Math.round(_loans.find(L=>L.label===lbl)?.pmt||0).toLocaleString()}/mo`);
+    for(const lbl of loanPayoffLabels) events.push(`${lbl} paid off!`);
+    for(const prop of _properties){
+      const st = _mtgSt[prop.id];
+      if(st.recast!=null && !st.transAnnounced && (st.p.ioYears||0)>0){
+        st.transAnnounced=true;
+        const delta = Math.round(st.recast-st.ioPmt);
+        events.push(`${st.label} mortgage: IO→P&I (+$${delta.toLocaleString()}/mo)`);
+        mtgTransitionEvents.push({label:st.label, delta});
+      }
+      if(st.bal<=0 && !st.payoffAnnounced){
+        st.payoffAnnounced=true;
+        events.push(`${st.label} mortgage paid off early! 🎉`);
+        mtgPayoffLabels.push(st.label);
       }
     }
-    // v3.4.0: contractual IO -> recast P&I replaces the old HI-debt-driven
-    // payment switch (that was the regression -- the IO period is a loan term,
-    // not a strategy toggle). Accumulated from the state stepping above.
-    const mtgPmt   = mtgPmtYrTotal;
+    if(_settleDrawMo>0) events.push(`Obligation-year one-time draw $${Math.round(_settleDrawMo/1000)}K`);
+    if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche, debt-first)`);
+    if(_oneTimeReserveFill>0) events.push(`$${Math.round(_oneTimeReserveFill/1000)}K sale proceeds into reserve/buffer caps`);
+    if(_oneTimeSweep>0) events.push(`$${Math.round(_oneTimeSweep/1000)}K sale proceeds into savings sweep`);
+    if(rdBal>=rdCap&&rdBal-rdAdd<rdCap) events.push("Rainy day fund FULL -- redirecting to sweep");
+    if(obBal>=obCap&&obBal-obAdd<obCap) events.push("Operating buffer FULL -- redirecting to sweep");
+    if(debtClearedMo===mo && mo>0) events.push("ALL HI DEBT CLEARED! 🎉");
+    if(calYear===BASE.sophiaOff&&calMonth1to12===10) events.push("Sophia off health plan");
+    if(calYear===BASE.nolanOff&&calMonth1to12===6)  events.push("Nolan off health plan");
+    if(calYear===BASE.brendaMedYear && calMonth1to12===BASE.brendaMedMonth) events.push("Brenda -> Medicare");
 
-    // v4.1.3: sum real per-month figures (was a hardcoded yr===0 5mo/7mo split
-    // that assumed a June 2026 Medicare transition -- the real date is
-    // birth-date-derived, v4.4.0 -- Oct 2026).
-    // v4.3.0: only the months actually in this row's period -- yr=0 sums
-    // startMonth..12 (a genuine partial-year total), not a fabricated Jan-Dec.
-    let healthAnnual=0;
-    for(let hm=monthOffset+1; hm<=12; hm++) healthAnnual += healthMonthly(cal, hm, p);
-    // v4.3.0: *monthsThisYear (was *12) throughout this block -- same $/mo-rate
-    // -> this-period's-total reasoning as pension/workInc/totalIncome above.
-    const irmaaAdd = irmaaYears.has(cal) ? BASE.irmaaSurge*2*monthsThisYear : 0;
-    let propCost = 0;
-    if(keepDuplex)   propCost += (BASE.dplxTaxMo+BASE.dplxInsMo)*monthsThisYear*pinf;
-    if(keepLafOwned) propCost += (BASE.lafTaxMo+BASE.lafInsMo)*monthsThisYear*pinf;
-    if(keepPrimary)  propCost += (BASE.primTaxMo+BASE.primInsMo)*monthsThisYear*pinf;
-    const core=(BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf*monthsThisYear;
-    // maint is an ANNUAL rate (prop.value*maintRate) already, not a $/mo figure --
-    // prorate by monthsThisYear/12 instead (same treatment as the rental proration above).
-    const maint = properties.reduce((s,prop)=>s+(keepMap[prop.id]?prop.value*p.maintRate*pinf*(monthsThisYear/12):0), 0);
-    const famLoanAnnual=loanPmtYrTotal;   // v3.2.0: all loan payments this year
-    const minDebt=p.payOffHI?0:(
-      (ccBal>0?ccMin:0)+(sophiaBal>0?sophiaMin:0)+
-      (nolanActive&&nolanBal>0?nolanMin:0)
-    )*monthsThisYear;
-
-    const baseOut=mtgPmt+healthAnnual+irmaaAdd+propCost+core+maint+famLoanAnnual+minDebt+taxAnnual;
-    const baseDI =totalIncome-baseOut;
-    const splitProtect = Math.max(p.diCap*monthsThisYear, baseDI*(p.lifestyleSplit/100));
-    // v4.5.0: hiDebt>0 -> (hiDebt>0||sweepableLoanBal>0) -- see the note above sweepableLoanBal.
-    const accel  =(!p.payOffHI&&(hiDebt>0||sweepableLoanBal>0))?Math.max(0,baseDI-splitProtect):0;
-    const surplusAboveProtect = Math.max(0, baseDI - splitProtect);
-    // v3.2.0: waterfall survivor of the sale-year remainder counts as sweep savings.
-    // v3.4.0: minus whatever the mortgage-principal bucket took from that surplus.
-    // v4.5.0: was `debtCleared` (HI-only, cumulative) -- must be the exact
-    // complement of accel's condition above (same hiDebt/sweepableLoanBal
-    // check, but per-row, not cumulative) or the same surplus dollars get
-    // double-counted as BOTH debt-sweep (accel) AND sweep-to-savings in a
-    // year where HI is cleared but a sweepable loan still has a balance.
-    // (debtCleared itself remains correct and unchanged for the HI-only
-    // "debt clear" milestone above -- only this savings-routing gate needed
-    // broadening.)
-    const annualSweepToSav = Math.max(0, ((!p.payOffHI&&(hiDebt>0||sweepableLoanBal>0)) ? 0 : surplusAboveProtect) - mtgExtraFromSurplusYr) + (wfSavByYear[cal]||0);
-    const totalOut=baseOut+accel;
-    const surplus =totalIncome-totalOut;
-    // v4.1.5: chart-only FCF value that (a) excludes the one-time settlement
-    // draw and (b) applies the same lifestyleSplit%/floor split to
-    // disposable income REGARDLESS of debt state -- `surplus` above only
-    // does this while HI debt is still active (accel absorbs the excess);
-    // once debt clears, accel is forced to 0 and `surplus` reports the FULL
-    // baseDI instead of the split-protected "kept" portion, which is what
-    // the monthly wfData engine's `disc` field has always done via
-    // cfSplitProtect. This mirrors that behavior in the annual engine
-    // WITHOUT touching `surplus`/`accel`/`reqWork`/`nw` (still needed
-    // elsewhere as-is) -- purely an additional read-only chart field.
-    // v4.1.7: the floor term uses `p.discFloor` (matching the monthly
-    // engine's `effectiveFloor`), NOT `p.diCap` (= discFloor+rdTopUp+obTopUp).
-    // diCap bundles the rainy-day/op-buffer top-ups into the floor because
-    // the real (non-chart) `splitProtect`/`accel` above are computed before
-    // those buckets exist as a separate concept in the annual model; but the
-    // monthly engine already subtracts rdAdd/obAdd from `available` before
-    // its own floor comparison, so reusing diCap here double-counted those
-    // buffers into the chart's "kept" floor and inflated fcfChart (and
-    // starved sweepChart) relative to what wfData actually shows.
-    const baseDIExDraw = baseDI - (drawByYear[cal]||0);
-    const splitProtectExDraw = Math.max(p.discFloor*monthsThisYear, baseDIExDraw*(p.lifestyleSplit/100));
-    const fcfChart = Math.max(0, Math.min(baseDIExDraw, splitProtectExDraw));
-    // v4.1.6: chart-only complement of fcfChart -- the recurring (non-draw)
-    // disposable income ABOVE the split-protected "kept" amount, i.e. whatever
-    // would get swept to debt paydown (while HI debt is active) or to savings
-    // (once it's clear). This mirrors the monthly wfData engine's
-    // afterBuckets-minus-disc relationship (its `sweep`/`sweepToSavings`
-    // fields), which the pinned-scenario chart previously approximated with
-    // the raw `debtSweep+sweepToSavings` fields -- fine while debt is active,
-    // but those inherit the same pre-fcfChart post-clear/draw-leak bugs this
-    // sibling field avoids, for the same reason fcfChart was added instead of
-    // reusing `surplus`.
-    const sweepChart = Math.max(0, baseDIExDraw - fcfChart);
-    // v4.4.0: no *monthsThisYear -- yourSs/brendaSs are already period totals (see note above totalIncome).
-    const passive =pension+(yourSs+brendaSs)+rental;
-    const reqWork =Math.max(0,totalOut-passive);
-    const nw      =Math.round((dplxVal+lafVal+primVal+cashAst-dplxBal-lafBal-primBal-hiDebt)/1000);
-
-    const famLoanBal = Math.round(loansBalPre/1000);   // v3.2.0: all loans, start-of-year
-
-    // Per-year disposition summary (nonzero only when a sale happens this year)
-    const dispoTaxYr = properties.reduce((s,prop)=>s+(dispoRes[prop.id].year===cal ? dispoRes[prop.id].totalTax : 0), 0);
-
-    // v4.3.0: /monthsThisYear (was a flat /12) throughout this row -- recovers
-    // the correct $/mo rate even in the partial first period (yr=0), since
-    // every total above was annualized using monthsThisYear, not 12.
     rows.push({
+      mo, calYear, cal:`${d.toLocaleString('default',{month:'short'})} '${String(calYear).slice(2)}`,
+      totalInc:Math.round(totalInc), tier1:Math.round(tier1), rentalOpCost:Math.round(rentalOpCost),
+      fc_mtg:Math.round(mtg), fc_health:Math.round(health), fc_core:Math.round(core),
+      fc_famLoan:Math.round(famLoan), fc_hiMins:Math.round(hiMins), fc_rentalOp:Math.round(rentalOpCost),
+      fc_propCost:Math.round(propCost), fc_tax:taxMo,
+      fc_irmaa: Math.round(irmaaAddMo),   // v5.0.0 fix: ported from pre-v5's separate irmaaAdd baseOut term
+      maintRes:Math.round(maintTotal),   // A1: uncapped ongoing cost, name kept for UI compat
+      rdAdd:Math.round(rdAdd), obAdd:Math.round(obAdd),
+      sweep:Math.round(sweep), disc:Math.round(disc), floor:effectiveFloor, afterBuckets:Math.round(afterBuckets),
+      rdBal:Math.round(rdBal), obBal:Math.round(obBal),
+      hiDebt:Math.round(hiDebtEnd/1000),
+      interestPaid:Math.round(interestPaid), minPmt:Math.round(minPmt),
+      sweepToSavings:Math.round(sweepToSavings), savingsAcc:Math.round(savingsAcc),
+      settleDraw: Math.round(_settleDrawMo),
+      paydownDetail: _payDetailMo ? _payDetailMo.perDebt : null,
+      oneTimePaydown: Math.round(_payDetailMo ? _payDetailMo.total : 0),
+      oneTimeReserveFill: Math.round(_oneTimeReserveFill),
+      oneTimeSweep: Math.round(_oneTimeSweep),
+      loansBal: Math.round(_loans.reduce((s,L)=>s+L.bal,0)),
+      totalOut: Math.round(totalOut),
+      mtgExtra: Math.round(mtgExtraMo),
+      mtgBal6:  propMtgBal.sixth||0,
+      mtgBal15: propMtgBal.fifteenth||0,
+      mtgBalLaf: propMtgBal.barberry||0,      // D2: was missing entirely pre-v5
+      propMtgBal, propRentalMo, propValue, propIoMode, propMaintMo,  // D1/D2/A1: generic per-property state
+      ccBalRaw: Math.round(ccBalNow), sophiaBalRaw: Math.round(sophiaBalNow), nolanBalRaw: Math.round(nolanBalNow), // D2
+      loanStartLabels, loanPayoffLabels, mtgTransitionEvents, mtgPayoffLabels,  // D4
+      events,
+      pension:Math.round(pension),
+      yourSs:Math.round(yourSsMo),
+      brendaSs:Math.round(brendaSsMo),
+      rental:Math.round(rentalMo),
+      workIncome:Math.round(wkInc),
+      drawInc:Math.round(drawInc),   // A3: scheduled lifestyle draws, now unconditional (see note above)
+    });
+  }
+  rows.dispoResults = dispo.dispoRes;
+  rows.dispoResultsNoOffset = dispo.dispoResNoOffset;
+  return rows;
+}
+
+// =============================================================================
+// ANNUAL AGGREGATION (v5.0.0) -- the Simulator tab's annual view is a pure
+// rollup of buildMonthlyScenario's output: stocks = the value from the FIRST
+// month of the row's period (matching wfData's own pre-decrement-this-month
+// convention, so "row yr's balance" already means "balance as of the START
+// of that period" with no extra snapshot logic needed); flows = summed over
+// the real months in that period (yr=0's partial first period falls out
+// automatically -- wfData's own calendar already starts at BASE.startMonth,
+// there are no fabricated pre-start months to exclude).
+// =============================================================================
+export function aggregateMonthlyToAnnual(wfRows, p){
+  const byYear = {};
+  for(const r of wfRows){
+    (byYear[r.calYear] = byYear[r.calYear]||[]).push(r);
+  }
+  const years = Object.keys(byYear).map(Number).sort((a,b)=>a-b);
+  const rows = [];
+  let cumInc=0,cumCost=0,cumPension=0,cumWork=0,cumSS=0,cumRental=0,cumDraw=0;
+  let cumMtg=0,cumHealth=0,cumCore=0,cumProp=0,cumMaint=0,cumDebt=0,cumTax=0;
+
+  years.forEach((cal,yr)=>{
+    const yrRows = byYear[cal];
+    const first = yrRows[0];
+    const last  = yrRows[yrRows.length-1];
+    const cnt = yrRows.length;
+    const sum = k=>yrRows.reduce((s,r)=>s+(r[k]||0),0);
+    const avgMo = k=>sum(k)/cnt;
+
+    // v5.0.0 fix: pre-v5, the annual engine's own `rental` field was built via
+    // unitSegmentNet() -- already net of rental operating costs (STR platform/
+    // cleaning%, LTR vacancy%, etc). wfData's `rental` field is GROSS (opex is
+    // tracked separately as `rentalOpCost`) -- avgMo('rental') alone silently
+    // dropped opex from `passive`/`reqWork`, understating required work income
+    // by the opex amount. Net it back out here to restore the exact pre-v5
+    // semantics (this is the ONE field known to need this treatment -- see the
+    // systematic audit in v5_phase0_findings.md for every other wfData field
+    // aggregateMonthlyToAnnual reads, none of which have a matching separate
+    // "cost to fold back in" field the way rental/rentalOpCost do).
+    const passive = avgMo('pension')+avgMo('yourSs')+avgMo('brendaSs')+avgMo('rental')-avgMo('rentalOpCost');
+    const totalOutAvg = avgMo('totalOut');
+    const reqWork = Math.max(0, totalOutAvg-passive);
+
+    // Stocks: first-of-period snapshot (pre-decrement, matching v4.3.0 convention)
+    const hiDebtRaw = (first.ccBalRaw||0)+(first.sophiaBalRaw||0)+(first.nolanBalRaw||0);
+    const primBal = first.propMtgBal?.sixth||0, dplxBal = first.propMtgBal?.fifteenth||0, lafBal = first.propMtgBal?.barberry||0;
+    const primVal = first.propValue?.sixth||0, dplxVal = first.propValue?.fifteenth||0, lafVal = first.propValue?.barberry||0;
+    // v5.0.0: nw now includes savingsAcc directly -- pre-v5, buildScenario's
+    // own nw never included it (savingsAcc was a monthly-only concept, added
+    // back in separately at the chartData layer: `nw:(r.nw/1000)+savAccM`).
+    // Now that there's one engine, that add-back happens here once instead of
+    // twice (chartData still needs to do ITS OWN sale-pool-timing-consistent
+    // read for the live-vs-pin comparison lines, but the base annual `nw`
+    // field is complete and self-contained -- see the cross-cutting note in
+    // v5_phase0_findings.md's 0a).
+    const nw = Math.round((dplxVal+lafVal+primVal+(first.savingsAcc||0)+0/*cashAst -- A3: inert, treated as 0*/-dplxBal-lafBal-primBal-hiDebtRaw)/1000);
+
+    // One-time pool-year event, if any (at most one wfRow per year has it)
+    const poolRow = yrRows.find(r=>(r.settleDraw||0)>0 || (r.oneTimePaydown||0)>0 || (r.oneTimeReserveFill||0)>0);
+
+    // Structured by-year event lists (D4)
+    const loanStarts = yrRows.flatMap(r=>r.loanStartLabels||[]);
+    const loanPayoffs = yrRows.flatMap(r=>r.loanPayoffLabels||[]);
+    const mtgTransitions = yrRows.flatMap(r=>r.mtgTransitionEvents||[]);
+    const mtgPayoffs = yrRows.flatMap(r=>r.mtgPayoffLabels||[]);
+
+    // Disposition summary for this calendar year (from computeDispositions,
+    // called once via buildMonthlyScenario -- reuse its attached results).
+    const dispoRes = wfRows.dispoResults || {};
+    const dispoTaxYr = Object.values(dispoRes).reduce((s,d)=>s+(d.year===cal ? d.totalTax : 0), 0);
+    const dispoNetYr = Object.values(dispoRes).reduce((s,d)=>s+(d.year===cal ? (d.afterTaxNetProceeds||0) : 0), 0);
+    const obligation = p.obligation || {};
+    const settlementOutYr = cal === (obligation.year||BASE.startYear) ? (obligation.amount||0) : 0;
+    // ioMode: still inside its contractual IO window on the first day of this
+    // period -- same definition (and same field name) the old annual engine used.
+    const ioModeYr = Object.values(first.propIoMode||{}).some(Boolean);
+
+    const row = {
       cal, yr,
-      cashAst,
-      surplus:  Math.round(surplus/monthsThisYear),
-      fcfChart: Math.round(fcfChart/monthsThisYear),
-      sweepChart: Math.round(sweepChart/monthsThisYear),
-      sweepToSavings: Math.round(annualSweepToSav/monthsThisYear),
-      drawInc:  Math.round(drawInc/monthsThisYear),
-      reqWork:  Math.round(reqWork/monthsThisYear),
+      cashAst: 0, invested: 0,   // A3: cashAst is inert given current pooled-routing design (measured 0 in every captured scenario) -- no shortfall ledger built
+      surplus:  Math.round(avgMo('disc')),   // A4: was two annual-only definitions (surplus/fcfChart); now one, sourced from the monthly disc field
+      reqWork:  Math.round(reqWork),
       nw,
-      hiDebt:   Math.round(hiDebt/1000),
-      hiDebtRaw: hiDebt,
-      rental:   Math.round(rental/monthsThisYear),
-      passive:  Math.round(passive/monthsThisYear),
-      pension:  Math.round(pension/monthsThisYear),
-      // v4.4.0: /monthsThisYear -- yourSs/brendaSs are period dollar totals now (see note
-      // above totalIncome); recover the displayed $/mo rate the same way every other
-      // row field does (mtg, core, etc.), so a partial-start-year row shows a correct average.
-      yourSs:   Math.round(yourSs/monthsThisYear),
-      brendaSs: Math.round(brendaSs/monthsThisYear),
-      workInc:  Math.round(workInc/monthsThisYear),
-      tax:      Math.round(taxAnnual/monthsThisYear),
-      health:   Math.round(healthAnnual/monthsThisYear),
-      mtg:      Math.round(mtgPmt/monthsThisYear),
-      propCost: Math.round(propCost/monthsThisYear),
-      core:     Math.round(core/monthsThisYear),
-      maint:    Math.round(maint/monthsThisYear),
-      famLoan:  Math.round(famLoanAnnual/monthsThisYear),
-      famLoanBal,
-      minDebt:  Math.round(minDebt/monthsThisYear),
-      debtSweep:Math.round(accel/monthsThisYear),
-      totalDebtPmt: Math.round((minDebt+accel)/monthsThisYear),
-      totalInc: Math.round(totalIncome/monthsThisYear),
-      totalOut: Math.round(totalOut/monthsThisYear),
+      hiDebt:   Math.round(hiDebtRaw/1000),
+      hiDebtRaw,
+      rental:   Math.round(avgMo('rental')),
+      passive:  Math.round(passive),
+      pension:  Math.round(avgMo('pension')),
+      yourSs:   Math.round(avgMo('yourSs')),
+      brendaSs: Math.round(avgMo('brendaSs')),
+      workInc:  Math.round(avgMo('workIncome')),
+      tax:      Math.round(avgMo('fc_tax')),
+      health:   Math.round(avgMo('fc_health')),
+      irmaa:    Math.round(avgMo('fc_irmaa')),   // v5.0.0 fix: ported pre-v5 irmaaAdd, see buildMonthlyScenario
+      mtg:      Math.round(avgMo('fc_mtg')),
+      propCost: Math.round(avgMo('fc_propCost')),
+      core:     Math.round(avgMo('fc_core')),
+      maint:    Math.round(avgMo('maintRes')),
+      famLoan:  Math.round(avgMo('fc_famLoan')),
+      famLoanBal: Math.round((first.loansBal||0)/1000),   // $K, matches the old annual engine's units
+      minDebt:  Math.round(avgMo('minPmt')),
+      debtSweep:Math.round(avgMo('sweep')),
+      sweepToSavings: Math.round(avgMo('sweepToSavings')),  // ongoing (non-pool-year) monthly sweep-to-savings flow, $/mo avg
+      totalDebtPmt: Math.round(avgMo('minPmt')+avgMo('sweep')),
+      totalInc: Math.round(avgMo('totalInc')),
+      totalOut: Math.round(totalOutAvg),
       reEquity: Math.round((dplxVal+lafVal+primVal-dplxBal-lafBal-primBal)/1000),
       reValue:  Math.round((dplxVal+lafVal+primVal)/1000),
       reMortgage:Math.round((dplxBal+lafBal+primBal)/1000),
-      invested: Math.round(cashAst/1000),
-      hiDebtK:  Math.round(hiDebt/1000),
-      ccBal:    Math.round(ccBal/1000),
-      sophiaBal:Math.round(sophiaBal/1000),
-      nolanBal: Math.round(nolanBal/1000),
-      // v4.0.0-A: ioMode = a held mortgage is still inside its contractual IO window
-      ioMode: properties.some(prop=>keepMap[prop.id] && mtgById[prop.id].recast==null && mtgById[prop.id].bal>0 && (prop.mortgage.ioYears||0)>0),
-      // v3.1.0 dispo-year summary fields
+      hiDebtK:  Math.round(hiDebtRaw/1000),
+      ccBal:    Math.round((first.ccBalRaw||0)/1000),
+      sophiaBal:Math.round((first.sophiaBalRaw||0)/1000),
+      nolanBal: Math.round((first.nolanBalRaw||0)/1000),
+      ioMode: ioModeYr,
       dispoTax: Math.round(dispoTaxYr),
-      dispoNet: Math.round(yearCashAdd[cal] || 0),
-      settlementOut: Math.round(yearCashSub[cal] || 0),
-      // v4.0.0-B residual routing fields (draw -> debt-first avalanche -> savings)
-      settleDraw:   Math.round(drawByYear[cal] || 0),
-      wfDebtPaid:   Math.round(wfDebtByYear[cal] || 0),
-      wfToSavings:  Math.round(wfSavByYear[cal] || 0),
-      hiPaydownDetail: paydownDetailByYear[cal] || null,
-      loanStarts:   loanStartsByYear[cal] || [],
-      loanPayoffs:  loanPayoffsByYear[cal] || [],
-      // v3.4.0 mortgage structure fields
-      mtgTransitions: mtgTransByYear[cal] || [],       // [{label, delta $/mo}] at IO->P&I
-      mtgPayoffs:     mtgPayoffByYear[cal] || [],      // early payoff via extra principal
-      mtgExtra:       Math.round(mtgExtraYr + (mtgExtraBoundaryByYear[cal]||0)),
-      primBalRaw:     Math.round(primBal),
-      dplxBalRaw:     Math.round(dplxBal),
-      lafBalRaw:      Math.round(lafBal),
-      // v4.0.0-A: per-property annual rental $ (monthly-equivalent, /12 not applied)
-      propRentalYr:   Object.fromEntries(Object.entries(propRentalYr).map(([k,v])=>[k,Math.round(v)])),
-    });
-  }
-  // Expose disposition details for reconciliation card / UI
-  rows.dispoResults = dispoRes;
-  rows.dispoResultsNoOffset = dispoResNoOffset;  // v3.1.1: offset-free, for CPA reconciliation
-  let cumInc=0,cumCost=0,cumPension=0,cumWork=0,cumSS=0,cumRental=0,cumDraw=0;
-  let cumMtg=0,cumHealth=0,cumCore=0,cumProp=0,cumMaint=0,cumDebt=0,cumTax=0;
-  for(const r of rows){
-    // v4.3.0: multiply by THIS row's real month count (was a flat *12) --
-    // row fields are $/mo rates (see the row.push comment above), and r.yr=0's
-    // period is shorter than 12 months, so recovering its period total needs
-    // the same monthsInYear the row itself was built with.
-    const _cumMo = monthsInYear(r.yr, startMonth);
-    cumInc     +=r.totalInc*_cumMo/1000;
-    cumCost    +=r.totalOut*_cumMo/1000;
-    cumPension +=r.pension*_cumMo/1000;
-    cumWork    +=r.workInc*_cumMo/1000;
-    cumSS      +=(r.yourSs+r.brendaSs)*_cumMo/1000;
-    cumRental  +=r.rental*_cumMo/1000;
-    cumDraw    +=r.drawInc*_cumMo/1000;
-    cumTax     +=r.tax*_cumMo/1000;
-    cumMtg     +=r.mtg*_cumMo/1000;
-    cumHealth  +=r.health*_cumMo/1000;
-    cumCore    +=r.core*_cumMo/1000;
-    cumProp    +=r.propCost*_cumMo/1000;
-    cumMaint   +=r.maint*_cumMo/1000;
-    cumDebt    +=(r.minDebt+r.debtSweep)*_cumMo/1000;
-    r.cumInc   =Math.round(cumInc);
-    r.cumCost  =Math.round(cumCost);
-    r.cumPension=Math.round(cumPension);
-    r.cumWork  =Math.round(cumWork);
-    r.cumSS    =Math.round(cumSS);
-    r.cumRental=Math.round(cumRental);
-    r.cumDraw  =Math.round(cumDraw);
-    r.cumGap   =Math.round(cumInc-cumCost);
-    r.cumTax   =Math.round(cumTax);
-    r.cumMtg   =Math.round(cumMtg);
-    r.cumHealth=Math.round(cumHealth);
-    r.cumCore  =Math.round(cumCore);
-    r.cumProp  =Math.round(cumProp);
-    r.cumMaint =Math.round(cumMaint);
-    r.cumDebt  =Math.round(cumDebt);
-  }
+      dispoNet: Math.round(dispoNetYr),
+      settlementOut: Math.round(settlementOutYr),
+      settleDraw:   Math.round(poolRow?.settleDraw||0),
+      wfDebtPaid:   Math.round(poolRow?.oneTimePaydown||0),
+      // B2 fix: reserve top-ups and true sweep are no longer conflated --
+      // wfToSavings now means TRUE savings only (matches the monthly engine's
+      // own oneTimeSweep), with the reserve-fill portion broken out separately.
+      wfReserveFill: Math.round(poolRow?.oneTimeReserveFill||0),
+      wfToSavings:  Math.round(poolRow?.oneTimeSweep||0),
+      hiPaydownDetail: poolRow?.paydownDetail || null,
+      loanStarts, loanPayoffs, mtgTransitions, mtgPayoffs,
+      mtgExtra: Math.round(sum('mtgExtra')),
+      primBalRaw: Math.round(primBal), dplxBalRaw: Math.round(dplxBal), lafBalRaw: Math.round(lafBal),
+      // Per-property annual rental $ -- sum the monthly per-property breakdown (D2).
+      propRentalYr: Object.fromEntries(Object.keys(first.propRentalMo||{}).map(id=>
+        [id, Math.round(yrRows.reduce((s,r)=>s+(r.propRentalMo?.[id]||0),0))])),
+      // Per-property $/mo avg maintenance (A1) -- for audit/reporting, reads
+      // the real engine computation rather than re-deriving the formula.
+      propMaintYr: Object.fromEntries(Object.keys(first.propMaintMo||{}).map(id=>
+        [id, Math.round(yrRows.reduce((s,r)=>s+(r.propMaintMo?.[id]||0),0)/cnt)])),
+      drawInc: Math.round(avgMo('drawInc')),
+      // End-of-year snapshot (as opposed to nw's start-of-year one) -- for
+      // "how much has been swept to savings so far" displays (chartData's
+      // sweepSavK-style readouts), not for nw itself.
+      savingsAccEnd: Math.round(last.savingsAcc||0),
+    };
+
+    const _cumMo = cnt;
+    cumInc     +=row.totalInc*_cumMo/1000;
+    cumCost    +=row.totalOut*_cumMo/1000;
+    cumPension +=row.pension*_cumMo/1000;
+    cumWork    +=row.workInc*_cumMo/1000;
+    cumSS      +=(row.yourSs+row.brendaSs)*_cumMo/1000;
+    cumRental  +=row.rental*_cumMo/1000;
+    // cumDraw includes BOTH scheduled lifestyle draws (drawInc, a $/mo rate)
+    // AND the one-time settlement draw (settleDraw, already a period total,
+    // not a rate -- added directly, not *_cumMo) -- matches the old annual
+    // engine's combined drawInc semantics (settleDraw used to be blended
+    // into the SAME drawInc field before being split out as its own field).
+    cumDraw    +=row.drawInc*_cumMo/1000 + (row.settleDraw||0)/1000;
+    cumTax     +=row.tax*_cumMo/1000;
+    cumMtg     +=row.mtg*_cumMo/1000;
+    cumHealth  +=row.health*_cumMo/1000;
+    cumCore    +=row.core*_cumMo/1000;
+    cumProp    +=row.propCost*_cumMo/1000;
+    cumMaint   +=row.maint*_cumMo/1000;
+    cumDebt    +=(row.minDebt+row.debtSweep)*_cumMo/1000;
+    row.cumInc   =Math.round(cumInc);
+    row.cumCost  =Math.round(cumCost);
+    row.cumPension=Math.round(cumPension);
+    row.cumWork  =Math.round(cumWork);
+    row.cumSS    =Math.round(cumSS);
+    row.cumRental=Math.round(cumRental);
+    row.cumDraw  =Math.round(cumDraw);
+    row.cumGap   =Math.round(cumInc-cumCost);
+    row.cumTax   =Math.round(cumTax);
+    row.cumMtg   =Math.round(cumMtg);
+    row.cumHealth=Math.round(cumHealth);
+    row.cumCore  =Math.round(cumCore);
+    row.cumProp  =Math.round(cumProp);
+    row.cumMaint =Math.round(cumMaint);
+    row.cumDebt  =Math.round(cumDebt);
+    rows.push(row);
+  });
+
+  rows.dispoResults = wfRows.dispoResults;
+  rows.dispoResultsNoOffset = wfRows.dispoResultsNoOffset;
   return rows;
 }
+
+// =============================================================================
+// [DELETED v5.0.0] ANNUAL PROJECTION ENGINE (buildScenario) -- the annual
+// engine's independent implementation is retired; the Simulator/annual view
+// is now pure aggregation of buildMonthlyScenario's output (see
+// aggregateMonthlyToAnnual above). See v5_phase0_findings.md for the full
+// investigation, the approved modeling decisions (A1-A4), the bugs this
+// collapse fixes (B1-B3), and the clean precision differences it absorbs
+// (C1-C2).
+// =============================================================================
 
 export function keyStats(rows){
   const workFreeYr = rows.find(r=>r.reqWork===0)?.cal ?? null;

@@ -160,7 +160,14 @@ test.describe('Group A — Core Engine Correctness', () => {
     const rwBase = await page.locator('div').filter({ hasText: /^Total work income needed$/ })
       .locator('xpath=following-sibling::div').first().textContent();
 
-    await setSlider(page, 'Platform fee', 0);
+    // v5.0.0 (session33 finding): the slider's real label is "STR platform fee"
+    // (Cost Profiles block), not "Platform fee" -- setSlider's fuzzy `near`
+    // heuristic was silently grabbing a WRONG/unrelated slider this whole time
+    // (confirmed: rwZero === rwBase to the dollar, i.e. nothing moved). Switched
+    // to setSliderExact with the real label, which walks the DOM explicitly
+    // instead of guessing by proximity (see CLAUDE.md's documented caveat about
+    // this exact class of bug).
+    await setSliderExact(page, 'STR platform fee', 0);
     await page.waitForTimeout(400);
     const rwZero = await page.locator('div').filter({ hasText: /^Total work income needed$/ })
       .locator('xpath=following-sibling::div').first().textContent();
@@ -174,14 +181,28 @@ test.describe('Group A — Core Engine Correctness', () => {
       const n = parseInt(t.replace(/[^0-9]/g, ''));
       return isNaN(n) ? 0 : n;
     };
-    expect(parse(rwZero)).toBeLessThanOrEqual(parse(rwBase));
+    // v5.0.0/v5.0.1 (session33 findings): this test EXISTED throughout BOTH
+    // (a) the rentalOpCost/passive netting bug and (b) a separate, pre-existing
+    // v4.6.0 bug where `(sc.strPlatformPct||3)` silently reverted a literal 0%
+    // back to the 3% default (`||` treats 0 as falsy) -- and caught NEITHER,
+    // because a `<=` check is satisfied trivially when nothing actually moves
+    // (rwZero was exactly equal to rwBase either way). Strengthened to a real
+    // magnitude floor -- this now DOUBLES as the regression guard for both
+    // fixes: it can only pass if the slider genuinely reaches 0% (v5.0.1) AND
+    // that 0% genuinely nets into reqWork (v5.0.0). Verified directly (standalone
+    // engine run): 15th St's STR top unit grosses ~$33.6K/yr (120nights x $280);
+    // 3% platform fee on that is ~$84/mo -- the real, expected delta.
+    const delta = parse(rwBase) - parse(rwZero);
+    expect(delta).toBeGreaterThan(50);   // real $/mo shift (~$84 expected), not just "not worse"
   });
 
   test('A6 — Rental op costs at 0%: produces valid work required output', async ({ page }) => {
     await loadApp(page);
-    await setSlider(page, 'Platform fee', 0);
+    // v5.0.0: same real-label fix as A5 -- "Platform fee"/"Cleaning" never
+    // matched the actual "STR platform fee"/"STR cleaning (% of gross)" sliders.
+    await setSliderExact(page, 'STR platform fee', 0);
     await page.waitForTimeout(200);
-    await setSlider(page, 'Cleaning', 0);
+    await setSliderExact(page, 'STR cleaning (% of gross)', 0);
     await page.waitForTimeout(400);
 
     const rw = await page.locator('div').filter({ hasText: /^Total work income needed$/ })
@@ -274,6 +295,41 @@ test.describe('Group B — Chart Display', () => {
 
   test('B8 — NW breakdown: Sweep savings row has non-zero final value', async ({ page }) => {
     await loadApp(page);
+    // v5.0.0 (A1): the DEFAULT scenario's sweep-to-savings is now genuinely
+    // $0 for the entire 21-year horizon -- uncapped, ongoing maintenance
+    // (A1's modeling decision) permanently consumes what the old capped
+    // reserve system used to free up and redirect to savings once each
+    // reserve capped out (~2028-2031). The row is correctly HIDDEN by the
+    // breakdown table's own hideZero logic in that case (see test F2, which
+    // already documents this). This test's purpose -- confirm the breakdown
+    // table correctly surfaces and totals a real, non-zero sweep -- still
+    // needs a scenario where sweep genuinely happens.
+    //
+    // Tried first: "% of surplus above floor to keep" -> 0%. Verified directly
+    // (a standalone engine run against the real default params) that this
+    // does NOT work -- `sweep` is exactly $0 for all 246 months regardless of
+    // the split%, because `afterBuckets` never exceeds the discFloor at ANY
+    // point in the true never-sell default scenario, so the split dial has
+    // nothing to redistribute either way. A property sale is a much more
+    // robust lever: it unambiguously injects a net-proceeds lump sum that (per
+    // the already-passing R11 test) demonstrably reaches reserves/sweep. Sell
+    // 15th St in 2028 -- confirmed via the same standalone engine check to
+    // produce savingsAcc > $1M by the horizon end.
+    const card = page.locator('[data-testid="property-fifteenth-card"]');
+    await card.scrollIntoViewIfNeeded();
+    await card.locator('[data-testid="mode-toggle-fifteenth"]').getByRole('button', { name: 'Sell', exact: true }).click();
+    await page.waitForTimeout(200);
+    const yearSlider = page.locator('[data-testid="sale-year-slider-fifteenth"] input[type="range"]');
+    await yearSlider.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, '2028');
+    await page.waitForTimeout(150);
+    await page.locator('[data-testid="sale-quarter-toggle-fifteenth"]').getByRole('button', { name: 'Q2', exact: true }).click();
+    await page.waitForTimeout(400);
+
     const nwChart = page.locator('div').filter({ hasText: /^Net Worth \(\$M\)$/ })
       .locator('xpath=ancestor::div[2]').first();
     await nwChart.locator('button', { hasText: 'breakdown' }).click();
@@ -630,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v4.6.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.0.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.6.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v4.6.0');
+    await expect(page.locator('text=v5.0.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.0.0');
   });
 
 });
@@ -1090,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v4.6.0', async ({ page }) => {
+  test('L1 — Version header shows v5.0.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v4.6.0').first()).toBeVisible();
-    console.log('  L1 — Version v4.6.0 confirmed');
+    await expect(page.locator('text=v5.0.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.0.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1179,10 +1235,26 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
 
   test('R1 — overlapping segments SUM; annual and monthly paths agree', async ({ page }) => {
     await loadApp(page);
-    const base = await page.evaluate(() => ({
-      ann: window.__liveRows.find(r => r.cal === 2026).rental,
-      wfGross: window.__wfData[0].rental, wfOp: window.__wfData[0].rentalOpCost,
-    }));
+    // v5.0.0: the annual `rental` field is GROSS (sourced straight from
+    // wfData's own `rental` field via avgMo) -- rental operating costs
+    // (rentalOpCost) are a deliberately separate field, netted only where
+    // needed (passive/reqWork -- see the v5.0.0 fix note there), NOT out of
+    // `rental` itself. Pre-v5, the annual engine's `rental` field was built
+    // via unitSegmentNet() and so was already NET -- this test's original
+    // <=3 tolerance assumed that. Comparing GROSS-to-GROSS is the correct
+    // "annual/monthly agree" check under the new (intentional) semantics;
+    // comparing net-annual-delta against a net-monthly-delta compared two
+    // different concepts. Average over the SAME set of 2026 months on the
+    // monthly side (continuous mo/12 rent growth -- C2 -- means a single
+    // spot-check month isn't a fair stand-in for the period average either).
+    const base = await page.evaluate(() => {
+      const rows2026 = window.__wfData.filter(r => r.calYear === 2026);
+      const n = rows2026.length;
+      return {
+        ann: window.__liveRows.find(r => r.cal === 2026).rental,
+        wfGross: rows2026.reduce((s, r) => s + r.rental, 0) / n,
+      };
+    });
     // 6th St has one unit, no segments by default -- add two concurrent segments
     // (STR + MTR, same year range -- both kinds may coexist on one unit)
     await addSegment(page, 'sixth', 'sixth-main');
@@ -1193,15 +1265,19 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     await segs.nth(0).getByRole('button', { name: 'STR', exact: true }).click();
     await segs.nth(1).getByRole('button', { name: 'MTR', exact: true }).click();
     await page.waitForTimeout(300);
-    const after = await page.evaluate(() => ({
-      ann: window.__liveRows.find(r => r.cal === 2026).rental,
-      wfGross: window.__wfData[0].rental, wfOp: window.__wfData[0].rentalOpCost,
-    }));
+    const after = await page.evaluate(() => {
+      const rows2026 = window.__wfData.filter(r => r.calYear === 2026);
+      const n = rows2026.length;
+      return {
+        ann: window.__liveRows.find(r => r.cal === 2026).rental,
+        wfGross: rows2026.reduce((s, r) => s + r.rental, 0) / n,
+      };
+    });
     console.log('  R1 — annual before/after: ' + base.ann + ' -> ' + after.ann);
     expect(after.ann).toBeGreaterThan(base.ann);           // segments added income
     const annDelta = after.ann - base.ann;
-    const wfNetDelta = (after.wfGross - after.wfOp) - (base.wfGross - base.wfOp);
-    expect(Math.abs(annDelta - wfNetDelta)).toBeLessThanOrEqual(3);  // annual/monthly agree (net)
+    const wfGrossDelta = after.wfGross - base.wfGross;
+    expect(Math.abs(annDelta - wfGrossDelta)).toBeLessThanOrEqual(3);  // annual/monthly agree (gross)
   });
 
   test('R2 — LTR-exclusivity rejection (STR+MTR coexist; LTR does not)', async ({ page }) => {
@@ -1312,7 +1388,12 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
   test('R7 — IO flat then recast on ACTUAL balance (extra principal lowers recast)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const base = buildScenario(makeParams({}));
       const withBucket = buildScenario(makeParams({ mtgPrincipalOn: true, mtgPrincipalCap: 3000, payOffHI: true }));
       const flatMonths = [2027, 2028, 2029, 2030].map(y => base.find(r => r.cal === y).mtg);
@@ -1332,7 +1413,12 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
   test('R8 — pooled routing conservation (draw + debt-first paydown + savings === residual)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const rows = buildScenario(makeParams({
         properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2026, quarter: 2 } }],
         obligation: { amount: 400000, year: 2026, quarter: 2, offsetsCapitalGains: true },
@@ -1341,7 +1427,12 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
       const pool = rows.dispoResults.fifteenth.afterTaxNetProceeds;
       const residual = Math.max(0, pool - 400000);
       const r26 = rows.find(r => r.cal === 2026);
-      const sum = (r26.settleDraw || 0) + (r26.wfDebtPaid || 0) + (r26.wfToSavings || 0);
+      // v5.0.0 (B2 fix): wfToSavings now means TRUE savings only -- the reserve-fill
+      // portion of the pooled routing is broken out separately as wfReserveFill
+      // (pre-v5, the annual engine didn't model a reserve-fill step at all, so this
+      // term didn't exist and wfToSavings silently absorbed it). Conservation now
+      // needs all four terms, matching the dev-mode audit in App.jsx.
+      const sum = (r26.settleDraw || 0) + (r26.wfDebtPaid || 0) + (r26.wfReserveFill || 0) + (r26.wfToSavings || 0);
       return { pool: Math.round(pool), residual: Math.round(residual), sum: Math.round(sum), draw: r26.settleDraw, wfDebtPaid: r26.wfDebtPaid };
     });
     console.log('  R8 — pool=$' + result.pool + ' residual=$' + result.residual + ' sum=$' + result.sum + ' debtPaid=$' + result.wfDebtPaid);
@@ -1353,7 +1444,12 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
   test('R9 — mortgage-principal bucket ordering (6th 4.875% before 15th 4.35%)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const rows = buildScenario(makeParams({ mtgPrincipalOn: true, mtgPrincipalUncapped: true, payOffHI: true }));
       return {
         y1prim: rows[1].primBalRaw, y1dplx: rows[1].dplxBalRaw,
@@ -1411,7 +1507,12 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
   test('R12 — disposition sale price is the entered value verbatim (no appreciation applied)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const ids = ['sixth', 'fifteenth', 'barberry'];
       const timings = [
         { year: 2026, quarter: 4 },
@@ -1438,7 +1539,12 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
   test('R13 — itemized disposition breakdown arithmetic reconciles against disposeAsset fields', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const cases = [
         { id: 'sixth',     hold: { mode: 'sell', year: 2030, quarter: 2 } },
         { id: 'fifteenth', hold: { mode: 'sell', year: 2030, quarter: 2 } },
@@ -1516,7 +1622,12 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
   test('R15 — v4.3.1: 6th St selling-cost double-count fixed; 15th St/Barberry unchanged', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       function sellOnly(id) {
         // obligation:{amount:0} disables the default $525K same-year gain
         // offset so this isolates the pure per-property disposition math --
@@ -1548,6 +1659,38 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     // the same treatment moves them AWAY from the CPA sheet, per investigation).
     expect(result.fifteenth).toEqual({ gain: 868_191, tax: 310_256, net: 634_643 });
     expect(result.barberry).toEqual({ gain: 404_457, tax: 146_018, net: 260_367 });
+  });
+
+  test('R16 — IRMAA surcharge fires exactly 2yrs after a taxable disposition, $700/mo, feeds totalOut/reqWork', async ({ page }) => {
+    await loadApp(page);
+    // v5.0.0 session33 finding: the pre-v5 annual engine added a separate
+    // `irmaaAdd` cost term (BASE.irmaaSurge x2 persons, 2 years after ANY
+    // taxable disposition -- mode!=='full_1031', recognizedGain>0) into its
+    // baseOut/reqWork math. The v5 refactor computed the SAME trigger years
+    // (computeDispositions' `irmaaYears`) but never actually charged the cost
+    // anywhere -- a silent regression the 113-test Checkpoint-1b suite did not
+    // catch (nothing asserted on it). Ported back verbatim (buildMonthlyScenario's
+    // `irmaaAddMo`/`fc_irmaa`/annual `irmaa` fields) -- this test guards it so
+    // it can't silently regress again.
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
+      // 15th St has a large recognized gain (~$868K, confirmed by R15) and
+      // mode 'sell' (not full_1031) -- sell it 2028 Q2, so IRMAA should fire
+      // for all of calendar 2030 (2028+2) and nowhere else.
+      const rows = buildScenario(makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2028, quarter: 2 } }],
+      }));
+      return {
+        irmaa2029: rows.find(r => r.cal === 2029)?.irmaa,
+        irmaa2030: rows.find(r => r.cal === 2030)?.irmaa,
+        irmaa2031: rows.find(r => r.cal === 2031)?.irmaa,
+      };
+    });
+    console.log('  R16 — ' + JSON.stringify(result));
+    expect(result.irmaa2029).toBe(0);
+    expect(result.irmaa2030).toBe(700);   // BASE.irmaaSurge (350) x 2 persons, flat, no inflation
+    expect(result.irmaa2031).toBe(0);
   });
 
 });
@@ -1786,17 +1929,22 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
       const drawYear = wf[idx].calYear;
       const pinKey = Object.keys(cd[0]).find(k => /^pin_.*_di$/.test(k));
       const yi = cd.findIndex(r => r.year === drawYear);
-      // pin.rows is buildScenario(liveParams) captured at pin time with no
-      // subsequent changes -- so window.__liveRows' own row for this year is
-      // byte-identical to the pin's row, and gives the exact expected value
-      // straight from the field the v4.1.5 fix computes (engine.js's fcfChart).
+      // v5.0.0 (A4): the pre-v5 two-field split (annual engine's `surplus` vs.
+      // a separate chart-only `fcfChart`, added in v4.1.5 specifically to stop
+      // the draw leaking into the chart) is gone -- there is now ONE aggregated
+      // definition (`disc`, the floor/split-protected kept FCF), and engine.js's
+      // `surplus` field IS that definition (`Math.round(avgMo('disc'))`), for
+      // every scenario, live or pinned. pin.rows is aggregateMonthlyToAnnual's
+      // output captured at pin time with no subsequent changes -- so
+      // window.__liveRows' own row for this year is byte-identical to the
+      // pin's row, and `annualRow.surplus` IS the correct expected value now
+      // (there's no second, different field to distinguish it from anymore).
       const annualRow = liveRows.find(r => r.cal === drawYear);
-      const expectedFixed = Math.max(0, annualRow?.fcfChart || 0);
+      const expectedFixed = Math.max(0, annualRow?.surplus || 0);
       return {
         settleDraw: wf[idx].settleDraw,
         pinKey,
         pinnedAtDrawYear: cd[yi]?.[pinKey],
-        annualRawSurplus: annualRow?.surplus,
         expectedFixed,
       };
     });
@@ -1804,11 +1952,12 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     expect(result).toBeTruthy();
     expect(result.pinKey).toBeTruthy();
     expect(result.settleDraw).toBeGreaterThan(0);
-    // The pre-v4.1.4 bug used Math.max(0, annualRawSurplus) directly, leaking
-    // the draw straight through -- assert the chart value matches engine.js's
-    // fcfChart field exactly, not the raw (leaked) annual surplus.
+    // Assert the pinned chart's FCF value matches the aggregated disc-based
+    // `surplus` field exactly -- i.e. the draw doesn't leak into it. (The old
+    // second assertion, "...not the raw leaked annual surplus," compared
+    // against a DIFFERENT field that A4 deleted; there's nothing left to
+    // distinguish it from, so it's removed rather than compared against itself.)
     expect(result.pinnedAtDrawYear).toBe(result.expectedFixed);
-    expect(result.pinnedAtDrawYear).not.toBe(Math.max(0, result.annualRawSurplus));
   });
 
   test('S7 — pinned scenario\'s FCF stays close to live after HI debt clears (v4.1.5, post-debt-clear parity)', async ({ page }) => {
@@ -1864,7 +2013,12 @@ test.describe('Group T — v4.3.0 Model Start-Date Anchor', () => {
   test('T1 — start-of-model snapshot matches entered settings exactly (no pre-start decay)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       // NOTE: {sophiaBal:0, nolanBal:0} would NOT zero those out -- buildScenario
       // reads `p.sophiaBal || SOPHIA_LOANS...`, and `0` is falsy, so it falls back
       // to the default loan sums. Use the real default scenario params and compare
@@ -1907,14 +2061,29 @@ test.describe('Group T — v4.3.0 Model Start-Date Anchor', () => {
   test('T3 — a later start month shrinks year-0 activity, not the displayed $/mo rate', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams, applyDefaultsOverrides } = window.__engine;
+      // v5.0.0 shim -- see the identical note at the other buildScenario call sites.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams, applyDefaultsOverrides } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       applyDefaultsOverrides({ BASE: { startMonth: 1 } });
-      const janRows = buildScenario(makeParams({ payOffHI: true }));
+      const janParams = makeParams({ payOffHI: true });
+      const janWf = buildMonthlyScenario(janParams);
+      const janRows = aggregateMonthlyToAnnual(janWf, janParams);
       applyDefaultsOverrides({ BASE: { startMonth: 7 } });
-      const julRows = buildScenario(makeParams({ payOffHI: true }));
+      const julParams = makeParams({ payOffHI: true });
+      const julWf = buildMonthlyScenario(julParams);
+      const julRows = aggregateMonthlyToAnnual(julWf, julParams);
       applyDefaultsOverrides({ BASE: { startMonth: 1 } });   // restore module-level BASE for later tests
       return {
-        janCore: janRows[0].core, julCore: julRows[0].core,
+        // v5.0.0: the ANNUAL `core` field is now a true period average with
+        // continuous monthly CPI compounding (mo/12) -- a Jan start's row-0
+        // averages 12 months (mo 0-11) while a Jul start's row-0 averages
+        // only 6 (mo 0-5), so the two windows are genuinely different widths
+        // under continuous growth and won't match to the dollar anymore
+        // (a clean aggregation exception, not a bug). Read wfData's own
+        // FIRST month directly instead -- mo=0 has an identical growth factor
+        // ((1+cpi)^(0/12)=1) regardless of which calendar month that is, so
+        // this is the true apples-to-apples "$/mo rate" check the test wants.
+        janCore: janWf[0].fc_core, julCore: julWf[0].fc_core,
         janCumCost: janRows[9].cumCost, julCumCost: julRows[9].cumCost,
       };
     });
@@ -2016,7 +2185,12 @@ test.describe('Group U — v4.4.0 Birth-Date Anchor / Per-Spouse SS / Medicare-F
   test('U2 — SS switches on in the exact chosen calendar month, prorating that row\'s average $/mo rate', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       // Isolate Bob's math: push Brenda's claim far past the 21-yr horizon so she never appears.
       const p = makeParams({ ssStartYear: 2027, ssStartMonth: 4, ssAmount: 1000, ssBrendaStartYear: 2060, ssBrendaStartMonth: 1 });
       const rows = buildScenario(p);
@@ -2169,7 +2343,12 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
   test('V2 — closingEligible=false: an added loan is untouched by the one-time property-sale closing payoff, while HI debt still gets paid down', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       // Loan starts in 2026, sale/closing lands in 2028 -- gives the loan two years
       // of its own real balance (buildScenario's pooled-routing block for a given
       // year reads loan balances as they stand BEFORE that year's own monthly
@@ -2193,7 +2372,12 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
   test('V2b — closingEligible=true: a higher-rate added loan IS retired by the closing lump-sum, ahead of/alongside HI debt (unified rate-order)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const rows = buildScenario(makeParams({
         properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2028, quarter: 2 } }],
         obligation: { amount: 0, year: 2028, quarter: 2, offsetsCapitalGains: true },
@@ -2210,7 +2394,12 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
   test('V3 — a sweepable loan keeps getting accelerated even after HI debt clears (not gated on HI specifically)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       // A 30-year term, sized so schedule-only amortization still has a large
       // balance left at year 16 (2042) -- leaves real headroom to see the
       // sweepable variant pull meaningfully ahead.
@@ -2242,7 +2431,12 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
   test('V4 — a non-sweepable, non-closing-eligible loan is never touched by any debt mechanism (balance invariant to payOffHI)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
-      const { buildScenario, makeParams } = window.__engine;
+      // v5.0.0: buildScenario (the standalone annual engine) was deleted --
+      // the annual view is now aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).
+      // This shim keeps every call site below (`buildScenario(makeParams({...}))`)
+      // working unchanged against the new single engine.
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const loan = { label:'Sched', amount:20000, rate:0.06, months:60, sweepable:false, closingEligible:false };
       const withSweepActive   = buildScenario(makeParams({ loans:[loan], payOffHI:false }));
       const withNoSweepAtAll  = buildScenario(makeParams({ loans:[loan], payOffHI:true }));
@@ -2284,13 +2478,22 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
     const result = await page.evaluate(() => {
       const liveRows = window.__liveRows;
       const wfData = window.__wfData;
-      // Annual's r2027 is a START-of-2027 snapshot (== end of 2026, the v4.3.0
-      // pre-decrement convention) -- match it against wfData's LAST 2026 month
-      // (not the first 2027 month, which would already be one payment further
-      // along), so both sides describe the same real instant.
+      // v5.0.0: pre-v5, this compared TWO independently-implemented engines,
+      // so matching "the same real instant" (annual's start-of-2027 snapshot
+      // vs. wfData's LAST 2026 month, deliberately one month earlier) was the
+      // right thing to reach for. Post-v5 there is only one engine --
+      // aggregateMonthlyToAnnual's `first` (the row annual's famLoanBal reads)
+      // IS literally the January-2027 wfData row object, not a re-derived
+      // figure. Comparing against December 2026 now compares two genuinely
+      // adjacent-but-different months (loansBal is captured POST that row's
+      // OWN decrement for every row, unlike ccBalRaw/sophiaBalRaw/nolanBalRaw's
+      // true pre-decrement snapshot -- see the flagged engine finding in the
+      // session33 report), which is exactly why this drifted by a few $K once
+      // a dynamically-added sweepable loan changed how much moves in a single
+      // month. Compare the SAME month on both sides instead.
       const r2027 = liveRows.find(r => r.cal === 2027);
-      const wfEnd2026 = wfData.filter(r => r.calYear === 2026).slice(-1)[0];
-      return { annual: r2027.famLoanBal, monthly: Math.round((wfEnd2026.loansBal||0) / 1000) };
+      const wfJan2027 = wfData.filter(r => r.calYear === 2027)[0];
+      return { annual: r2027.famLoanBal, monthly: Math.round((wfJan2027.loansBal||0) / 1000) };
     });
     console.log('  V6 — ' + JSON.stringify(result));
     expect(Math.abs(result.annual - result.monthly)).toBeLessThanOrEqual(2);

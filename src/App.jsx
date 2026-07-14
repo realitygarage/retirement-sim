@@ -1,3 +1,39 @@
+// v5.0.0 -- SINGLE-ENGINE REFACTOR: the two-engine design (buildScenario annual +
+// wfData monthly, which had to be kept in sync by hand and periodically drifted --
+// see the v4.3.0/v4.3.1/v4.4.0 fixes above) is retired. buildMonthlyScenario
+// (engine.js) is now the sole source of truth; the annual/Simulator view is pure
+// aggregation (aggregateMonthlyToAnnual) of its monthly output -- stocks = the
+// year's first-month snapshot, flows = summed over the year's real months. Pins
+// now run the same full monthly engine as live (previously annual-only). See
+// v5_phase0_findings.md for the full investigation: the approved modeling
+// decisions (A1 uncapped/inflated structure-value maintenance, replacing both the
+// old annual value%-based and monthly capped-reserve formulas; A2 pins get full
+// monthly runs; A3 cashAst retired as inert; A4 fcfChart/sweepChart deleted, disc
+// is the one FCF definition for every scenario), the latent bugs the divergence
+// was masking and fixed by the collapse (B1 debt-avalanche pace -- the annual
+// mirror was missing the rd/ob buffer competition; B2 sale-year reserve-fill vs.
+// true-sweep conflation; B3 sale-year mortgage-interest tax deduction dropped by
+// a coarse year-level ownership gate), and the clean small precision gains from
+// continuous monthly compounding (C1 tax, C2 rental/cost growth) instead of
+// once-per-row snapshots.
+//
+// Checkpoint 1b (full suite) caught two more silent regressions from the
+// collapse, both restored to their exact pre-v5 behavior: (1) the annual
+// `rental` field is now GROSS (wfData's own convention) where the old engine's
+// was NET (via unitSegmentNet) -- `passive`/`reqWork` now explicitly net
+// `rentalOpCost` back out, rather than carrying the old engine's incidental
+// net-rental convention forward as a side effect. (2) IRMAA (Medicare surcharge,
+// 2yrs after a taxable disposition) was computed (`computeDispositions`'s
+// `irmaaYears`) but never actually charged anywhere -- ported back verbatim
+// (`irmaaAddMo`/`fc_irmaa`/`irmaa`). Both were caught by a systematic old-vs-new
+// field audit (not the suite itself -- see R16 and the strengthened A5, added/
+// fixed specifically because nothing previously guarded either mechanism), and
+// both are now cross-checked term-by-term against the old engine's full
+// baseOut/passive computation with no other gaps found. One narrower, feature-
+// gated finding from that same audit is deliberately NOT fixed here -- see the
+// v5.0.0 entry in the session33 journal for the mtgPrincipalOn/pool-year
+// wfToSavings display follow-up.
+//
 // v4.6.0 -- Work Income Curve gains quarter-precision point placement (was whole-year
 // only), so a curve point can align with the same quarter a property sale is scheduled
 // in. Pure UI change: workFromCurve() (engine.js) already interpolated on a continuous
@@ -93,7 +129,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildScenario, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
+import { BASE, HI_TOTAL, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
 // v4.3.0: BASE.startYear/startMonth (imported above) are the single source
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
@@ -103,7 +139,7 @@ import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
   window.__engine = {
-    BASE, HI_TOTAL, buildScenario, keyStats, disposeAsset, taxRecognized,
+    BASE, HI_TOTAL, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, disposeAsset, taxRecognized,
     DISPO_DEFAULTS, makeParams,
     workFromCurve, remainBal, estimateTax,
     unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps,
@@ -337,6 +373,10 @@ export default function App(){
   // Convert a saved paramSnapshot (SC format) to engine params. v4.0.0-A:
   // properties/obligation pass straight through (no % conversion -- their
   // rate/pct fields are stored as decimals directly in sc, unlike ccRate etc).
+  // v5.0.0 (A2): pins now run the SAME single monthly engine live uses --
+  // returns {rows, wfRows} (aggregated annual + full monthly), not just an
+  // annual-only approximation. This is what lets every pin_<id>_* chart field
+  // (including FCF, A4) source identically to live instead of drifting.
   function buildRowsFromSnapshot(snap){
     const sc={...SC_DEFAULTS,...snap};
     const diCap_=(sc.discFloor||800)+(sc.rdTopUp||400)+(sc.obTopUp||500);
@@ -346,7 +386,7 @@ export default function App(){
     const props = sc.properties || freshPropertiesDefaults();
     const totalVal = props.reduce((s,pr)=>s+(pr.hold?.mode==='keep'?pr.value:0), 0);
     const maintRate_=totalVal>0?totalMaint/totalVal:0.005;
-    return buildScenario(makeParams({
+    const params = makeParams({
       ...sc,
       // v4.4.0: ssAge (stepped toggle) replaced by explicit ssStartYear/Month
       // per spouse -- ssAmount now derives from a continuous claiming age
@@ -368,7 +408,10 @@ export default function App(){
       loans:(sc.loans||DEFAULT_LOANS_SC).map(l=>({...l, rate:(l.rate||0)/100})),
       strPlatformPct:(sc.strPlatformPct||3)/100, strCleanPct:(sc.strCleanPct||4)/100, mgrPct:(sc.mgrPct||0)/100,
       ltrVacancyPct:(sc.ltrVacancyPct||4)/100, mtrCleaningFlat:sc.mtrCleaningFlat||300,
-    }));
+    });
+    const wfRows = buildMonthlyScenario(params);
+    const rows = aggregateMonthlyToAnnual(wfRows, params);
+    return { rows, wfRows };
   }
 
   const [pins,    setPins]    = useState(()=>{
@@ -377,7 +420,7 @@ export default function App(){
       if(!saved) return [];
       const {version,pins:savedPins}=JSON.parse(saved);
       if(version!==SAVE_SCHEMA_VERSION) return [];
-      return savedPins.map(p=>{const rows=buildRowsFromSnapshot(p.paramSnapshot||{});return{...p,rows,stats:keyStats(rows)};});
+      return savedPins.map(p=>{const {rows,wfRows}=buildRowsFromSnapshot(p.paramSnapshot||{});return{...p,rows,wfRows,stats:keyStats(rows)};});
     }catch(e){ return []; }
   });
   const [pinName, setPinName] = useState("");
@@ -453,7 +496,12 @@ export default function App(){
     ltrVacancyPct:(sc.ltrVacancyPct||4)/100, mtrCleaningFlat:sc.mtrCleaningFlat||300,
   }),[sc, diCap, maintRate, defaultsRev]);   // defaultsRev: engines read mutated BASE/DISPO objects
 
-  const liveRows  = useMemo(()=>buildScenario(liveParams),[liveParams]);
+  // v5.0.0: single monthly engine is the sole source of truth -- wfData
+  // computed first (pure function of liveParams alone, no dependency on
+  // liveRows anymore -- see computeDispositions in engine.js), liveRows is
+  // now a pure aggregation of wfData (see aggregateMonthlyToAnnual).
+  const wfData   = useMemo(()=>buildMonthlyScenario(liveParams),[liveParams]);
+  const liveRows = useMemo(()=>aggregateMonthlyToAnnual(wfData, liveParams),[wfData, liveParams]);
   const liveStats = useMemo(()=>keyStats(liveRows),[liveRows]);
 
   // v3.4.0: saved-pin rows must also see Defaults-tab overrides (their engine
@@ -461,8 +509,8 @@ export default function App(){
   useEffect(()=>{
     if(defaultsRev===0) return;
     setPins(ps=>ps.map(p=>{
-      const rows=buildRowsFromSnapshot(p.paramSnapshot||{});
-      return {...p, rows, stats:keyStats(rows)};
+      const {rows,wfRows}=buildRowsFromSnapshot(p.paramSnapshot||{});
+      return {...p, rows, wfRows, stats:keyStats(rows)};
     }));
   },[defaultsRev]);
 
@@ -494,12 +542,16 @@ export default function App(){
     }
     if(Math.abs(settleData.residual - Math.max(0, settleData.totalProceeds - (obligation.amount||0))) > 1)
       console.warn(`[obligation audit] residual ($${Math.round(settleData.residual)}) != max(0, Σ afterTaxNetProceeds - obligation.amount)`);
-    // v4.0.0-B conservation: draw + debt paydown + savings === residual
+    // v4.0.0-B conservation: draw + debt paydown + reserve fill + savings === residual
+    // v5.0.0 (B2 fix): wfReserveFill added as its own term -- reserve top-ups
+    // and true sweep are no longer conflated into a single wfToSavings figure
+    // (the pre-v5 annual engine never modeled the reserve-fill step at all;
+    // the single monthly engine always did, correctly).
     const rSet = liveRows.find(r=>r.cal===obligation.year);
     if(rSet && settleData.sellers.length>0){
-      const splitSum = (rSet.settleDraw||0)+(rSet.wfDebtPaid||0)+(rSet.wfToSavings||0);
+      const splitSum = (rSet.settleDraw||0)+(rSet.wfDebtPaid||0)+(rSet.wfReserveFill||0)+(rSet.wfToSavings||0);
       if(Math.abs(splitSum - settleData.residual) > 2)
-        console.warn(`[obligation audit] draw+paydown+savings split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
+        console.warn(`[obligation audit] draw+paydown+reserveFill+savings split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
     }
   },[settleData,obligation.amount,liveRows,obligation.year]);
 
@@ -521,472 +573,6 @@ export default function App(){
     }
   },[liveRows,properties]);
 
-  // -- Cash flow waterfall engine ----------------------------
-  const wfData = useMemo(()=>{
-    // v4.0.0-A: property-centric. `properties` is liveParams' merged canonical
-    // form. Ownership is checked at TRUE monthly resolution via
-    // unitOwnedThisMonth (this engine is authoritative, so income and mortgage
-    // stop exactly at the sale quarter boundary -- no annual approximation).
-    const _properties = liveParams.properties || [];
-    const _propById = Object.fromEntries(_properties.map(pr=>[pr.id, pr]));
-    const ownedMo = (propId, calYear, mo1to12) => unitOwnedThisMonth(_propById[propId]?.hold, calYear, mo1to12);
-
-    // Maint monthly amounts (structure-value-based, from the Cash-Flow-tab
-    // structure sliders -- a distinct concept from properties[].value); zeroed
-    // when property sold. Re-checked per month so post-sale years drop out.
-    const _maint6Base   = struct6 *1000*maintStr/100/12;
-    const _maint15Base  = struct15*1000*maintStr/100/12;
-    const _maintLafBase = structLaf*1000*maintStr/100/12;
-    const maint6Cap  = _maint6Base   * 12 * 5;
-    const maint15Cap = _maint15Base  * 12 * 5;
-    const maintLafCap= _maintLafBase * 12 * 5;
-    const PROP_TAX_INS = {
-      sixth:     { tax: BASE.primTaxMo, ins: BASE.primInsMo },
-      fifteenth: { tax: BASE.dplxTaxMo, ins: BASE.dplxInsMo },
-      barberry:  { tax: BASE.lafTaxMo,  ins: BASE.lafInsMo  },
-    };
-
-    // Segment cost profile (§1 table) -- SAME helper the annual engine uses,
-    // so netting cannot drift between the two.
-    const costOpts = {
-      strPlatformPct: liveParams.strPlatformPct||0, strCleanPct: liveParams.strCleanPct||0, mgrPct: liveParams.mgrPct||0,
-      ltrVacancyPct: liveParams.ltrVacancyPct||0, mtrCleaningFlat: liveParams.mtrCleaningFlat||0,
-    };
-
-    // Pre-compute per-year dispo proceeds & obligation outflow (for HI paydown timing)
-    const _yearCashAdd = {};
-    const _yearCashSub = {};
-    try {
-      // buildScenario already computed dispoRes; get via liveRows.dispoResults if present
-      const _dr = (liveRows && liveRows.dispoResults) || {};
-      for(const prop of _properties){
-        const d = _dr[prop.id];
-        if(d && d.mode && d.mode !== 'keep' && (d.afterTaxNetProceeds||0) > 0){
-          _yearCashAdd[d.year] = (_yearCashAdd[d.year]||0) + d.afterTaxNetProceeds;
-        }
-      }
-      const _oblig = liveParams.obligation || {};
-      if((_oblig.amount||0) > 0){
-        // v4.3.0: BASE.startYear (was hardcoded 2026) -- matches engine.js's
-        // buildScenario `obligYr = obligation.year || BASE.startYear` fallback;
-        // a mismatched fallback here would silently disagree with the annual
-        // engine on which year an unset obligation defaults to.
-        _yearCashSub[_oblig.year||BASE.startYear] = (_yearCashSub[_oblig.year||BASE.startYear]||0) + _oblig.amount;
-      }
-    } catch(e) {}
-    const _paidYears = new Set();  // years where HI paydown has been applied
-
-    // v3.2.0 generalized loans -- monthly state (rates already decimal in liveParams)
-    // v4.5.0: includeInSweep split into two independent flags -- sweepable
-    // (ongoing surplus-sweep) and closingEligible (one-time property-sale-
-    // closing lump-sum) -- see the identical note in engine.js's buildScenario.
-    const _loans = (liveParams.loans||[]).map(l=>({
-      label: l.label||'Loan', rate: l.rate||0, amount: l.amount||0,
-      sweepable:       !!l.sweepable,
-      closingEligible: !!l.closingEligible,
-      pmt: loanMonthlyPmt(l.amount||0, l.rate||0, l.months||0),
-      // v4.3.0: keyed to BASE.startYear/startMonth (was hardcoded 2026/6, which
-      // only happened to match this engine's OLD hardcoded June startDate below --
-      // see engine.js's buildScenario for the identical fix and the "-6 magic
-      // number" note).
-      startAbs: Math.max(0, ((l.startYear||BASE.startYear)-BASE.startYear)*12 + ((l.startMonth||BASE.startMonth)-BASE.startMonth)),
-      bal: 0, started:false, startAnnounced:false, payoffAnnounced:false,
-    }));
-    const _sweepLoanQ = ()=>_loans.filter(L=>L.sweepable && L.bal>0)
-      .map(L=>({g:()=>L.bal, s:(v)=>{L.bal=v;}, r:L.rate}));
-
-    // v4.0.0-A mortgage state, one machine per property (generalized from the
-    // v3.4.0 hardcoded 6th+15th pair -- Lafayette/Barberry now share the SAME
-    // state machine, ioYears:0 recasting immediately at origination).
-    const _mkMtg = (m,label)=>({p:{...m}, label, bal:m.balance, recast:null, ioPmt:0, transAnnounced:false, payoffAnnounced:false});
-    const _mtgSt = {};
-    for(const prop of _properties) _mtgSt[prop.id] = _mkMtg(prop.mortgage, prop.label);
-    const MTG_PRINCIPAL_ELIGIBLE_IDS = ['sixth','fifteenth'];
-    const _stepMtg = (st, calYear, calMonth1to12, owned)=>{
-      const m=st.p;
-      const k=(calYear-m.originYear)*12 + (calMonth1to12-m.originMonth);
-      if(k<0 || !owned || st.bal<=0) return 0;
-      const interest = st.bal*m.rate/12;
-      if(k < m.ioYears*12) return interest;              // IO: interest only, balance flat
-      if(st.recast==null){                                // recast on ACTUAL remaining balance
-        st.recast = loanMonthlyPmt(st.bal, m.rate, Math.max(1, m.termYears*12 - k));
-        st.ioPmt  = interest;
-      }
-      const pmt = Math.min(st.recast, st.bal + interest);
-      st.bal = Math.max(0, st.bal + interest - pmt);
-      return pmt;
-    };
-
-    // Running balances
-    let ccBal    = payOffHI ? 0 : (liveParams.ccBal||60000);
-    let sophiaBal= payOffHI ? 0 : (liveParams.sophiaBal||58057);
-    let nolanBal = payOffHI ? 0 : (liveParams.nolanBal||141117);
-    const ccRate_    = liveParams.ccRate    || 0.14;
-    const ccMin_     = liveParams.ccMin     || 1200;
-    const sophiaRate_= liveParams.sophiaRate|| 0.0814;
-    const sophiaMin_ = liveParams.sophiaMin || 737;
-    const nolanRate_ = liveParams.nolanRate || 0.084;
-    const nolanMin_  = liveParams.nolanMin  || 1787;
-    let nolanOn = false;
-    let rdBal   = 0;   // rainy day balance
-    let obBal   = 0;   // operating buffer balance
-    let res6    = 0;   // maintenance reserve 6th
-    let res15   = 0;   // maintenance reserve 15th
-    let resLaf  = 0;   // maintenance reserve lafayette
-    let debtClearedMo = payOffHI ? 0 : -1;  // pre-cleared if paid off at closing
-    let savingsAcc = 0;      // accumulated post-debt sweep redirected to investments
-
-    const rows = [];
-    // v4.3.0: was a hardcoded new Date(2026,5) (June 2026) -- the actual root
-    // cause of the "$60K CC setting shows as $46K on the chart" bug (this
-    // startDate silently disagreed with the annual engine's Jan-1-anchored
-    // BASE.startYear, and with the chart's own year-bucketing below, which
-    // assumed mo=0 was January). Now keyed to the same explicit, Defaults-
-    // tab-editable anchor buildScenario uses.
-    const _startMonthClamped = Math.min(12, Math.max(1, Math.round(BASE.startMonth||1)));
-    const startDate = new Date(BASE.startYear, _startMonthClamped-1);
-
-    for(let mo=0; mo<252; mo++){  // 252 = 21 full years to match buildScenario (2026-2046)
-      const d = new Date(startDate.getFullYear(), startDate.getMonth()+mo);
-      const calYear = d.getFullYear();
-      const inf    = Math.pow(1+liveParams.inflation,   mo/12);
-      const coreinf= Math.pow(1+(liveParams.coreCpi||liveParams.inflation), mo/12);
-      const rg     = Math.pow(1+liveParams.rentGrowth,  mo/12);
-      const pinf   = Math.pow(1+(liveParams.propCpi||liveParams.propInflation), mo/12);
-
-      // -- v4.0.0-B pooled routing, applied once at the start of the pool year:
-      //    (a) one-time draw, (b) FULL post-draw remainder pays HI debt first
-      //    (avalanche, Nolan included -- his 5-month grace delays minimum
-      //    payments, not lump-sum payoff), (c) then reserves/buckets fill to
-      //    caps, (d) survivor joins this month's sweep/savings. This debt-
-      //    first-then-buffers order is scoped to THIS one-time sale-proceeds
-      //    inflow only -- the ordinary recurring monthly waterfall (buffers
-      //    before the debt sweep) is unchanged below.
-      let _oneTimeSweep = 0;      // (d) survivor joining this month's sweep
-      let _settleDrawMo = 0;      // (a) one-time draw
-      let _oneTimeReserveFill = 0; // (c) total landed in reserve/buffer caps
-      let _payDetailMo  = null;   // (b) per-debt plan, for tests/audit
-      if((_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
-        const residual = Math.max(0, (_yearCashAdd[calYear] - (_yearCashSub[calYear]||0)));
-        const split = splitResidual(residual, {
-          // v4.3.0: BASE.startYear (was hardcoded 2026) -- same fallback fix as above.
-          lifestyleDraw: calYear===((liveParams.obligation||{}).year||BASE.startYear) ? (liveParams.settleLifestyleDraw||0) : 0,
-        });
-        // v4.5.0: mkDebts/applyPlan replaced by the shared buildDebtList/
-        // applyDebtPlan helpers (engine.js) -- identical change as
-        // buildScenario's, so the two engines' closing-payoff routing can't
-        // diverge. Gates loan inclusion on closingEligible (was the SAME
-        // includeInSweep flag the ongoing sweep used).
-        // (b) debt-first: avalanche-pay the FULL remainder against HI debt/loans
-        const plan = planHiPaydown(split.remainder, buildDebtList(
-          {cc:{bal:ccBal,rate:ccRate_}, sophia:{bal:sophiaBal,rate:sophiaRate_}, nolan:{bal:nolanBal,rate:nolanRate_}},
-          _loans, 'closingEligible', payOffHI));
-        applyDebtPlan(plan, {
-          cc:     pay=>{ccBal     = Math.max(0, ccBal-pay);},
-          sophia: pay=>{sophiaBal = Math.max(0, sophiaBal-pay);},
-          nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
-        }, _loans);
-        _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
-        // (c) whatever debt didn't absorb fills reserves/buckets to caps
-        let rem = split.remainder - plan.total;
-        const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
-        const _res6Fill   = _fill(res6,   maint6Cap);   res6   += _res6Fill;
-        const _res15Fill  = _fill(res15,  maint15Cap);  res15  += _res15Fill;
-        const _resLafFill = _fill(resLaf, maintLafCap); resLaf += _resLafFill;
-        const _rdFill     = _fill(rdBal,  rdCap);       rdBal  += _rdFill;
-        const _obFill     = _fill(obBal,  obCap);       obBal  += _obFill;
-        _oneTimeReserveFill = _res6Fill+_res15Fill+_resLafFill+_rdFill+_obFill;
-        _oneTimeSweep = rem;    // (d) joins debt sweep if debt remains, else savings
-        _settleDrawMo = split.draw;
-        _paidYears.add(calYear);
-      }
-
-      // -- INCOME --
-      const pension  = BASE.pensionMonthly;
-      // v4.4.0: SS is calendar-pegged like Medicare -- each spouse switches on
-      // at its own absolute calendar month (year*12+month), not a year-only
-      // boundary. This engine is already monthly, so (unlike buildScenario's
-      // proration gymnastics) this is exact by construction -- no averaging needed.
-      const _ssAbsMo = calYear*12 + (d.getMonth()+1);
-      const yourSsMo = (liveParams.ssStartYear && _ssAbsMo>=liveParams.ssStartYear*12+(liveParams.ssStartMonth||1))
-        ? liveParams.ssAmount : 0;
-      const brendaSsMo = (liveParams.ssBrendaStartYear && _ssAbsMo>=liveParams.ssBrendaStartYear*12+(liveParams.ssBrendaStartMonth||1))
-        ? BASE.brendaSsFRA : 0;
-
-      // -- Rental income (v4.0.0-A): for each held property, for each unit,
-      //    sum GROSS + NET across all covering segments. rentalMo stays GROSS
-      //    (matching the existing display contract); rentalOpCost = gross-net,
-      //    using the SAME unitSegmentNet the annual engine calls -- this is
-      //    what guarantees the two engines cannot disagree on the netting. --
-      let rentalMo = 0, _rentalNetMo = 0;
-      for(const prop of _properties){
-        if(!ownedMo(prop.id, calYear, d.getMonth()+1)) continue;
-        for(const unit of (prop.units||[])){
-          for(const seg of (unit.segments||[])){
-            const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
-            if(calYear<f || calYear>t) continue;
-            rentalMo     += unitSegmentGross(seg)/12*rg;
-            _rentalNetMo += unitSegmentNet(seg, costOpts)/12*rg;
-          }
-        }
-      }
-      const rentalOpCost = Math.round(rentalMo - _rentalNetMo);
-      const wkInc     = workFromCurve(mo/12, workPts)*inf;
-      const totalInc  = pension+yourSsMo+brendaSsMo+rentalMo+wkInc-rentalOpCost;
-
-      // -- TIER 1: FIXED COSTS --
-      // v4.1.3: use the shared engine.js healthMonthly() instead of a duplicate
-      // inline calc, so both engines agree on the You -> Medicare transition
-      // (birth-date-derived, v4.4.0 -- Oct 2026) instead of drifting on two
-      // separately-maintained versions.
-      const health = healthMonthly(calYear, d.getMonth()+1, liveParams);
-      const hiDebtNow = ccBal+sophiaBal+nolanBal;
-      // v4.0.0-A: contractual IO -> recast P&I, ALL properties via the same
-      // state machine (Lafayette/Barberry included -- no more flat BASE.lafPnI).
-      let mtg = 0;
-      for(const prop of _properties) mtg += _stepMtg(_mtgSt[prop.id], calYear, d.getMonth()+1, ownedMo(prop.id, calYear, d.getMonth()+1));
-      const core      = (BASE.carLease+BASE.otherIns+BASE.food+BASE.utilities+BASE.personal)*coreinf;
-      // v3.2.0 loans: step state; scheduled payments land in Fixed (fc_famLoan key kept)
-      let famLoan = 0;
-      for(const L of _loans){
-        if(!L.started && mo>=L.startAbs && L.amount>0){ L.bal=L.amount; L.started=true; }
-        if(L.bal>0){
-          L.bal *= (1+L.rate/12);
-          const pay = Math.min(L.pmt, L.bal);
-          L.bal -= pay;
-          famLoan += pay;
-          if(L.bal < 0.5) L.bal = 0;
-        }
-      }
-      // HI minimums
-      // v4.3.0 FOLLOW-UP (deferred, not fixed here -- see journal and the
-      // twin gate/comment in engine.js's buildScenario): `mo` is elapsed
-      // months since BASE.startYear/startMonth (was elapsed months since a
-      // hardcoded June 2026). This threshold's real-world meaning shifts with
-      // the anchor -- for the current startMonth=7 default, "mo>=5" now reads
-      // as "from December of the start year," vs. "from November" under the
-      // old hardcoded June anchor. Needs an explicit absolute-calendar-date
-      // decision, not a threshold tweak.
-      if(mo>=5) nolanOn=true;
-      const minCC  = ccBal>0?ccMin_:0;
-      const minSoph= sophiaBal>0?sophiaMin_:0;
-      const minNol = nolanOn&&nolanBal>0?nolanMin_:0;
-      const hiMins = payOffHI?0:minCC+minSoph+minNol;
-      // Property tax + insurance (gated per property, v4.0.0-A: true monthly ownership)
-      const propCost = Math.round(
-        _properties.reduce((s,prop)=>{
-          if(!ownedMo(prop.id, calYear, d.getMonth()+1)) return s;
-          const ti = PROP_TAX_INS[prop.id];
-          return s + (ti ? (ti.tax+ti.ins)*pinf : 0);
-        }, 0)
-      );
-      // Income tax estimate -- annualize this month's income; mortgage interest
-      // deduction uses current per-property STATE balances (v4.0.0-A: generalized).
-      const _mtgInt = _properties.reduce((s,prop)=>{
-        if(!ownedMo(prop.id, calYear, d.getMonth()+1)) return s;
-        const st = _mtgSt[prop.id];
-        return s + st.bal*st.p.rate;
-      }, 0);
-      const taxMo = Math.round(estimateTax(liveParams, BASE.pensionMonthly*12, wkInc*12, yourSsMo, brendaSsMo, rentalMo*12, _mtgInt) / 12);
-      const tier1  = mtg+health+core+famLoan+hiMins+propCost+taxMo;
-
-      // -- MAINTENANCE RESERVES (cap-aware, time-gated by ownership) --
-      const maint6Mo   = ownedMo('sixth', calYear, d.getMonth()+1)     ? _maint6Base   : 0;
-      const maint15Mo  = ownedMo('fifteenth', calYear, d.getMonth()+1) ? _maint15Base  : 0;
-      const maintLafMo = ownedMo('barberry', calYear, d.getMonth()+1)  ? _maintLafBase : 0;
-      const res6Add   = (res6  <maint6Cap  )?Math.min(maint6Mo,  maint6Cap  -res6  ):0;
-      const res15Add  = (res15 <maint15Cap )?Math.min(maint15Mo, maint15Cap -res15 ):0;
-      const resLafAdd = (resLaf<maintLafCap)?Math.min(maintLafMo,maintLafCap-resLaf):0;
-      const maintTotal= res6Add+res15Add+resLafAdd;
-      const maintRedirect = (maint6Mo+maint15Mo+maintLafMo)-maintTotal; // freed to sweep
-
-      // -- FCF FLOOR: check schedule first, fall back to global discFloor --
-      const _fcfSched = (fcfSchedule||[]).find(s=>calYear>=s.yrFrom&&calYear<=s.yrTo);
-      const effectiveFloor = _fcfSched ? _fcfSched.floor : discFloor;
-
-      // -- TIER 2 & 3: SAVINGS BUCKETS --
-      const available = totalInc-tier1-maintTotal;
-      // Rainy day
-      let rdAdd = 0;
-      if(rdBal<rdCap){
-        rdAdd = Math.min(rdTopUp, rdCap-rdBal, Math.max(0,available-effectiveFloor));
-      }
-      // Op buffer -- sequential: only after RD full; parallel: simultaneous
-      let obAdd = 0;
-      const rdFull = rdBal>=rdCap;
-      if(bufferMode==="par"||(bufferMode==="seq"&&rdFull)){
-        if(obBal<obCap){
-          obAdd = Math.min(obTopUp, obCap-obBal, Math.max(0,available-rdAdd-effectiveFloor));
-        }
-      }
-
-      // -- TIER 4 & 5: FCF FLOOR + SURPLUS SWEEP --
-      const afterBuckets = available-rdAdd-obAdd;
-      const cfSplitProtect = Math.max(effectiveFloor, afterBuckets*(lifestyleSplit/100));
-      // surplusAboveFloor = the portion above the protected FCF floor
-      const surplusAboveFloor = Math.max(0, afterBuckets - cfSplitProtect);
-      // While in debt: surplus sweeps debt. When clear: same amount goes to savings.
-      // v3.2.0: the sale-month waterfall remainder joins whichever side applies.
-      // v4.5.0: was hiDebtNow>0 only (HI-only) -- now also true while a
-      // sweepable LI loan still has a balance, so the sweep doesn't
-      // permanently stop the moment HI clears if a sweepable loan is still
-      // outstanding. hiDebtNow ITSELF stays HI-only (unchanged) -- it's still
-      // used below for the HI-specific debtClearedMo/hiDebtEnd fields, which
-      // must keep meaning "HI debt" specifically, not this broader tiering.
-      const hasDebt = hiDebtNow > 0 || _loans.some(L=>L.sweepable && L.bal>0);
-      const sweep = hasDebt ? surplusAboveFloor + maintRedirect + _oneTimeSweep : 0;
-      const _oneTimeToSavings = hasDebt ? 0 : _oneTimeSweep;
-
-      // Apply interest & payments to debt balances
-      const intCC    = ccBal>0     ? ccBal*ccRate_/12       : 0;
-      const intSoph  = sophiaBal>0 ? sophiaBal*sophiaRate_/12 : 0;
-      const intNolan = nolanOn&&nolanBal>0 ? nolanBal*nolanRate_/12 : 0;
-      const interestPaid = intCC + intSoph + intNolan;
-      const minPmt = (ccBal>0?minCC:0) + (sophiaBal>0?minSoph:0) + (nolanOn&&nolanBal>0?minNol:0);
-      if(ccBal>0)    {ccBal    =Math.max(0,ccBal    *(1+ccRate_/12)    -minCC);}
-      if(sophiaBal>0){sophiaBal=Math.max(0,sophiaBal*(1+sophiaRate_/12)-minSoph);}
-      if(nolanOn&&nolanBal>0){nolanBal=Math.max(0,nolanBal*(1+nolanRate_/12)-minNol);}
-      // Avalanche sweep (only runs while in debt -- see hasDebt/sweep above)
-      // v4.5.0: .filter().sort() replaced by the shared rankSweepQueue (engine.js).
-      let xtra=sweep;
-      const q=rankSweepQueue([
-        {g:()=>ccBal,    s:(v)=>{ccBal=v;},     r:ccRate_},
-        {g:()=>sophiaBal,s:(v)=>{sophiaBal=v;},  r:sophiaRate_},
-        ...(nolanOn?[{g:()=>nolanBal,s:(v)=>{nolanBal=v;},r:nolanRate_}]:[]),
-        ..._sweepLoanQ(),   // v4.5.0: sweepable loans join the avalanche by rate
-      ]);
-      for(const loan of q){if(xtra<=0)break;const pay=Math.min(xtra,loan.g());loan.s(loan.g()-pay);xtra-=pay;}
-
-      // Post-debt: redirect surplus-above-floor to savings (after grace period)
-      // debtClearedMo>0 means cleared mid-run; ==0 means pre-cleared (payOffHI)
-      if(debtClearedMo<0 && hiDebtNow<=0) debtClearedMo = mo;
-      const debtWasCleared = debtClearedMo >= 0;  // includes pre-cleared (payOffHI)
-      const graceDone = debtWasCleared && !hasDebt && (mo - debtClearedMo) >= (sweepDelay||0);
-      // When debt is clear, the sweep amount (surplusAboveFloor) redirects to savings.
-      // The one-time waterfall remainder reaches savings regardless of grace.
-      let toSavings = (graceDone ? surplusAboveFloor + maintRedirect : 0) + _oneTimeToSavings;
-      // v3.4.0 mortgage-principal bucket: positioned after all upstream buckets
-      // and the HI debt sweep, immediately BEFORE the surplus->savings sweep.
-      // Fed by leftover debt-sweep (avalanche fully satisfied) plus what would
-      // otherwise go to savings; 6th (4.875%) before 15th (4.35%); only while
-      // the property is still held. Disabled (default) leaves flows untouched.
-      let mtgExtraMo = 0;
-      if(liveParams.mtgPrincipalOn){
-        const _mcap = liveParams.mtgPrincipalUncapped ? Infinity : (liveParams.mtgPrincipalCap||0);
-        const _leftover = Math.max(0, xtra);
-        const room = Math.min(_mcap, _leftover + toSavings);
-        for(const id of MTG_PRINCIPAL_ELIGIBLE_IDS){
-          if(room - mtgExtraMo <= 0) break;
-          const st = _mtgSt[id];
-          if(!st || !ownedMo(id, calYear, d.getMonth()+1) || st.bal<=0) continue;
-          const pay = Math.min(room - mtgExtraMo, st.bal);
-          st.bal -= pay; mtgExtraMo += pay;
-        }
-        const _takenFromSavings = Math.max(0, mtgExtraMo - _leftover);
-        toSavings = Math.max(0, toSavings - _takenFromSavings);
-      }
-      const sweepToSavings = toSavings;
-      // Compound savingsAcc monthly at investReturn, then add new sweep contribution
-      if(savingsAcc>0) savingsAcc *= (1+(liveParams.investReturn||0.055)/12);
-      if(sweepToSavings>0) savingsAcc += sweepToSavings;
-
-      // Update balances
-      rdBal  = Math.min(rdCap,  rdBal+rdAdd);
-      obBal  = Math.min(obCap,  obBal+obAdd);
-      res6   = Math.min(maint6Cap,   res6+res6Add);
-      res15  = Math.min(maint15Cap,  res15+res15Add);
-      resLaf = Math.min(maintLafCap, resLaf+resLafAdd);
-
-      const hiDebtEnd = hiDebtNow;
-      // disc = what you actually keep as Free Cash (floor + any kept margin above floor)
-      // sweepToSavings gets the rest; they should always sum to afterBuckets.
-      // v4.1.0: the one-time settlement draw is NOT recurring free cash flow --
-      // it funds one-time uses (remodel/purchase/lifestyle draw) and is reported
-      // separately via row.settleDraw + its own event marker + the routing
-      // display, so it's excluded here to stop it spiking the FCF/mo chart.
-      const disc = graceDone
-        ? cfSplitProtect   // floor + kept% of surplus; rest going to savings
-        : Math.max(effectiveFloor, afterBuckets - (sweep - _oneTimeSweep));  // while in debt or grace period
-
-      // Detect key events
-      const events=[];
-      if(mo===0) events.push("Launch");
-      // v4.4.0: birth-date-derived (was a hardcoded calYear===2026 &&
-      // d.getMonth()===10 check) -- matches healthMonthly's own
-      // BASE.medicareYouYear/Month gate in engine.js exactly, which is now
-      // Oct 2026 (was Nov 2026 -- see session29 journal for the correction).
-      if(calYear===BASE.medicareYouYear && (d.getMonth()+1)===BASE.medicareYouMonth) events.push("You -> Medicare");
-      if(mo===5) events.push("Nolan loan payments begin");  // deferred threshold, see the gate above
-      // v3.2.0 loan events from engine state (scheduled, sweep, and paydown payoffs)
-      for(const L of _loans){
-        if(L.started && !L.startAnnounced){ L.startAnnounced=true; events.push(`${L.label} starts -- $${Math.round(L.pmt).toLocaleString()}/mo`); }
-        if(L.started && L.bal<=0 && !L.payoffAnnounced){ L.payoffAnnounced=true; events.push(`${L.label} paid off!`); }
-      }
-      // v4.0.0-A mortgage events from engine state (all properties)
-      for(const prop of _properties){
-        const st = _mtgSt[prop.id];
-        if(st.recast!=null && !st.transAnnounced && (st.p.ioYears||0)>0){
-          st.transAnnounced=true;
-          events.push(`${st.label} mortgage: IO→P&I (+$${Math.round(st.recast-st.ioPmt).toLocaleString()}/mo)`);
-        }
-        if(st.bal<=0 && !st.payoffAnnounced){
-          st.payoffAnnounced=true;
-          events.push(`${st.label} mortgage paid off early! 🎉`);
-        }
-      }
-      // v4.0.0-A pooled-routing residual events
-      if(_settleDrawMo>0) events.push(`Obligation-year one-time draw $${Math.round(_settleDrawMo/1000)}K`);
-      if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche, debt-first)`);
-      if(_oneTimeReserveFill>0) events.push(`$${Math.round(_oneTimeReserveFill/1000)}K sale proceeds into reserve/buffer caps`);
-      if(_oneTimeSweep>0) events.push(`$${Math.round(_oneTimeSweep/1000)}K sale proceeds into savings sweep`);
-      if(rdBal>=rdCap&&rdBal-rdAdd<rdCap) events.push("Rainy day fund FULL -- redirecting to sweep");
-      if(obBal>=obCap&&obBal-obAdd<obCap) events.push("Operating buffer FULL -- redirecting to sweep");
-      if(debtClearedMo===mo && mo>0) events.push("ALL HI DEBT CLEARED! 🎉");
-      if(calYear===BASE.sophiaOff&&d.getMonth()===9) events.push("Sophia off health plan");
-      if(calYear===BASE.nolanOff&&d.getMonth()===5)  events.push("Nolan off health plan");
-      // v4.4.0: month-precision (was year-only + a hardcoded d.getMonth()===0
-      // January assumption) -- BASE.brendaMedYear/Month is birth-date-derived.
-      if(calYear===BASE.brendaMedYear && (d.getMonth()+1)===BASE.brendaMedMonth) events.push("Brenda -> Medicare");
-
-      rows.push({
-        mo, calYear, cal:`${d.toLocaleString('default',{month:'short'})} '${String(calYear).slice(2)}`,
-        totalInc:Math.round(totalInc), tier1:Math.round(tier1), rentalOpCost:Math.round(rentalOpCost),
-        // Fixed cost breakdown sub-components (for breakdown panel)
-        fc_mtg:Math.round(mtg), fc_health:Math.round(health), fc_core:Math.round(core),
-        fc_famLoan:Math.round(famLoan), fc_hiMins:Math.round(hiMins), fc_rentalOp:Math.round(rentalOpCost),
-        fc_propCost:Math.round(propCost), fc_tax:taxMo,
-        maintRes:Math.round(maintTotal), rdAdd:Math.round(rdAdd), obAdd:Math.round(obAdd),
-        sweep:Math.round(sweep), disc:Math.round(disc), floor:effectiveFloor, afterBuckets:Math.round(afterBuckets),
-        rdBal:Math.round(rdBal), obBal:Math.round(obBal),
-        hiDebt:Math.round(hiDebtEnd/1000),
-        interestPaid:Math.round(interestPaid), minPmt:Math.round(minPmt),
-        res6:Math.round(res6), res15:Math.round(res15), resLaf:Math.round(resLaf),
-        sweepToSavings:Math.round(sweepToSavings), savingsAcc:Math.round(savingsAcc),
-        // v4.0.0-B residual routing + loans (for tests/audit and the annual-engine parity check)
-        settleDraw: Math.round(_settleDrawMo),
-        paydownDetail: _payDetailMo ? _payDetailMo.perDebt : null,
-        oneTimePaydown: Math.round(_payDetailMo ? _payDetailMo.total : 0),
-        oneTimeReserveFill: Math.round(_oneTimeReserveFill),
-        oneTimeSweep: Math.round(_oneTimeSweep),
-        loansBal: Math.round(_loans.reduce((s,L)=>s+L.bal,0)),
-        // v3.4.0 mortgage-principal bucket + balances
-        mtgExtra: Math.round(mtgExtraMo),
-        mtgBal6:  Math.round((_mtgSt.sixth?.bal)||0),
-        mtgBal15: Math.round((_mtgSt.fifteenth?.bal)||0),
-        events,
-        // Income breakdown
-        pension:Math.round(pension),
-        yourSs:Math.round(yourSsMo),
-        brendaSs:Math.round(brendaSsMo),
-        rental:Math.round(rentalMo),
-        workIncome:Math.round(wkInc),
-      });
-    }
-    return rows;
-  },[liveParams,liveRows,properties,obligation,
-     workPts,ssStartYear,ssStartMonth,ssBrendaStartYear,ssBrendaStartMonth,rdTopUp,rdCap,obTopUp,obCap,discFloor,fcfSchedule,sweepDelay,lifestyleSplit,
-     struct6,struct15,structLaf,maintStr,bufferMode,payOffHI,
-     strPlatformPct,strCleanPct,mgrPct,ltrVacancyPct,mtrCleaningFlat,defaultsRev]);  // wfMonths only affects table slice, not engine run
 
   // v3.2.0: expose both engines' outputs for Playwright parity/consistency tests
   useEffect(()=>{
@@ -1006,15 +592,11 @@ export default function App(){
     // Aggregate monthly wfData into annual averages for the FCF chart.
     // Use disc (monthly engine's actual kept FCF) instead of annual engine surplus —
     // this ensures lifestyleSplit slider and graceDone sweep logic are reflected correctly.
-    // v4.1.5: for any place that falls back to the annual engine (no wfData
-    // row for live, or any pinned scenario -- pins only ever run the annual
-    // engine, see addPin), use engine.js's `fcfChart` field instead of raw
-    // `surplus`. `surplus` reports full disposable income once HI debt
-    // clears (needed as-is for reqWork/NW elsewhere); `fcfChart` applies the
-    // same split%/floor-protected "kept FCF" logic regardless of debt state
-    // AND excludes the one-time settlement draw -- both computed once in
-    // engine.js so the live fallback and pinned series can't drift apart.
-    const annualFcfExDraw = (row) => Math.max(0, row?.fcfChart||0);
+    // v5.0.0 (A4): the old `fcfChart`-fallback-for-pins path is gone -- pins
+    // now run the full monthly engine (A2) and their aggregated `surplus`
+    // field IS the disc-based figure (aggregateMonthlyToAnnual, engine.js),
+    // sourced identically to live's own `disc` grouping below. Live and
+    // pinned FCF lines can no longer drift apart by construction.
     const discByYear={}, sweepByYear={}, totalSweepByYr={}, cntByYear={}, savAccByYear={}, abByYear={}, floorByYear={};
     const fc_mtgByYr={}, fc_hlthByYr={}, fc_coreByYr={}, fc_famByYr={}, fc_hiMinsByYr={}, fc_ropByYr={}, fc_propByYr={}, fc_taxByYr={};
     (wfData||[]).forEach(r=>{
@@ -1055,7 +637,7 @@ export default function App(){
 
     return liveRows.map((r,i)=>{
       const cnt=cntByYear[r.cal]||12;
-      const disc=discByYear[r.cal]!=null ? Math.round(discByYear[r.cal]/cnt) : annualFcfExDraw(r);
+      const disc=discByYear[r.cal]!=null ? Math.round(discByYear[r.cal]/cnt) : Math.max(0, r.surplus||0);
       const sweep=Math.round((sweepByYear[r.cal]||0)/cnt);
       // Add sweep savings accumulation to NW — savingsAcc grows at investReturn inside wfData,
       // but wfData doesn't compound it after each month, so add it as a separate component.
@@ -1077,7 +659,10 @@ export default function App(){
       const combinedSweep=Math.round((totalSweepByYr[r.cal]||0)/cnt);
       const pt={year:r.cal, cal:r.cal, reqWork:r.reqWork, surplus:disc, surplusPool, floorLine, hiDebt:r.hiDebt,
         fixedTotal, fc_mtg:fc_mtg_, fc_hlth:fc_hlth_, fc_core:fc_core_, fc_fam:fc_fam_, fc_hiMins:fc_hiMins_, fc_rop:fc_rop_, fc_prop:fc_prop_, fc_tax:fc_tax_,
-        nw:(r.nw/1000)+savAccM,  // $M — annual engine NW + monthly wfData savingsAcc
+        // v5.0.0: r.nw already includes savingsAcc natively (aggregateMonthlyToAnnual,
+        // engine.js) -- pre-v5 this was a two-engine hybrid add (annual nw + monthly
+        // savAccM tacked on here); adding savAccM again now would double-count it.
+        nw:r.nw/1000,  // $M
         sweepSavK:savAccK,
         sweepToSavings:sweep,
         combinedSweep,
@@ -1127,17 +712,19 @@ export default function App(){
       pins.forEach(pin=>{
         pt[`pin_${pin.id}_fc`]=Math.abs(pin.rows[i]?.mtg||0)+Math.abs(pin.rows[i]?.health||0)+Math.abs(pin.rows[i]?.core||0)+Math.abs(pin.rows[i]?.famLoan||0)+Math.abs(pin.rows[i]?.minDebt||0);
         pt[`pin_${pin.id}_rw`]=pin.rows[i]?.reqWork;
-        pt[`pin_${pin.id}_di`]=annualFcfExDraw(pin.rows[i]);
-        pt[`pin_${pin.id}_sweep`]=Math.max(0,pin.rows[i]?.sweepChart||0);
+        // v5.0.0 (A4): pins run the full monthly engine now (A2) -- `surplus`
+        // IS the disc-based FCF figure (aggregateMonthlyToAnnual), same
+        // definition live's own `disc` above uses. `pin_id_sweep` mirrors
+        // live's `combinedSweep` the same way (debt-sweep + sweep-to-savings).
+        pt[`pin_${pin.id}_di`]=Math.max(0, pin.rows[i]?.surplus||0);
+        pt[`pin_${pin.id}_sweep`]=Math.max(0,(pin.rows[i]?.debtSweep||0)+(pin.rows[i]?.sweepToSavings||0));
         pt[`pin_${pin.id}_debt`]=pin.rows[i]?.hiDebt;
-        // NW for pin: annual engine nw + accumulated sweep savings (compounded annually)
-        let pinSavAcc=0;
-        for(let j=0;j<=i;j++){
-          if(pinSavAcc>0) pinSavAcc*=(1+(pin.paramSnapshot?.investRet||5.5)/100);
-          pinSavAcc+=Math.max(0,(pin.rows[j]?.sweepToSavings||0)*12);
-        }
-        pt[`pin_${pin.id}_nw`]=((pin.rows[i]?.nw??0)/1000)+(pinSavAcc/1000000); // $M
-        pt[`pin_${pin.id}_sweepSavK`]=Math.round(pinSavAcc/1000);
+        // v5.0.0: pin.rows[i].nw already includes savingsAcc natively (same
+        // aggregateMonthlyToAnnual every scenario uses) -- the old manual
+        // pinSavAcc re-accumulation loop existed only because pre-v5 pins
+        // never had their own monthly savingsAcc state to draw from.
+        pt[`pin_${pin.id}_nw`]=(pin.rows[i]?.nw??0)/1000; // $M
+        pt[`pin_${pin.id}_sweepSavK`]=Math.round((pin.rows[i]?.savingsAccEnd||0)/1000);
         // Liquidation NW for pin
         {
           const pSnap=pin.paramSnapshot||{};
@@ -1173,7 +760,8 @@ export default function App(){
           }
           const pInvested=(pin.rows[i]?.invested??0)*1000;
           const pHiDebtRaw=(pin.rows[i]?.hiDebtRaw??0);
-          pt[`pin_${pin.id}_liqNW`]=(pPrimNet+pDplxNet+pLafNet+pInvested+pinSavAcc-pHiDebtRaw)/1e6;
+          const pSavAcc=(pin.rows[i]?.savingsAccEnd??0);
+          pt[`pin_${pin.id}_liqNW`]=(pPrimNet+pDplxNet+pLafNet+pInvested+pSavAcc-pHiDebtRaw)/1e6;
         }
       });
       return pt;
@@ -1244,7 +832,11 @@ export default function App(){
   const addPin = useCallback(()=>{
     const name=pinName.trim()||`Scenario ${nextId}`;
     const paramSnapshot=captureSnapshot();
-    const rows=buildScenario(liveParams);
+    // v5.0.0 (A2): pinning live now just captures live's ALREADY-computed
+    // rows/wfRows (both engines run once, for live, and pins reuse that
+    // output) instead of re-running a separate buildScenario(liveParams) --
+    // avoids a redundant duplicate computation of the exact same scenario.
+    const rows=liveRows, wfRows=wfData;
     const cfSettings={
       rdTopUp,rdCap,obTopUp,obCap,discFloor,
       struct6,struct15,structLaf,maintStr,bufferMode,
@@ -1253,9 +845,9 @@ export default function App(){
     const existing=pins.find(p=>p.name===name);
     let newPins, newNextId=nextId;
     if(existing){
-      newPins=pins.map(p=>p.id===existing.id?{...p,rows,stats:keyStats(rows),cfSettings,paramSnapshot}:p);
+      newPins=pins.map(p=>p.id===existing.id?{...p,rows,wfRows,stats:keyStats(rows),cfSettings,paramSnapshot}:p);
     } else {
-      const newPin={id:nextId,name,color:PIN_COLORS[nextId%PIN_COLORS.length],rows,stats:keyStats(rows),cfSettings,paramSnapshot};
+      const newPin={id:nextId,name,color:PIN_COLORS[nextId%PIN_COLORS.length],rows,wfRows,stats:keyStats(rows),cfSettings,paramSnapshot};
       newPins=[...pins.slice(-5),newPin];
       newNextId=nextId+1;
       setVisiblePins(s=>new Set([...s,nextId]));
@@ -1263,20 +855,20 @@ export default function App(){
     setPins(newPins);
     setNextId(newNextId);
     setPinName("");
-    savePinsToStorage(newPins.map(p=>({...p,rows:undefined,stats:undefined})),newNextId);
-  },[liveParams,pinName,nextId,pins,captureSnapshot,savePinsToStorage,
+    savePinsToStorage(newPins.map(p=>({...p,rows:undefined,wfRows:undefined,stats:undefined})),newNextId);
+  },[liveRows,wfData,pinName,nextId,pins,captureSnapshot,savePinsToStorage,
      rdTopUp,rdCap,obTopUp,obCap,discFloor,struct6,struct15,structLaf,maintStr,bufferMode,diCap,totalMaintAnnual]);
 
   const setPinColor=useCallback((id,color)=>{
     const newPins=pins.map(p=>p.id===id?{...p,color}:p);
     setPins(newPins);
-    savePinsToStorage(newPins.map(p=>({...p,rows:undefined,stats:undefined})),nextId);
+    savePinsToStorage(newPins.map(p=>({...p,rows:undefined,wfRows:undefined,stats:undefined})),nextId);
   },[pins,nextId,savePinsToStorage]);
 
   const removePin=useCallback((id)=>{
     const newPins=pins.filter(p=>p.id!==id);
     setPins(newPins);
-    savePinsToStorage(newPins.map(p=>({...p,rows:undefined,stats:undefined})),nextId);
+    savePinsToStorage(newPins.map(p=>({...p,rows:undefined,wfRows:undefined,stats:undefined})),nextId);
   },[pins,nextId,savePinsToStorage]);
 
   // Load a pin's saved params into live (the sidebar's only editable
@@ -1319,7 +911,7 @@ export default function App(){
         if(version!==SAVE_SCHEMA_VERSION){
           alert(`Schema version mismatch (file: v${version}, app: v${SAVE_SCHEMA_VERSION}). Some settings may not load correctly.`);
         }
-        const restored=imported.map(p=>{const rows=buildRowsFromSnapshot(p.paramSnapshot||{});return{...p,rows,stats:keyStats(rows)};});
+        const restored=imported.map(p=>{const {rows,wfRows}=buildRowsFromSnapshot(p.paramSnapshot||{});return{...p,rows,wfRows,stats:keyStats(rows)};});
         const maxId=Math.max(nextId,...restored.map(p=>p.id+1));
         setPins(restored);
         setNextId(maxId);
@@ -2000,7 +1592,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v4.6.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2496,7 +2088,7 @@ export default function App(){
               const fmtK = v=>"$"+Math.round((v||0)/1000)+"K";
               return (
                 <div data-testid="pooled-routing-result" style={{fontSize:9,color:muted,padding:8,background:bg2,borderRadius:4,marginTop:4}}>
-                  proceeds → obligation {fmtK(obligation.amount)} → draw {fmtK(rSettle.settleDraw)}{settleDrawLabel?` (${settleDrawLabel})`:""} → cascade: {fmtK(rSettle.wfDebtPaid)} to HI debt, {fmtK(rSettle.wfToSavings)} to savings
+                  proceeds → obligation {fmtK(obligation.amount)} → draw {fmtK(rSettle.settleDraw)}{settleDrawLabel?` (${settleDrawLabel})`:""} → cascade: {fmtK(rSettle.wfDebtPaid)} to HI debt, {fmtK(rSettle.wfReserveFill)} to reserve/buffer caps, {fmtK(rSettle.wfToSavings)} to savings
                 </div>
               );
             })()}
