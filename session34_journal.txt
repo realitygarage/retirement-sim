@@ -1,0 +1,178 @@
+=== SESSION 34 JOURNAL — v5.0.2 disposition-quarter cash-routing fix,
+    v5.0.3 payOffHI removal, both COMMITTED ===
+
+Date: 2026-07-15
+
+Session goal: pick up after session33's v5.0.0/v5.0.1 commits. Two separate,
+user-directed pieces of work this session: (1) diagnose and fix a real bug
+where the one-time pooled-proceeds routing ignored the sale/obligation
+QUARTER; (2) remove the payOffHI "HI Debt at Closing" toggle and give HI
+debts the same per-debt closingEligible control LI loans already have (this
+second item's UI-relocation half is carried into a future session -- see
+OPEN ITEMS).
+
+--- BUG: DISPOSITION CASH ROUTING IGNORED THE SALE QUARTER (v5.0.2) ---
+
+User's report: 6th St sells 2027-Q2, obligation also 2027-Q2. The monthly
+mortgage balance correctly dropped in April 2027 (quarter-gated via
+unitOwnedThisMonth), but the sale proceeds, obligation payment, and one-time
+draw all appeared in January 2027 instead, with no event annotation at the
+real April sale month.
+
+Diagnosed first (no fix) per the user's explicit two-step request:
+- `computeDispositions`'s pooled-routing inputs (`yearCashAdd`/`yearCashSub`)
+  were flat per-YEAR totals with no month information at all -- the monthly
+  loop's routing block triggered on `_yearCashAdd[calYear]>0 &&
+  !_paidYears.has(calYear)`, which fires on whichever month the loop's
+  sequential cursor first reaches for that year (January, for any year after
+  the sim's own partial first year).
+- `obligation.quarter` (UI-editable, defaults to 2 in `freshObligationDefaults`)
+  was never read anywhere in engine.js -- confirmed by grep. Purely
+  decorative before this fix.
+- No "property sold" event existed at all, at any month; the "mortgage paid
+  off early!" event doesn't fire from a sale either (ownership-gating just
+  displays 0, it doesn't zero the internal mortgage-state balance).
+
+Fix, approved after a back-and-forth on same-year multi-event semantics
+(user's explicit ruling: TAX stays annual -- gains-offset nets against the
+whole year's gainsPool, unaffected; CASH-flow routing is quarter-precise,
+chronologically ordered, "don't assume one disposition per year"):
+- `computeDispositions` now returns `cashEvents` (year -> chronologically
+  sorted `[{month, amount, kind, label}]`, signed: sale positive, obligation
+  negative), each carrying `quarterStartMonth(quarter)` instead of a flat
+  per-year sum.
+- `buildMonthlyScenario`'s pooled-routing block fires once per distinct event
+  month within a year. Same-month events (the common case: sale + obligation
+  in the same quarter) still net together in one pass. A look-ahead cap
+  (`_yearFinalNet`, the year's fully-known eventual net total, computed
+  upfront since dispositions/obligation are deterministic params) makes an
+  earlier sale correctly hold back whatever a KNOWN later same-year
+  obligation will need, instead of routing the full amount immediately and
+  leaving the obligation nothing left to net against -- verified this
+  matters with a constructed Jan-sale/Jul-obligation cross-quarter case
+  (without the cap: $785,755 over-routed in January vs. the correct
+  $260,755 net; with the cap: exact).
+- Added `"{prop} sold"` / `"One-time obligation paid"` event annotations
+  (neither existed before), firing at the correct quarter month.
+- New edge case found and fixed while verifying: in the model's own LAUNCH
+  year, a nominal quarter earlier than BASE.startMonth would never match any
+  monthly row (the loop only visits startMonth..12 in that partial first
+  year) -- the cash event would silently vanish rather than mis-time.
+  `effEventMonth(year, quarter)` clamps to `BASE.startMonth` in that one case
+  (same reasoning `unitOwnedThisMonth` already uses for ownership gating in
+  the launch year).
+
+Added R17 (new engine-level regression test): asserts proceeds/paydown/sweep/
+events all land in April for a 6th-St-sold-2027-Q2 + obligation-2027-Q2
+scenario, and are all zero in January/March.
+
+--- CHANGE: REMOVE payOffHI ZERO-BALANCE SHORTCUT (v5.0.3) ---
+
+User's ask: give HI debt (CC/Sophia/Nolan) the same per-debt closingEligible
+control LI loans already have, removing the standalone "HI Debt at Closing"
+toggle from the Cash-Flow Engine group. Before implementing, traced what
+payOffHI actually does -- it is NOT the same mechanism as closingEligible.
+closingEligible only controls which payoff CHANNEL (ongoing sweep vs.
+one-time sale-closing lump-sum) can retire a debt; the debt still exists,
+accrues interest, and gets minimum payments either way. payOffHI is a much
+bigger v3.2-era global assumption (confirmed via session21_journal.txt): it
+zeroed ccBal/sophiaBal/nolanBal from month 0, skipped minimum payments
+entirely (`hiMins=0`), and marked debt cleared immediately (`debtClearedMo=0`)
+-- i.e. "this debt is already gone / handled outside the model," not "pay it
+off at the next closing." Flagged this mismatch to the user before touching
+anything (a straight migration to per-debt closingEligible would have
+silently dropped that assumption).
+
+User's decision: remove payOffHI and its zero-balance mechanic entirely, own
+commit, separate from the closingEligible relocation. Rationale given: it was
+a magic shortcut bypassing real debt mechanics; every "HI debt gone" scenario
+should now be reached honestly (real paydown via sweep/closing, or entered-0
+balances) -- "not preserving pins during stabilization," so no pin-compat
+check was required first (though checked anyway per habit -- all 3 real pins
+use the standard nonzero defaults for every affected field, confirmed
+unaffected regardless).
+
+Removed: `payOffHI` param/UI/setter (App.jsx), the "HI Debt at Closing" toggle
+and its dependent "Investment Return (SB proceeds)" slider-label swap
+(App.jsx), the `payOffHI` field from both DEFAULTS and SC_DEFAULTS
+(defaults.js, SAVE_SCHEMA_VERSION 6->7, no migration), and every conditional
+in engine.js (`buildDebtList`'s 4th param, the ccBal/sophiaBal/nolanBal/
+hiMins/debtClearedMo ternaries). Confirmed via grep: zero orphaned references
+remain outside historical comments and the (untouched, non-live) v5_fixtures/
+snapshot JSONs from session32's investigation.
+
+Found while fixing this (not asked for, flagged and fixed as directly
+necessary): a pre-existing `||` vs `??` bug, same class as v5.0.1's fix,
+on ccBal/sophiaBal/nolanBal/ccRate/sophiaRate/nolanRate/ccMin/sophiaMin/
+nolanMin in engine.js -- `p.ccBal||60000` silently treated an honestly-
+entered 0 as falsy, falling back to the $60,000 default. This is directly
+load-bearing for the payOffHI removal's own story ("HI debt always starts at
+real entered balance" is only true if entering 0 actually works) and was
+discovered only because the new test replacements (`ccBal:0` as the honest
+zero-debt lever, replacing `payOffHI:true`) silently returned the wrong
+balance until fixed. `||` -> `??` at all nine fields.
+
+Tests fixed (all `payOffHI:true` setup-convenience usages, replaced with
+honest `ccBal:0, sophiaBal:0, nolanBal:0`): R7, R9, T3, V4 (V4's premise
+literally WAS "toggling payOffHI doesn't touch this loan's balance" --
+redescribed as "HI debt present vs. entered at $0"). E5/L1 version-string
+assertions bumped to v5.0.3.
+
+--- UNEXPECTED FULL-SUITE FAILURES, ROOT-CAUSED (5 tests) ---
+
+Running the full suite (first time since implementing v5.0.2, since the
+workflow calls for pausing after a diagnose-only pass rather than testing
+automatically) surfaced 5 failures, NONE of which were payOffHI-related --
+all were downstream of the v5.0.2 quarter-timing fix rippling into tests that
+implicitly assumed the old (buggy) January-lump-sum timing:
+
+- R8, S3, S6: all use the DEFAULT obligation (year=BASE.startYear=2026,
+  quarter=2) with a same-year sale, quarter 2 (April) -- but BASE.startMonth
+  defaults to July, so April < July in the model's own launch year. This is
+  exactly the effEventMonth edge case above; fixed by the engine fix itself,
+  not a test change (re-verified all three pass once the launch-year clamp
+  landed).
+- V2, V2b: sale year 2028 (not the launch year) -- these failed for a
+  different, legitimate reason. `aggregateMonthlyToAnnual`'s stock fields
+  (hiDebt, famLoanBal) are first-of-period snapshots (v4.3.0 convention: "no
+  balance paid down before start date" -- captured before that YEAR's own
+  activity runs). Pre-fix, the one-time payoff always landed in January, so
+  the SAME year's first-of-period snapshot already reflected the post-payoff
+  balance (routing ran, then the snapshot was taken, within the same January
+  iteration). Post-fix, the payoff correctly lands in April -- so 2028's own
+  annual row legitimately shows the PRE-payoff balance now (snapshot taken in
+  January, before April's event). Fixed by reading the FOLLOWING year's row
+  (2029) for the stock fields instead -- `wfDebtPaid` (a flow field that
+  searches for the actual event row within the year) needed no change.
+
+This is a real, expected consequence of fixing real quarter-timing: the old
+tests were unknowingly relying on the bug being present. Verified each fix
+against real numbers (not just green checkmarks) before finalizing.
+
+--- FINAL STATE ---
+
+115/115 Playwright tests pass (114 existing + R17 new). Both changes landed
+in a single commit (4ad0e47) -- v5.0.2 was implemented earlier this session
+but never separately committed before the payOffHI work started, so by the
+time the user asked to commit, both were sitting together in the working
+tree; committed together with the App.jsx header documenting them as two
+distinct dated changelog entries (matching this repo's existing precedent of
+stacking multiple named fixes under one commit, e.g. v5.0.0's refactor + two
+restores). Not pushed to origin -- awaiting explicit push instruction per
+CLAUDE.md.
+
+--- OPEN ITEMS FOR A FUTURE SESSION ---
+
+1. The per-debt closingEligible UI relocation itself (give CC/Sophia/Nolan
+   the same per-debt closing-eligible toggle LI loans have in the Loans &
+   Debt section, default true) was NOT done this session -- only the
+   prerequisite payOffHI removal landed, per the user's explicit "own
+   change/commit" instruction. buildDebtList currently treats HI as
+   unconditionally closing-eligible (hardcoded, matching the pre-existing
+   v4.5.0 design comment) -- the next session's job is making that
+   conditional per-debt (`hi.cc.closingEligible` etc., default true) and
+   adding the matching UI toggle per debt, same pattern as the existing LI
+   loan closingEligible toggle (App.jsx ~line 2100).
+2. Same open items carried from session33 (mtgPrincipalOn + pool-year display
+   inconsistency, Nolan-loan grace-period calendar accuracy, capped reserve-
+   funding display, no saved never-sell pin) -- untouched this session.
