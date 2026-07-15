@@ -1,3 +1,47 @@
+// v5.0.3 -- remove payOffHI zero-balance shortcut, HI debt always starts at
+// real entered balance. payOffHI ("HI Debt at Closing: Sweep over time / Pay
+// off at closing") was NOT the same mechanism as a loan's closingEligible
+// flag -- it was a magic global assumption that zeroed ccBal/sophiaBal/
+// nolanBal from month 0 and skipped their minimum payments entirely,
+// asserting "this debt is already gone / handled outside the model" rather
+// than modeling any real payoff. Removed entirely (engine.js: buildDebtList's
+// payOffHI param, the ccBal/sophiaBal/nolanBal/hiMins/debtClearedMo
+// conditionals; defaults.js: the payOffHI field, SC_DEFAULTS/DEFAULTS;
+// App.jsx: the toggle UI, its setter, the dependent "Investment Return (SB
+// proceeds)" slider-label swap). A zero-HI-debt scenario is now only
+// reachable honestly: enter 0 balances, or let real paydown (ongoing sweep
+// or the sale-closing lump-sum) clear them. SAVE_SCHEMA_VERSION bumped (field
+// removed from the sc shape) -- no migration, old saves discarded per
+// convention. While verifying this with entered-0-balance test scenarios,
+// found and fixed a related pre-existing bug (same class as the v5.0.1 fix):
+// engine.js's ccBal/sophiaBal/nolanBal/ccRate/sophiaRate/nolanRate/ccMin/
+// sophiaMin/nolanMin all used `p.field||default`, so an honestly-entered 0
+// (balance, rate, or minimum payment) silently fell back to the nonzero
+// default -- `||` -> `??` at all nine. Confirmed the 3 real saved pins are
+// unaffected (their sc snapshots use the standard nonzero defaults for all
+// nine fields).
+// v5.0.2 -- disposition cash-flow QUARTER bug: the one-time pooled-proceeds
+// routing (sale proceeds -> obligation offset -> HI-debt avalanche -> reserve/
+// buffer fill -> sweep) was keyed to the sale YEAR's first calendar month,
+// ignoring hold.quarter/obligation.quarter entirely -- so for a Q2 sale, the
+// mortgage balance correctly dropped in April (quarterStartMonth-gated via
+// unitOwnedThisMonth) but the proceeds/obligation/draw/events all fired in
+// January instead. obligation.quarter was never read anywhere in engine.js
+// even though the UI has a live quarter toggle for it (defaults.js). Fixed:
+// computeDispositions now emits per-year chronological cash EVENTS (each
+// disposition's proceeds, and the obligation's payment, each carrying its own
+// quarterStartMonth), consumed by buildMonthlyScenario at their own months
+// instead of one January lump. Tax stays fully annual/unchanged (the
+// gains-offset netting against the whole year's gainsPool is a separate
+// upstream calc, untouched) -- only cash-routing TIMING moved. Same-year
+// events in different quarters are look-ahead capped at the year's known
+// eventual net total (computed upfront, since dispositions/obligation are
+// deterministic params) so an earlier sale correctly holds back whatever a
+// later same-year obligation will need, instead of routing the full amount
+// immediately and leaving the obligation nothing left to net against --
+// conservation holds exactly regardless of event order. New "{prop} sold"/
+// "One-time obligation paid" event annotations added at the correct months
+// (neither existed before this fix).
 // v5.0.1 -- pre-existing v4.6.0 bug, UNRELATED to the v5.0.0 refactor: `||` treats a
 // genuine 0 as falsy, so setting "STR platform fee"/"STR cleaning"/"LTR vacancy"/
 // "MTR cleaning flat $" to literal 0 silently fell back to the nonzero default
@@ -286,7 +330,6 @@ export default function App(){
 
   // Destructure active scenario for use in controls + engines
   const {
-    payOffHI,
     // v4.4.0: ssAge (stepped 65-70 toggle) replaced by explicit per-spouse claim dates.
     ssStartYear, ssStartMonth, ssBrendaStartYear, ssBrendaStartMonth,
     workPts, lifestyleSplit,
@@ -327,7 +370,6 @@ export default function App(){
     ...s, obligation: { ...(s.obligation||freshObligationDefaults()), ...patch },
   })), []);
   const setSweepDelay     = v=>setSc(s=>({...s,sweepDelay:v}));
-  const setPayOffHI       = v=>setSc(s=>({...s,payOffHI:v}));
   const setSameYearSaleTaxBumpOn = v=>setSc(s=>({...s,sameYearSaleTaxBumpOn:v}));
   const setSameYearSaleTaxBump   = v=>setSc(s=>({...s,sameYearSaleTaxBump:v}));
   const setSsStartYear        = v=>setSc(s=>({...s,ssStartYear:v}));
@@ -1607,7 +1649,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.1</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.3</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2107,12 +2149,6 @@ export default function App(){
                 </div>
               );
             })()}
-            <div style={{marginTop:10,marginBottom:14}}>
-              <div style={{fontSize:10,color:muted,marginBottom:5}}>HI Debt at Closing</div>
-              {toggle(payOffHI,setPayOffHI,[
-                {v:false,l:"Sweep over time",c:amber},{v:true,l:"Pay off at closing",c:green}
-              ])}
-            </div>
 
             {/* -- Lifestyle Draws -- */}
             <div>
@@ -2211,8 +2247,7 @@ export default function App(){
               {/* v4.3.0: BASE.startYear (was hardcoded "2026"/"2030") */}
               Est. {liveRows[0]?`$${Math.round(liveRows[0].tax/100)*100}/mo`:"..."} in {BASE.startYear}, {liveRows[4]?`$${Math.round(liveRows[4].tax/100)*100}/mo`:"..."} in {BASE.startYear+4}
             </div>}
-            {!payOffHI&&slider("Investment Return",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
-            {payOffHI&&slider("Investment Return (SB proceeds)",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
+            {slider("Investment Return",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
 
             {/* Restored v4.0.0-A: unrelated to the 5-group IA above -- SS timing,
                 work curve, and the liq-NW basis note stay here at the end. */}

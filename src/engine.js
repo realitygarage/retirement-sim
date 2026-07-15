@@ -453,16 +453,14 @@ export function splitResidual(residual, opts={}){
 
 // Builds the [{key,balance,rate}] list `planHiPaydown` consumes for a ONE-TIME
 // lump-sum payoff (the property-sale-closing routing) -- HI's three named
-// balances (skipped entirely if payOffHI) plus whichever loans[] entries have
-// `eligibleField` set (pass 'closingEligible' here). `hi` is
+// balances (always closing-eligible, hardcoded) plus whichever loans[]
+// entries have `eligibleField` set (pass 'closingEligible' here). `hi` is
 // {cc:{bal,rate}, sophia:{bal,rate}, nolan:{bal,rate}}.
-export function buildDebtList(hi, loans, eligibleField, payOffHI){
+export function buildDebtList(hi, loans, eligibleField){
   const out=[];
-  if(!payOffHI){
-    if(hi.cc.bal>0)     out.push({key:'cc',     balance:hi.cc.bal,     rate:hi.cc.rate});
-    if(hi.sophia.bal>0) out.push({key:'sophia', balance:hi.sophia.bal, rate:hi.sophia.rate});
-    if(hi.nolan.bal>0)  out.push({key:'nolan',  balance:hi.nolan.bal,  rate:hi.nolan.rate});
-  }
+  if(hi.cc.bal>0)     out.push({key:'cc',     balance:hi.cc.bal,     rate:hi.cc.rate});
+  if(hi.sophia.bal>0) out.push({key:'sophia', balance:hi.sophia.bal, rate:hi.sophia.rate});
+  if(hi.nolan.bal>0)  out.push({key:'nolan',  balance:hi.nolan.bal,  rate:hi.nolan.rate});
   for(const L of (loans||[])){
     if(L[eligibleField] && L.bal>0) out.push({key:'loan:'+L.label, balance:L.bal, rate:L.rate});
   }
@@ -733,16 +731,43 @@ export function computeDispositions(p){
     }
   }
 
-  // Per-year cash inflows / outflows -- pooled routing: all same-year
-  // dispositions feed one pool; the obligation is a cash outflow from that pool.
-  const yearCashAdd = {};   // dispo year -> $ inflow (Σ afterTaxNetProceeds)
-  const yearCashSub = {};   // year -> $ outflow (one-time obligation)
-  for(const d of activeList){
-    yearCashAdd[d.year] = (yearCashAdd[d.year] || 0) + (d.afterTaxNetProceeds || 0);
+  // Chronological cash events (v5.0.2) -- each disposition's after-tax
+  // proceeds arrive at ITS OWN sale-quarter-start month, and the obligation's
+  // cash payment arrives at ITS OWN quarter-start month, instead of all
+  // same-year events being pre-summed into one lump applied at the year's
+  // first month. This is separate from (and does not change) the tax-offset
+  // netting above, which stays annual -- that's how capital-gains tax
+  // actually works: offsetOn/gainsPool nets the obligation against the WHOLE
+  // year's recognized gains regardless of quarter. Only the CASH-routing
+  // timing (consumed by buildMonthlyScenario's pooled-routing block) is
+  // quarter-precise. Multiple same-year events (multiple sales, and/or the
+  // obligation) are kept as separate dated entries, sorted chronologically,
+  // so the monthly loop can consume them in calendar order rather than
+  // assuming one disposition per year.
+  const cashEvents = {};   // year -> [{month, amount, kind, label}], signed amount (obligation negative)
+  const pushCashEvent = (year, month, amount, kind, label) => {
+    if(!cashEvents[year]) cashEvents[year] = [];
+    cashEvents[year].push({month, amount, kind, label});
+  };
+  // In the model's own launch year, the monthly engine's rows only span
+  // BASE.startMonth..12 (the partial first period -- there is no row for a
+  // nominal quarter start earlier than that, the same reason
+  // unitOwnedThisMonth already treats a launch-year sale quarter before
+  // startMonth as "unowned from month 0"). Clamp the event's effective month
+  // to the launch month in that one case, so the cash event lands on the
+  // model's very first row instead of silently never matching any row.
+  const effEventMonth = (year, quarter) =>
+    year===BASE.startYear ? Math.max(quarterStartMonth(quarter), BASE.startMonth) : quarterStartMonth(quarter);
+  for(const prop of properties){
+    const d = dispoRes[prop.id];
+    if(d.mode && d.mode!=='keep'){
+      pushCashEvent(d.year, effEventMonth(d.year, d.quarter), d.afterTaxNetProceeds||0, 'sale', prop.label);
+    }
   }
   if(obligAmt > 0){
-    yearCashSub[obligYr] = (yearCashSub[obligYr] || 0) + obligAmt;
+    pushCashEvent(obligYr, effEventMonth(obligYr, obligation.quarter||1), -obligAmt, 'obligation', 'One-time obligation');
   }
+  for(const yr of Object.keys(cashEvents)) cashEvents[yr].sort((a,b)=>a.month-b.month);
 
   // IRMAA fires 2 yrs after any taxable dispo (mode != 'full_1031', recognized gain > 0)
   const irmaaYears = new Set();
@@ -752,7 +777,7 @@ export function computeDispositions(p){
     }
   }
 
-  return { dispoRes, dispoResNoOffset, yearCashAdd, yearCashSub, obligYr, obligAmt, irmaaYears };
+  return { dispoRes, dispoResNoOffset, cashEvents, obligYr, obligAmt, irmaaYears };
 }
 
 // =============================================================================
@@ -779,9 +804,20 @@ export function computeDispositions(p){
 // =============================================================================
 export function buildMonthlyScenario(p){
   const dispo = computeDispositions(p);
-  const _yearCashAdd = dispo.yearCashAdd;
-  const _yearCashSub = dispo.yearCashSub;
+  const _cashEvents = dispo.cashEvents;
   const _irmaaYears = dispo.irmaaYears;
+  // Every same-year cash event is known in full before the loop starts
+  // (dispositions/obligation are deterministic params, not path-dependent),
+  // so the year's EVENTUAL net total can be precomputed and used as a look-
+  // ahead cap: a sale can't route more than the year will ultimately net to,
+  // holding back whatever a KNOWN later same-year obligation will need --
+  // otherwise an obligation arriving after its funding sale's proceeds are
+  // already fully routed would have nothing left to net against (see
+  // _yearPoolRouted below).
+  const _yearFinalNet = {};
+  for(const yr of Object.keys(_cashEvents)){
+    _yearFinalNet[yr] = _cashEvents[yr].reduce((s,e)=>s+e.amount, 0);
+  }
 
   const _properties = p.properties || [];
   const _propById = Object.fromEntries(_properties.map(pr=>[pr.id, pr]));
@@ -804,7 +840,8 @@ export function buildMonthlyScenario(p){
     ltrVacancyPct: p.ltrVacancyPct||0, mtrCleaningFlat: p.mtrCleaningFlat||0,
   };
 
-  const _paidYears = new Set();  // years where the sale-year pooled routing has been applied
+  const _yearPoolCum = {};      // year -> cumulative signed cash-event total to date (unfloored)
+  const _yearPoolRouted = {};   // year -> cumulative amount already sent through the routing waterfall
 
   // Generalized loans -- monthly state (rates already decimal in p).
   const _loans = (p.loans||[]).map(l=>({
@@ -838,25 +875,34 @@ export function buildMonthlyScenario(p){
     return pmt;
   };
 
-  const payOffHI = !!p.payOffHI;
   const rdCap=p.rdCap||0, obCap=p.obCap||0, rdTopUp=p.rdTopUp||0, obTopUp=p.obTopUp||0;
   const discFloor=p.discFloor||0, bufferMode=p.bufferMode||'seq', sweepDelay=p.sweepDelay||0;
   const lifestyleSplit=p.lifestyleSplit||0, fcfSchedule=p.fcfSchedule||[];
 
-  // Running balances
-  let ccBal    = payOffHI ? 0 : (p.ccBal||60000);
-  let sophiaBal= payOffHI ? 0 : (p.sophiaBal||58057);
-  let nolanBal = payOffHI ? 0 : (p.nolanBal||141117);
-  const ccRate_    = p.ccRate    || 0.14;
-  const ccMin_     = p.ccMin     || 1200;
-  const sophiaRate_= p.sophiaRate|| 0.0814;
-  const sophiaMin_ = p.sophiaMin || 737;
-  const nolanRate_ = p.nolanRate || 0.084;
-  const nolanMin_  = p.nolanMin  || 1787;
+  // Running balances -- always start at the real entered balance (v5.0.3:
+  // the old payOffHI shortcut, which zeroed these from month 0 to represent
+  // "debt already paid off outside the model," is retired -- see the v5.0.3
+  // changelog note for rationale. A zero-HI-debt scenario is now only
+  // reachable honestly: enter 0 balances, or let real paydown clear them.
+  // v5.0.3: `||` -> `??` (nullish coalescing) -- same bug class as the
+  // v5.0.1 STR/LTR fix: `||` treats a genuine entered 0 as falsy, so
+  // dragging e.g. the Credit Card balance slider to $0 silently fell back
+  // to the $60,000 default instead (found while verifying the payOffHI
+  // removal above -- an honest "enter 0 to reach zero HI debt" scenario
+  // didn't actually zero anything until this was fixed).
+  let ccBal    = p.ccBal    ?? 60000;
+  let sophiaBal= p.sophiaBal?? 58057;
+  let nolanBal = p.nolanBal ?? 141117;
+  const ccRate_    = p.ccRate    ?? 0.14;
+  const ccMin_     = p.ccMin     ?? 1200;
+  const sophiaRate_= p.sophiaRate?? 0.0814;
+  const sophiaMin_ = p.sophiaMin ?? 737;
+  const nolanRate_ = p.nolanRate ?? 0.084;
+  const nolanMin_  = p.nolanMin  ?? 1787;
   let nolanOn = false;
   let rdBal   = 0;   // rainy day balance
   let obBal   = 0;   // operating buffer balance
-  let debtClearedMo = payOffHI ? 0 : -1;
+  let debtClearedMo = -1;
   let savingsAcc = 0;
 
   const rows = [];
@@ -882,34 +928,55 @@ export function buildMonthlyScenario(p){
     const rg     = Math.pow(1+p.rentGrowth,  mo/12);
     const pinf   = Math.pow(1+(p.propCpi||p.propInflation), mo/12);
 
-    // -- Pooled routing, applied once at the start of the pool year:
-    //    (a) one-time draw, (b) FULL post-draw remainder pays HI debt first
-    //    (avalanche), (c) rd/ob buffers fill to caps [A1: narrowed from 5
-    //    buckets to 2 -- res6/res15/resLaf retired], (d) survivor joins this
-    //    month's sweep/savings.
+    // -- Pooled routing (v5.0.2): consumed CHRONOLOGICALLY, one pass per
+    //    distinct event month -- each disposition's proceeds route at ITS OWN
+    //    sale-quarter-start month, and the obligation's payment at ITS OWN
+    //    quarter-start month (events landing in the same month, e.g. a sale
+    //    and the obligation both in the same quarter, still net together in
+    //    one pass, matching the old same-year netting exactly for that case).
+    //    Routing at each event is capped at _yearFinalNet (the year's known
+    //    eventual total, computed upfront) minus what's already been routed
+    //    -- so an earlier sale correctly holds back whatever a KNOWN later
+    //    same-year obligation will need, instead of routing the full amount
+    //    immediately and leaving the obligation nothing to net against.
+    //    Conservation across the year holds exactly regardless of event
+    //    order (see _yearPoolRouted). Per pass: (a) one-time draw,
+    //    (b) FULL post-draw remainder pays HI debt first (avalanche),
+    //    (c) rd/ob buffers fill to caps [A1: narrowed from 5 buckets to 2 --
+    //    res6/res15/resLaf retired], (d) survivor joins this month's
+    //    sweep/savings.
     let _oneTimeSweep = 0, _settleDrawMo = 0, _oneTimeReserveFill = 0, _payDetailMo = null;
-    if((_yearCashAdd[calYear]||0) > 0 && !_paidYears.has(calYear)){
-      const residual = Math.max(0, (_yearCashAdd[calYear] - (_yearCashSub[calYear]||0)));
-      const split = splitResidual(residual, {
-        lifestyleDraw: calYear===((p.obligation||{}).year||BASE.startYear) ? (p.settleLifestyleDraw||0) : 0,
-      });
-      const plan = planHiPaydown(split.remainder, buildDebtList(
-        {cc:{bal:ccBal,rate:ccRate_}, sophia:{bal:sophiaBal,rate:sophiaRate_}, nolan:{bal:nolanBal,rate:nolanRate_}},
-        _loans, 'closingEligible', payOffHI));
-      applyDebtPlan(plan, {
-        cc:     pay=>{ccBal     = Math.max(0, ccBal-pay);},
-        sophia: pay=>{sophiaBal = Math.max(0, sophiaBal-pay);},
-        nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
-      }, _loans);
-      _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
-      let rem = split.remainder - plan.total;
-      const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
-      const _rdFill = _fill(rdBal, rdCap); rdBal += _rdFill;
-      const _obFill = _fill(obBal, obCap); obBal += _obFill;
-      _oneTimeReserveFill = _rdFill+_obFill;
-      _oneTimeSweep = rem;    // (d) joins debt sweep if debt remains, else savings
-      _settleDrawMo = split.draw;
-      _paidYears.add(calYear);
+    const _yrCashEvents = (_cashEvents[calYear]||[]).filter(e=>e.month===calMonth1to12);
+    if(_yrCashEvents.length){
+      const monthSum = _yrCashEvents.reduce((s,e)=>s+e.amount, 0);
+      const cumulative = (_yearPoolCum[calYear]||0) + monthSum;
+      _yearPoolCum[calYear] = cumulative;
+      const cappedTotal = Math.min(cumulative, _yearFinalNet[calYear]||0);
+      const routedSoFar = _yearPoolRouted[calYear]||0;
+      const residual = Math.max(0, cappedTotal - routedSoFar);
+      if(residual>0){
+        const hasObligThisPass = _yrCashEvents.some(e=>e.kind==='obligation');
+        const split = splitResidual(residual, {
+          lifestyleDraw: hasObligThisPass ? (p.settleLifestyleDraw||0) : 0,
+        });
+        const plan = planHiPaydown(split.remainder, buildDebtList(
+          {cc:{bal:ccBal,rate:ccRate_}, sophia:{bal:sophiaBal,rate:sophiaRate_}, nolan:{bal:nolanBal,rate:nolanRate_}},
+          _loans, 'closingEligible'));
+        applyDebtPlan(plan, {
+          cc:     pay=>{ccBal     = Math.max(0, ccBal-pay);},
+          sophia: pay=>{sophiaBal = Math.max(0, sophiaBal-pay);},
+          nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
+        }, _loans);
+        _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
+        let rem = split.remainder - plan.total;
+        const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
+        const _rdFill = _fill(rdBal, rdCap); rdBal += _rdFill;
+        const _obFill = _fill(obBal, obCap); obBal += _obFill;
+        _oneTimeReserveFill = _rdFill+_obFill;
+        _oneTimeSweep = rem;    // (d) joins debt sweep if debt remains, else savings
+        _settleDrawMo = split.draw;
+        _yearPoolRouted[calYear] = cappedTotal;
+      }
     }
 
     // -- INCOME --
@@ -1002,7 +1069,7 @@ export function buildMonthlyScenario(p){
     const minCC  = ccBal>0?ccMin_:0;
     const minSoph= sophiaBal>0?sophiaMin_:0;
     const minNol = nolanOn&&nolanBal>0?nolanMin_:0;
-    const hiMins = payOffHI?0:minCC+minSoph+minNol;
+    const hiMins = minCC+minSoph+minNol;
     const propCost = Math.round(
       _properties.reduce((s,prop)=>{
         if(!ownedMo(prop.id, calYear, calMonth1to12)) return s;
@@ -1145,6 +1212,10 @@ export function buildMonthlyScenario(p){
         events.push(`${st.label} mortgage paid off early! 🎉`);
         mtgPayoffLabels.push(st.label);
       }
+    }
+    for(const e of _yrCashEvents){
+      if(e.kind==='sale') events.push(`${e.label} sold -- net proceeds $${Math.round(e.amount/1000)}K`);
+      if(e.kind==='obligation') events.push(`One-time obligation paid -- $${Math.round(-e.amount/1000)}K`);
     }
     if(_settleDrawMo>0) events.push(`Obligation-year one-time draw $${Math.round(_settleDrawMo/1000)}K`);
     if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche, debt-first)`);

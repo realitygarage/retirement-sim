@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.0.1"', async ({ page }) => {
+  test('E5 — Version header shows "v5.0.3"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.0.1').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.0.1');
+    await expect(page.locator('text=v5.0.3').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.0.3');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.0.1', async ({ page }) => {
+  test('L1 — Version header shows v5.0.3', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.0.1').first()).toBeVisible();
-    console.log('  L1 — Version v5.0.1 confirmed');
+    await expect(page.locator('text=v5.0.3').first()).toBeVisible();
+    console.log('  L1 — Version v5.0.3 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1395,7 +1395,11 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
       const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
       const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const base = buildScenario(makeParams({}));
-      const withBucket = buildScenario(makeParams({ mtgPrincipalOn: true, mtgPrincipalCap: 3000, payOffHI: true }));
+      // v5.0.3: payOffHI (a magic zero-HI-debt shortcut) was removed -- an
+      // honest zero-debt state is entered directly (real balances=0) so this
+      // test's mortgage-principal-bucket assertion isn't confounded by HI
+      // debt competing for the same surplus dollars, same isolation as before.
+      const withBucket = buildScenario(makeParams({ mtgPrincipalOn: true, mtgPrincipalCap: 3000, ccBal: 0, sophiaBal: 0, nolanBal: 0 }));
       const flatMonths = [2027, 2028, 2029, 2030].map(y => base.find(r => r.cal === y).mtg);
       const t0 = base.find(r => (r.mtgTransitions || []).some(t => /6th/.test(t.label)));
       const t1 = withBucket.find(r => (r.mtgTransitions || []).some(t => /6th/.test(t.label)));
@@ -1450,10 +1454,13 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
       // working unchanged against the new single engine.
       const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
       const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
-      const rows = buildScenario(makeParams({ mtgPrincipalOn: true, mtgPrincipalUncapped: true, payOffHI: true }));
+      // v5.0.3: payOffHI removed -- honest zero-HI-debt state via real
+      // entered balances, same isolation as before (see R7's identical note).
+      const noHi = { ccBal: 0, sophiaBal: 0, nolanBal: 0 };
+      const rows = buildScenario(makeParams({ mtgPrincipalOn: true, mtgPrincipalUncapped: true, ...noHi }));
       return {
         y1prim: rows[1].primBalRaw, y1dplx: rows[1].dplxBalRaw,
-        baseline: buildScenario(makeParams({ payOffHI: true }))[1].primBalRaw,
+        baseline: buildScenario(makeParams({ ...noHi }))[1].primBalRaw,
       };
     });
     console.log('  R9 — 6th balance yr1: bucket=' + result.y1prim + ' vs none=' + result.baseline + '; 15th untouched=' + result.y1dplx);
@@ -1691,6 +1698,55 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     expect(result.irmaa2029).toBe(0);
     expect(result.irmaa2030).toBe(700);   // BASE.irmaaSurge (350) x 2 persons, flat, no inflation
     expect(result.irmaa2031).toBe(0);
+  });
+
+  test('R17 — v5.0.2: sale-quarter cash routing (proceeds/obligation/draw land in the sale quarter, not January)', async ({ page }) => {
+    await loadApp(page);
+    // v5.0.2 fix: the one-time pooled-proceeds routing used to be keyed to the
+    // sale YEAR's first month regardless of hold.quarter/obligation.quarter --
+    // so for 6th St sold 2027-Q2 + a same-quarter obligation, the mortgage
+    // balance correctly zeroed in April (already quarter-gated via
+    // unitOwnedThisMonth) but the proceeds/obligation/draw and every related
+    // event annotation fired in January instead. This asserts the fixed
+    // month-by-month shape directly off the monthly engine.
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const params = makeParams({
+        properties: [{ id: 'sixth', hold: { mode: 'sell', year: 2027, quarter: 2 } }],
+        obligation: { year: 2027, quarter: 2, amount: 525_000 },
+      });
+      const rows = buildMonthlyScenario(params);
+      const yr2027 = rows.filter(r => r.calYear === 2027);
+      const byMonth = {};
+      for (const r of yr2027) byMonth[r.cal] = r;
+      return {
+        jan: byMonth["Jan '27"],
+        mar: byMonth["Mar '27"],
+        apr: byMonth["Apr '27"],
+      };
+    });
+    console.log('  R17 jan — ' + JSON.stringify({ mtgBal6: result.jan.mtgBal6, oneTimePaydown: result.jan.oneTimePaydown, oneTimeSweep: result.jan.oneTimeSweep, events: result.jan.events }));
+    console.log('  R17 apr — ' + JSON.stringify({ mtgBal6: result.apr.mtgBal6, oneTimePaydown: result.apr.oneTimePaydown, oneTimeSweep: result.apr.oneTimeSweep, events: result.apr.events }));
+
+    // January: nothing routes yet, mortgage still fully owned.
+    expect(result.jan.mtgBal6).toBeGreaterThan(0);
+    expect(result.jan.oneTimePaydown).toBe(0);
+    expect(result.jan.oneTimeReserveFill).toBe(0);
+    expect(result.jan.oneTimeSweep).toBe(0);
+    expect(result.jan.settleDraw).toBe(0);
+    expect(result.jan.events.some(e => /sold|obligation paid/i.test(e))).toBe(false);
+
+    // March: still pre-sale-quarter -- mortgage not yet paid off (not the
+    // "not March" the original bug report called out).
+    expect(result.mar.mtgBal6).toBeGreaterThan(0);
+
+    // April (Q2 start): mortgage paid off AND proceeds/obligation/draw/events
+    // all land together, exactly once, in the sale quarter's own month.
+    expect(result.apr.mtgBal6).toBe(0);
+    expect(result.apr.oneTimePaydown + result.apr.oneTimeReserveFill + result.apr.oneTimeSweep).toBeGreaterThan(50_000);
+    expect(result.apr.events.some(e => e.includes('6th St (home) sold'))).toBe(true);
+    expect(result.apr.events.some(e => e.includes('One-time obligation paid'))).toBe(true);
+    expect(result.apr.events.some(e => e.includes('ALL HI DEBT CLEARED'))).toBe(true);
   });
 
 });
@@ -2064,12 +2120,17 @@ test.describe('Group T — v4.3.0 Model Start-Date Anchor', () => {
       // v5.0.0 shim -- see the identical note at the other buildScenario call sites.
       const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams, applyDefaultsOverrides } = window.__engine;
       const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
+      // v5.0.3: payOffHI removed -- honest zero-HI-debt state via real
+      // entered balances (see R7's identical note), unrelated to what this
+      // test actually checks (core costs / cumCost), just keeps the
+      // comparison simple.
+      const noHi = { ccBal: 0, sophiaBal: 0, nolanBal: 0 };
       applyDefaultsOverrides({ BASE: { startMonth: 1 } });
-      const janParams = makeParams({ payOffHI: true });
+      const janParams = makeParams({ ...noHi });
       const janWf = buildMonthlyScenario(janParams);
       const janRows = aggregateMonthlyToAnnual(janWf, janParams);
       applyDefaultsOverrides({ BASE: { startMonth: 7 } });
-      const julParams = makeParams({ payOffHI: true });
+      const julParams = makeParams({ ...noHi });
       const julWf = buildMonthlyScenario(julParams);
       const julRows = aggregateMonthlyToAnnual(julWf, julParams);
       applyDefaultsOverrides({ BASE: { startMonth: 1 } });   // restore module-level BASE for later tests
@@ -2361,12 +2422,21 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
         loans: [{ label:'NotEligible', amount:50000, rate:0.25, months:120, startYear:2026, startMonth:7, sweepable:false, closingEligible:false }],
       }));
       const r28 = rows.find(r => r.cal === 2028);
-      return { famLoanBal: r28.famLoanBal, wfDebtPaid: r28.wfDebtPaid, hiDebt: r28.hiDebt };
+      // v5.0.2: the one-time payoff now correctly lands in the sale's OWN
+      // quarter (April 2028), not January -- so 2028's own annual row's STOCK
+      // fields (hiDebt/famLoanBal, both first-of-period snapshots per the
+      // v4.3.0 "no balance paid down before start date" convention) still
+      // show the PRE-payoff balance (captured as of Jan 2028, before April's
+      // event). Read the NEXT year's row for the post-payoff stock state --
+      // wfDebtPaid is unaffected (it's a flow field that finds the actual
+      // event row within the year, not a first-of-period snapshot).
+      const r29 = rows.find(r => r.cal === 2029);
+      return { famLoanBal: r29.famLoanBal, wfDebtPaid: r28.wfDebtPaid, hiDebt: r29.hiDebt };
     });
     console.log('  V2 — ' + JSON.stringify(result));
     expect(result.wfDebtPaid).toBeGreaterThan(0);   // the closing lump-sum DID pay down debt...
     expect(result.hiDebt).toBe(0);                  // ...fully clearing HI (large residual)...
-    expect(result.famLoanBal).toBeGreaterThan(35);  // ...but this loan (25% -- would be first in line if eligible) is essentially untouched (~2yr of its own amortization only)
+    expect(result.famLoanBal).toBeGreaterThan(35);  // ...but this loan (25% -- would be first in line if eligible) is essentially untouched (~2.5yr of its own amortization only)
   });
 
   test('V2b — closingEligible=true: a higher-rate added loan IS retired by the closing lump-sum, ahead of/alongside HI debt (unified rate-order)', async ({ page }) => {
@@ -2383,8 +2453,11 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
         obligation: { amount: 0, year: 2028, quarter: 2, offsetsCapitalGains: true },
         loans: [{ label:'Eligible', amount:50000, rate:0.25, months:120, startYear:2026, startMonth:7, sweepable:false, closingEligible:true }],
       }));
-      const r28 = rows.find(r => r.cal === 2028);
-      return { famLoanBal: r28.famLoanBal, hiDebt: r28.hiDebt };
+      // v5.0.2: read the year AFTER the sale -- see V2's identical note (the
+      // payoff now correctly lands in April 2028, so 2028's own first-of-
+      // period stock snapshot is taken before it happens).
+      const r29 = rows.find(r => r.cal === 2029);
+      return { famLoanBal: r29.famLoanBal, hiDebt: r29.hiDebt };
     });
     console.log('  V2b — ' + JSON.stringify(result));
     expect(result.famLoanBal).toBe(0);   // wiped out (25% is higher than any HI rate, residual is large)
@@ -2428,7 +2501,7 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
     expect(result.sweepBal).toBeLessThan(result.schedBal); // sweepable loan is materially further paid down than schedule-only
   });
 
-  test('V4 — a non-sweepable, non-closing-eligible loan is never touched by any debt mechanism (balance invariant to payOffHI)', async ({ page }) => {
+  test('V4 — a non-sweepable, non-closing-eligible loan is never touched by any debt mechanism (balance invariant to HI-debt presence)', async ({ page }) => {
     await loadApp(page);
     const result = await page.evaluate(() => {
       // v5.0.0: buildScenario (the standalone annual engine) was deleted --
@@ -2438,16 +2511,22 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
       const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
       const buildScenario = (params) => aggregateMonthlyToAnnual(buildMonthlyScenario(params), params);
       const loan = { label:'Sched', amount:20000, rate:0.06, months:60, sweepable:false, closingEligible:false };
-      const withSweepActive   = buildScenario(makeParams({ loans:[loan], payOffHI:false }));
-      const withNoSweepAtAll  = buildScenario(makeParams({ loans:[loan], payOffHI:true }));
+      // v5.0.3: payOffHI (which used to gate whether the WHOLE HI avalanche ran
+      // at all) is removed -- re-expressed with real entered balances: HI debt
+      // present (avalanche has real work to do) vs. entered at $0 (avalanche
+      // has nothing to do). Either way this loan (sweepable:false,
+      // closingEligible:false) must never be touched by any debt mechanism.
+      const withSweepActive   = buildScenario(makeParams({ loans:[loan] }));
+      const withNoSweepAtAll  = buildScenario(makeParams({ loans:[loan], ccBal:0, sophiaBal:0, nolanBal:0 }));
       return {
         y2026a: withSweepActive.find(r=>r.cal===2026).famLoanBal, y2026b: withNoSweepAtAll.find(r=>r.cal===2026).famLoanBal,
         y2028a: withSweepActive.find(r=>r.cal===2028).famLoanBal, y2028b: withNoSweepAtAll.find(r=>r.cal===2028).famLoanBal,
       };
     });
     console.log('  V4 — ' + JSON.stringify(result));
-    // If this loan were ever receiving extra sweep $, payOffHI (which toggles whether
-    // the WHOLE avalanche mechanism runs at all) would change its balance. It doesn't.
+    // If this loan were ever receiving extra sweep $, having real HI debt vs.
+    // none at all (which changes whether the avalanche has anything to do)
+    // would change its balance. It doesn't.
     expect(result.y2026a).toBe(result.y2026b);
     expect(result.y2028a).toBe(result.y2028b);
   });

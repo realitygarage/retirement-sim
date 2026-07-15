@@ -120,7 +120,6 @@ export const DEFAULT_LOANS_SC = [
 // DEFAULTS  --  engine-facing values (rates as decimals)
 // =============================================================================
 export const DEFAULTS = {
-  payOffHI:      false,
   // v4.4.0: ssStartMonth/ssBrendaStartYear/ssBrendaStartMonth are new (per-
   // spouse, month-precision SS claiming). These engine-facing fallbacks only
   // matter for a bare makeParams({}) call (e.g. tests) -- the live UI always
@@ -199,13 +198,12 @@ export function makeParams(overrides={}){
 }
 
 export const PIN_COLORS = ["#f59e0b","#f472b6","#34d399","#60a5fa","#a78bfa","#fb923c"];
-export const SAVE_SCHEMA_VERSION = 6;  // v4.5.0: schema break -- loans[].includeInSweep replaced by sweepable+closingEligible, no back-compat
+export const SAVE_SCHEMA_VERSION = 7;  // v5.0.3: schema break -- payOffHI removed from the sc shape (zero-balance shortcut retired), no back-compat
 
 // =============================================================================
 // SC_DEFAULTS  --  UI-facing scenario snapshot (rates as %, ints where UI is int)
 // =============================================================================
 export const SC_DEFAULTS = {
-  payOffHI:      false,
   // v4.4.0: ssAge (a stepped 65-70 toggle) replaced by explicit per-spouse
   // year+month claiming dates -- the claiming AGE is now a derived read-out,
   // not an input. Defaults preserve the old default scenario exactly: Bob at
