@@ -1,3 +1,27 @@
+// v5.0.4 -- sweep remaining ||-default zero-value bugs to ??. Same bug class
+// as v5.0.1 (STR/LTR cost sliders) and v5.0.3 (ccBal/sophiaBal/nolanBal/
+// rates/mins): `x || <nonzero-default>` silently discards an honestly-
+// entered 0. Systematic sweep of both sc->params conversion sites
+// (App.jsx's buildRowsFromSnapshot and liveParams) plus every remaining
+// `p.field||<nonzero>` read in engine.js turned up:
+//   - engine.js: p.struct6/struct15/structLaf/maintStr (A1's uncapped
+//     maintenance formula) -- 0% maintenance is a real modeling choice, not
+//     reachable via the current sliders (min 300/250/125/0.25) but reachable
+//     via saved pins, imports, or direct params.
+//   - engine.js: p.caGainCap (no UI slider exists for this field at all) and
+//     p.investReturn (slider min 2.75%, so 0% isn't reachable live either).
+//   - App.jsx buildRowsFromSnapshot: sc.discFloor/rdTopUp/obTopUp and a
+//     duplicate struct6/struct15/structLaf/maintStr copy, feeding the
+//     computed diCap_/maintRate_ params -- confirmed DEAD (neither p.diCap
+//     nor p.maintRate is read anywhere in engine.js, superseded by the
+//     v5.0.0 refactor's direct rd/ob/discFloor and struct+maintStr
+//     treatment), so this specific fix has zero behavioral effect today;
+//     fixed anyway so it can't reintroduce a live bug if reconnected. Of
+//     note, rdTopUp/obTopUp ARE live-reachable at 0 (their sliders literally
+//     label 0 as "Off") -- the real (non-dead) rdTopUp/obTopUp reads in
+//     engine.js already used the benign `||0` form and were unaffected.
+// Confirmed the 3 real saved pins use the standard nonzero defaults for
+// every affected field -- unaffected either way.
 // v5.0.3 -- remove payOffHI zero-balance shortcut, HI debt always starts at
 // real entered balance. payOffHI ("HI Debt at Closing: Sweep over time / Pay
 // off at closing") was NOT the same mechanism as a loan's closingEligible
@@ -428,10 +452,18 @@ export default function App(){
   // (including FCF, A4) source identically to live instead of drifting.
   function buildRowsFromSnapshot(snap){
     const sc={...SC_DEFAULTS,...snap};
-    const diCap_=(sc.discFloor||800)+(sc.rdTopUp||400)+(sc.obTopUp||500);
-    const totalMaint=(sc.struct6||600)*1000*(sc.maintStr||0.75)/100
-                    +(sc.struct15||500)*1000*(sc.maintStr||0.75)/100
-                    +(sc.structLaf||250)*1000*(sc.maintStr||0.75)/100;
+    // v5.0.4: `||` -> `??` -- same bug class as v5.0.1/v5.0.3 (an honestly-
+    // entered 0, e.g. rdTopUp/obTopUp's UI-supported "Off" state, silently
+    // fell back to the nonzero default). NOTE: diCap_/maintRate_ below are
+    // confirmed dead -- neither p.diCap nor p.maintRate is read anywhere in
+    // engine.js (superseded by the v5.0.0 refactor's direct rd/ob/discFloor
+    // and struct6/15/Laf+maintStr treatment) -- so this particular fix has
+    // no behavioral effect today, fixed only so it can't reintroduce a live
+    // bug if either field is ever reconnected.
+    const diCap_=(sc.discFloor??800)+(sc.rdTopUp??400)+(sc.obTopUp??500);
+    const totalMaint=(sc.struct6??600)*1000*(sc.maintStr??0.75)/100
+                    +(sc.struct15??500)*1000*(sc.maintStr??0.75)/100
+                    +(sc.structLaf??250)*1000*(sc.maintStr??0.75)/100;
     const props = sc.properties || freshPropertiesDefaults();
     const totalVal = props.reduce((s,pr)=>s+(pr.hold?.mode==='keep'?pr.value:0), 0);
     const maintRate_=totalVal>0?totalMaint/totalVal:0.005;
@@ -1649,7 +1681,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.3</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.4</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>

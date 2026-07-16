@@ -658,7 +658,7 @@ export function computeDispositions(p){
   for(const prop of properties) dispoRes[prop.id] = computeDispo(prop);
 
   // CA $1.2M cap: applies across all NON-primary (rental) properties in year order
-  const caCap = p.caGainCap || 1_200_000;
+  const caCap = p.caGainCap ?? 1_200_000;
   const rentalDispos = properties.filter(pr=>!pr.isPrimary).map(pr=>dispoRes[pr.id])
     .filter(d => d.mode && d.mode!=='keep' && (d.recognizedGain||0)>0);
   rentalDispos.sort((a,b)=>a.year-b.year);
@@ -825,9 +825,12 @@ export function buildMonthlyScenario(p){
 
   // A1: uncapped, inflated, ongoing maintenance -- structure-value-based
   // (Cash-Flow-tab struct6/15/Laf sliders, NOT properties[].value).
-  const _maint6Base   = (p.struct6  ||600)*1000*(p.maintStr||0.75)/100/12;
-  const _maint15Base  = (p.struct15 ||500)*1000*(p.maintStr||0.75)/100/12;
-  const _maintLafBase = (p.structLaf||250)*1000*(p.maintStr||0.75)/100/12;
+  // v5.0.4: `||` -> `??` (nullish coalescing) -- same bug class as v5.0.1/
+  // v5.0.3: an honestly-entered 0 (e.g. 0% maintenance rate) was silently
+  // falling back to the nonzero default.
+  const _maint6Base   = (p.struct6  ??600)*1000*(p.maintStr??0.75)/100/12;
+  const _maint15Base  = (p.struct15 ??500)*1000*(p.maintStr??0.75)/100/12;
+  const _maintLafBase = (p.structLaf??250)*1000*(p.maintStr??0.75)/100/12;
   const PROP_TAX_INS = {
     sixth:     { tax: BASE.primTaxMo, ins: BASE.primInsMo },
     fifteenth: { tax: BASE.dplxTaxMo, ins: BASE.dplxInsMo },
@@ -1170,7 +1173,7 @@ export function buildMonthlyScenario(p){
       toSavings = Math.max(0, toSavings - _takenFromSavings);
     }
     const sweepToSavings = toSavings;
-    if(savingsAcc>0) savingsAcc *= (1+(p.investReturn||0.055)/12);
+    if(savingsAcc>0) savingsAcc *= (1+(p.investReturn??0.055)/12);
     if(sweepToSavings>0) savingsAcc += sweepToSavings;
 
     rdBal  = Math.min(rdCap,  rdBal+rdAdd);
