@@ -154,6 +154,13 @@ export const DEFAULTS = {
   ccBal:         60_000,   ccRate:    0.14,  ccMin:   1200,
   sophiaBal:     58_057,   sophiaRate:0.0814,sophiaMin: 737,
   nolanBal:     141_117,   nolanRate: 0.084, nolanMin: 1787,
+  // v5.0.5: per-debt closing-eligibility (was a global payOffHI toggle,
+  // retired in v5.0.3) -- same flag LI loans[] already carry, default true
+  // (matches the old global toggle's typical setting, so no configuration
+  // is needed for the common case). HI stays unconditionally "sweepable"
+  // (the ongoing avalanche) -- this only gates the ONE-TIME sale-closing
+  // lump-sum, same as a loan's own closingEligible.
+  ccClosingEligible: true, sophiaClosingEligible: true, nolanClosingEligible: true,
   loans:         DEFAULT_LOANS_SC.map(l=>({...l, rate:l.rate/100})),  // engine-facing decimals
   // v3.4.0 mortgage-principal waterfall bucket (after HI sweep, before savings)
   mtgPrincipalOn:       false,
@@ -225,6 +232,8 @@ export const SC_DEFAULTS = {
   ccBal:         60000,  ccRate:14.0,  ccMin:1200,
   sophiaBal:     58057,  sophiaRate:8.14, sophiaMin:737,
   nolanBal:      141117, nolanRate:8.40,  nolanMin:1787,
+  // v5.0.5: per-debt closing-eligibility -- see the identical note in DEFAULTS above.
+  ccClosingEligible: true, sophiaClosingEligible: true, nolanClosingEligible: true,
   loans:         DEFAULT_LOANS_SC,   // rate as %
   mtgPrincipalOn:false, mtgPrincipalCap:2000, mtgPrincipalUncapped:false,
   rdTopUp:400, rdCap:10000, obTopUp:500, obCap:35000,

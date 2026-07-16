@@ -1,3 +1,19 @@
+// v5.0.5 -- per-debt closing-eligibility for HI (CC/Sophia/Nolan), same
+// control shape LI loans[] already carry: "Sweep over time" (ongoing
+// avalanche only) vs. "Closing-eligible" (also retired by the one-time
+// property-sale-closing lump-sum), toggle per debt in the HI Debt Balances
+// cards (Loans & Debt section). Default true for all three -- matches the
+// old global payOffHI toggle's typical setting and the pre-v5.0.5 hardcoded
+// "always closing-eligible" behavior, so no configuration is needed for the
+// common case; the 3 real saved pins predate this field and correctly
+// resolve to true either way. HI stays unconditionally "sweepable" (the
+// ongoing ambient avalanche) -- unaffected, only the ONE-TIME lump-sum
+// eligibility is now per-debt. Removed the standalone "HI Debt at Closing"
+// section (that was v5.0.3's payOffHI removal, a prerequisite for this).
+// Wired directly into engine.js's existing debt-tiering buildDebtList (the
+// same mechanism LI loans already use) -- NOT the dead diCap_/maintRate_
+// plumbing v5.0.4's sweep flagged (that plumbing feeds params nothing reads;
+// logged as a separate future-cleanup item, not touched here).
 // v5.0.4 -- sweep remaining ||-default zero-value bugs to ??. Same bug class
 // as v5.0.1 (STR/LTR cost sliders) and v5.0.3 (ccBal/sophiaBal/nolanBal/
 // rates/mins): `x || <nonzero-default>` silently discards an honestly-
@@ -359,6 +375,8 @@ export default function App(){
     workPts, lifestyleSplit,
     reApp, rentGr, cpi, healthCpi, propCpi, taxEnabled, investRet, lifestyleDraws,
     ccBal, ccRate, ccMin, sophiaBal, sophiaRate, sophiaMin, nolanBal, nolanRate, nolanMin,
+    // v5.0.5: per-debt closing-eligibility, same flag shape LI loans[] carry.
+    ccClosingEligible=true, sophiaClosingEligible=true, nolanClosingEligible=true,
     loans=DEFAULT_LOANS_SC,
     rdTopUp, rdCap, obTopUp, obCap, discFloor, fcfSchedule, sweepDelay, struct6, struct15, structLaf, maintStr, bufferMode,
     strPlatformPct=3, strCleanPct=4, mgrPct=0, ltrVacancyPct=4, mtrCleaningFlat=300,
@@ -419,6 +437,9 @@ export default function App(){
   const setNolanBal       = v=>setSc(s=>({...s,nolanBal:v}));
   const setNolanRate      = v=>setSc(s=>({...s,nolanRate:v}));
   const setNolanMin       = v=>setSc(s=>({...s,nolanMin:v}));
+  const setCcClosingEligible     = v=>setSc(s=>({...s,ccClosingEligible:v}));
+  const setSophiaClosingEligible = v=>setSc(s=>({...s,sophiaClosingEligible:v}));
+  const setNolanClosingEligible  = v=>setSc(s=>({...s,nolanClosingEligible:v}));
   const setLoans          = v=>setSc(s=>({...s,loans:typeof v==="function"?v(s.loans||DEFAULT_LOANS_SC):v}));
   const setSettleLifestyleDraw = v=>setSc(s=>({...s,settleLifestyleDraw:v}));
   const setSettleDrawLabel     = v=>setSc(s=>({...s,settleDrawLabel:v}));
@@ -1681,7 +1702,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.4</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.5</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2050,10 +2071,10 @@ export default function App(){
                 padding:"8px 10px",marginTop:8
               }}>
                 {[
-                  {label:"Credit Card", bal:ccBal, setBal:setCcBal, rate:ccRate, setRate:setCcRate, min:ccMin, setMin:setCcMin, balMax:120000, rateMax:29},
-                  {label:"Sophia Loans", bal:sophiaBal, setBal:setSophiaBal, rate:sophiaRate, setRate:setSophiaRate, min:sophiaMin, setMin:setSophiaMin, balMax:150000, rateMax:15},
-                  {label:"Nolan Loans", bal:nolanBal, setBal:setNolanBal, rate:nolanRate, setRate:setNolanRate, min:nolanMin, setMin:setNolanMin, balMax:300000, rateMax:15},
-                ].map(({label,bal,setBal,rate,setRate,min,setMin,balMax,rateMax})=>(
+                  {label:"Credit Card", bal:ccBal, setBal:setCcBal, rate:ccRate, setRate:setCcRate, min:ccMin, setMin:setCcMin, balMax:120000, rateMax:29, closingEligible:ccClosingEligible, setClosingEligible:setCcClosingEligible, testId:"cc"},
+                  {label:"Sophia Loans", bal:sophiaBal, setBal:setSophiaBal, rate:sophiaRate, setRate:setSophiaRate, min:sophiaMin, setMin:setSophiaMin, balMax:150000, rateMax:15, closingEligible:sophiaClosingEligible, setClosingEligible:setSophiaClosingEligible, testId:"sophia"},
+                  {label:"Nolan Loans", bal:nolanBal, setBal:setNolanBal, rate:nolanRate, setRate:setNolanRate, min:nolanMin, setMin:setNolanMin, balMax:300000, rateMax:15, closingEligible:nolanClosingEligible, setClosingEligible:setNolanClosingEligible, testId:"nolan"},
+                ].map(({label,bal,setBal,rate,setRate,min,setMin,balMax,rateMax,closingEligible,setClosingEligible,testId})=>(
                   <div key={label} style={{marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${bdr}44`}}>
                     <div style={{fontSize:9,color:amber,fontWeight:"bold",marginBottom:5}}>{label}</div>
                     <div style={{marginBottom:4}}>
@@ -2084,6 +2105,12 @@ export default function App(){
                           onChange={e=>setMin(parseInt(e.target.value))}
                           style={{width:"100%",accentColor:amber,cursor:"pointer",height:3}}/>
                       </div>
+                    </div>
+                    <div style={{marginTop:6}} data-testid={`hi-closing-${testId}`}>
+                      <div style={{fontSize:8,color:dim,marginBottom:3}}>Retire at property-sale closing (one-time lump-sum)</div>
+                      {toggle(!!closingEligible, setClosingEligible, [
+                        {v:false,l:"Sweep over time"},{v:true,l:"Closing-eligible",c:amber}
+                      ])}
                     </div>
                   </div>
                 ))}

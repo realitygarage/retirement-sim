@@ -431,16 +431,20 @@ export function splitResidual(residual, opts={}){
 }
 
 // =============================================================================
-// DEBT TIERING (v4.5.0) -- HI debt (CC/Sophia/Nolan, the named trio) and the
-// generalized loans[] array (LI = low-interest, user-added) share ONE
-// rate-ordered avalanche for both the ongoing surplus-sweep and the one-time
-// property-sale-closing lump-sum. Tier membership is STRUCTURAL, never rate-
-// based: HI is whatever's in the named trio (always closing-eligible and
-// sweepable, hardcoded -- no per-instance flag needed since there's no UI to
-// change it); LI is whatever's in loans[], each carrying its own explicit
-// closingEligible/sweepable flags (both default false for user-added loans).
-// A loan's rate governs PAYDOWN ORDER ONLY -- never which tier it belongs to,
-// and never the "Debt Balances" chart's line grouping (see App.jsx).
+// DEBT TIERING (v4.5.0, per-debt closing-eligibility v5.0.5) -- HI debt
+// (CC/Sophia/Nolan, the named trio) and the generalized loans[] array
+// (LI = low-interest, user-added) share ONE rate-ordered avalanche for both
+// the ongoing surplus-sweep and the one-time property-sale-closing lump-sum.
+// Tier membership is STRUCTURAL, never rate-based: HI is whatever's in the
+// named trio, always sweepable (hardcoded -- no per-instance flag needed,
+// there's no UI to change it), but each of the three now carries its own
+// closingEligible flag (default true, App.jsx's HI Debt Balances cards) --
+// same shape LI's loans[] entries already use, so the ONE-TIME lump-sum can
+// skip a specific HI debt the same way it can skip a specific loan. LI is
+// whatever's in loans[], each carrying its own explicit closingEligible/
+// sweepable flags (both default false for user-added loans). A loan's rate
+// governs PAYDOWN ORDER ONLY -- never which tier it belongs to, and never
+// the "Debt Balances" chart's line grouping (see App.jsx).
 // These three helpers are shared by buildScenario AND wfData (App.jsx) so the
 // avalanche can't diverge between the two engines -- this is deliberately the
 // LAST time this logic is written twice; a v5 single-engine refactor follows,
@@ -453,14 +457,14 @@ export function splitResidual(residual, opts={}){
 
 // Builds the [{key,balance,rate}] list `planHiPaydown` consumes for a ONE-TIME
 // lump-sum payoff (the property-sale-closing routing) -- HI's three named
-// balances (always closing-eligible, hardcoded) plus whichever loans[]
-// entries have `eligibleField` set (pass 'closingEligible' here). `hi` is
-// {cc:{bal,rate}, sophia:{bal,rate}, nolan:{bal,rate}}.
+// balances, each gated on its OWN closingEligible flag (v5.0.5), plus
+// whichever loans[] entries have `eligibleField` set (pass 'closingEligible'
+// here). `hi` is {cc:{bal,rate,closingEligible}, sophia:{...}, nolan:{...}}.
 export function buildDebtList(hi, loans, eligibleField){
   const out=[];
-  if(hi.cc.bal>0)     out.push({key:'cc',     balance:hi.cc.bal,     rate:hi.cc.rate});
-  if(hi.sophia.bal>0) out.push({key:'sophia', balance:hi.sophia.bal, rate:hi.sophia.rate});
-  if(hi.nolan.bal>0)  out.push({key:'nolan',  balance:hi.nolan.bal,  rate:hi.nolan.rate});
+  if(hi.cc.bal>0 && hi.cc.closingEligible)         out.push({key:'cc',     balance:hi.cc.bal,     rate:hi.cc.rate});
+  if(hi.sophia.bal>0 && hi.sophia.closingEligible) out.push({key:'sophia', balance:hi.sophia.bal, rate:hi.sophia.rate});
+  if(hi.nolan.bal>0 && hi.nolan.closingEligible)   out.push({key:'nolan',  balance:hi.nolan.bal,  rate:hi.nolan.rate});
   for(const L of (loans||[])){
     if(L[eligibleField] && L.bal>0) out.push({key:'loan:'+L.label, balance:L.bal, rate:L.rate});
   }
@@ -963,7 +967,9 @@ export function buildMonthlyScenario(p){
           lifestyleDraw: hasObligThisPass ? (p.settleLifestyleDraw||0) : 0,
         });
         const plan = planHiPaydown(split.remainder, buildDebtList(
-          {cc:{bal:ccBal,rate:ccRate_}, sophia:{bal:sophiaBal,rate:sophiaRate_}, nolan:{bal:nolanBal,rate:nolanRate_}},
+          {cc:{bal:ccBal,rate:ccRate_,closingEligible:p.ccClosingEligible??true},
+           sophia:{bal:sophiaBal,rate:sophiaRate_,closingEligible:p.sophiaClosingEligible??true},
+           nolan:{bal:nolanBal,rate:nolanRate_,closingEligible:p.nolanClosingEligible??true}},
           _loans, 'closingEligible'));
         applyDebtPlan(plan, {
           cc:     pay=>{ccBal     = Math.max(0, ccBal-pay);},

@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.0.4"', async ({ page }) => {
+  test('E5 — Version header shows "v5.0.5"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.0.4').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.0.4');
+    await expect(page.locator('text=v5.0.5').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.0.5');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.0.4', async ({ page }) => {
+  test('L1 — Version header shows v5.0.5', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.0.4').first()).toBeVisible();
-    console.log('  L1 — Version v5.0.4 confirmed');
+    await expect(page.locator('text=v5.0.5').first()).toBeVisible();
+    console.log('  L1 — Version v5.0.5 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -2576,6 +2576,55 @@ test.describe('Group V — v4.5.0 Debt Tiering', () => {
     });
     console.log('  V6 — ' + JSON.stringify(result));
     expect(Math.abs(result.annual - result.monthly)).toBeLessThanOrEqual(2);
+  });
+
+  test('V7 — v5.0.5: per-debt HI closing-eligibility (ccClosingEligible:false excludes CC only from the one-time lump-sum, ongoing sweep unaffected)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const sellScenario = (overrides = {}) => makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2028, quarter: 2 } }],
+        obligation: { amount: 0, year: 2028, quarter: 2 },
+        ...overrides,
+      });
+      const apr2028 = wf => wf.find(r => r.calYear === 2028 && r.cal.startsWith('Apr'));
+
+      const allEligible = apr2028(buildMonthlyScenario(sellScenario()));
+      const ccNotEligible = apr2028(buildMonthlyScenario(sellScenario({ ccClosingEligible: false })));
+      const noneEligible = apr2028(buildMonthlyScenario(sellScenario({
+        ccClosingEligible: false, sophiaClosingEligible: false, nolanClosingEligible: false,
+      })));
+
+      // Ongoing ambient sweep (no sale) must be unaffected by closingEligible.
+      const noSaleEligible = buildMonthlyScenario(makeParams({}));
+      const noSaleNotEligible = buildMonthlyScenario(makeParams({
+        ccClosingEligible: false, sophiaClosingEligible: false, nolanClosingEligible: false,
+      }));
+      const y5a = noSaleEligible.find(r => r.calYear === 2031 && r.cal.startsWith('Jan'));
+      const y5b = noSaleNotEligible.find(r => r.calYear === 2031 && r.cal.startsWith('Jan'));
+
+      return {
+        allEligibleHiDebt: allEligible.hiDebt,
+        ccNotEligibleCcBal: ccNotEligible.ccBalRaw,
+        ccNotEligibleHiDebt: ccNotEligible.hiDebt,
+        noneEligibleHiDebt: noneEligible.hiDebt,
+        noneEligiblePaydown: noneEligible.oneTimePaydown,
+        ongoingSweepEligible: y5a.hiDebt,
+        ongoingSweepNotEligible: y5b.hiDebt,
+      };
+    });
+    console.log('  V7 — ' + JSON.stringify(result));
+    // Default (all eligible, matching the old hardcoded behavior): fully cleared.
+    expect(result.allEligibleHiDebt).toBe(0);
+    // CC excluded: CC's own balance is untouched, but Sophia/Nolan still clear.
+    expect(result.ccNotEligibleCcBal).toBeGreaterThan(0);
+    expect(result.ccNotEligibleHiDebt).toBeGreaterThan(0);
+    // All three excluded: the one-time lump-sum never touches HI debt at all.
+    expect(result.noneEligiblePaydown).toBe(0);
+    expect(result.noneEligibleHiDebt).toBeGreaterThan(0);
+    // The ONGOING ambient sweep (no sale involved) is completely unaffected --
+    // HI stays unconditionally sweepable regardless of closingEligible.
+    expect(result.ongoingSweepEligible).toBe(result.ongoingSweepNotEligible);
   });
 
 });
