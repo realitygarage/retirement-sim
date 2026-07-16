@@ -161,6 +161,52 @@ stacking multiple named fixes under one commit, e.g. v5.0.0's refactor + two
 restores). Not pushed to origin -- awaiting explicit push instruction per
 CLAUDE.md.
 
+--- v5.0.4: SYSTEMATIC ||-DEFAULT ZERO-VALUE SWEEP ---
+
+User's observation after v5.0.3: the `x || <nonzero-default>` zero-value bug
+(a genuinely entered 0 silently falling back to the nonzero default) has now
+appeared three times (v5.0.1's STR/LTR cost sliders, v5.0.3's ccBal/rate/min
+fields) -- same root cause each time. Asked for a systematic sweep of both
+sc->params conversion sites (App.jsx's buildRowsFromSnapshot and liveParams)
+plus the defaults registry, before starting the closingEligible UI work.
+
+Swept both conversion functions line-by-line and cross-checked every
+remaining `p.field||<nonzero>` read in engine.js. DEFAULTS_REGISTRY itself
+(App.jsx, BASE/DISPO_DEFAULTS override UI) was already safe -- its
+ovGet/setOverride functions use explicit `!=null`/`isFinite` checks, not
+truthy `||`, so no fix needed there. Found and fixed (all `||` -> `??`):
+
+- engine.js buildMonthlyScenario: p.struct6/struct15/structLaf/maintStr (A1's
+  uncapped maintenance formula) -- 0% maintenance is a real, meaningful
+  modeling choice, though not reachable via the current sliders (min
+  300/250/125/0.25 respectively) -- only reachable via saved pins, imported
+  JSON, or direct params/tests.
+- engine.js computeDispositions: p.caGainCap -- no UI slider exists for this
+  field at all currently, so unreachable live, but the same pattern.
+- engine.js buildMonthlyScenario: p.investReturn -- 0% return is a real
+  conservative assumption a user might want to model; slider min is 2.75%,
+  so not reachable live either.
+- App.jsx buildRowsFromSnapshot: sc.discFloor/rdTopUp/obTopUp and a duplicate
+  struct6/struct15/structLaf/maintStr copy, both feeding the computed
+  diCap_/maintRate_ params. Confirmed via grep that neither p.diCap nor
+  p.maintRate is read ANYWHERE in engine.js (both superseded by the v5.0.0
+  refactor's direct rd/ob/discFloor treatment and A1's direct
+  struct+maintStr formula) -- this fix has ZERO behavioral effect today,
+  fixed only so the pattern can't reintroduce a live bug if either field is
+  ever reconnected. Of note: rdTopUp/obTopUp themselves ARE live-reachable
+  at 0 (their sliders literally label 0 as "Off") -- but the REAL (non-dead)
+  reads of rdTopUp/obTopUp in engine.js already used the benign `||0` form
+  (fallback equals the zero case itself, not a bug) and needed no change.
+
+Confirmed safe against the 3 real saved pins (v5_fixtures/*.json, the same
+proxy used for the v5.0.1/v5.0.3 pin-safety checks): all three use the
+standard nonzero defaults for every affected field (struct6=600, struct15=
+500, structLaf=250, maintStr=0.75, discFloor=800, rdTopUp=400, obTopUp=500,
+investRet=5.5, caGainCap=1_200_000) -- identical result whether `||` or `??`
+is used, so none of the 3 baseline scenarios move. 115/115 tests still pass.
+Committed as its own change (5764e40), separate from v5.0.3, per the user's
+explicit instruction.
+
 --- OPEN ITEMS FOR A FUTURE SESSION ---
 
 1. The per-debt closingEligible UI relocation itself (give CC/Sophia/Nolan
