@@ -207,18 +207,81 @@ is used, so none of the 3 baseline scenarios move. 115/115 tests still pass.
 Committed as its own change (5764e40), separate from v5.0.3, per the user's
 explicit instruction.
 
+--- v5.0.5: PER-DEBT closingEligible FOR HI DEBTS ---
+
+Completed the prerequisite from v5.0.3: gave CC/Sophia/Nolan the same
+per-debt closingEligible control LI loans[] already have. New sc fields
+ccClosingEligible/sophiaClosingEligible/nolanClosingEligible (default true,
+defaults.js DEFAULTS+SC_DEFAULTS) pass through both makeParams conversion
+sites via the existing `...sc` spread (no explicit conversion needed, same
+as ccBal/ccMin). Wired into engine.js's buildDebtList -- each hi.{cc,sophia,
+nolan} object now carries closingEligible (p.ccClosingEligible??true at the
+one real call site), and the HI-inclusion check changed from unconditional
+to `bal>0 && closingEligible`. UI: new toggle per debt in the HI Debt
+Balances cards (Loans & Debt section), same wording/style as the LI loan's
+existing closingEligible toggle. HI stays unconditionally sweepable (the
+ongoing ambient avalanche) -- confirmed via a direct no-sale engine check
+that a scenario with all three closingEligible:false produces an IDENTICAL
+yr5 HI balance to the all-eligible default, proving the flag only touches
+the one-time lump-sum, never the ongoing sweep.
+
+User's explicit caution before starting: confirm the wiring goes through the
+REAL per-debt closingEligible flag from the debt-tiering schema (buildDebtList
+above), not the dead diCap_/maintRate_ plumbing v5.0.4's sweep flagged.
+Confirmed -- diCap_/maintRate_ are untouched by this change; they remain
+exactly as dead as v5.0.4 found them (see the new open item below).
+
+Added V7 (engine-level, mirrors V2/V2b's existing style): default clears all
+HI debt via the lump-sum (matching the old hardcoded behavior exactly);
+ccClosingEligible:false leaves CC's own balance untouched while Sophia/Nolan
+still clear; all three false means the lump-sum never touches HI debt at
+all (goes to reserve/sweep instead); the ongoing ambient ongoing sweep is
+provably unaffected either way. Confirmed the 3 real saved pins predate this
+field and resolve to true (identical behavior). Visually verified in the
+browser directly (Playwright, headed) since the Chrome extension wasn't
+connected this session -- screenshotted the HI Debt Balances cards showing
+the new toggle rendered per debt, then clicked CC's toggle and re-screenshotted
+to confirm it independently switched to "Sweep over time" while Sophia/Nolan
+stayed "Closing-eligible." 116/116 tests pass. Committed as its own change
+(d021b67), separate from v5.0.3/v5.0.4.
+
+--- SIDE NOTE: Bash PERMISSION HOOK ADDED (.claude/settings.local.json) ---
+
+Mid-session, a compound `cp ...; cd X && npx playwright ...` Bash call
+(copying a one-off manual UI-check spec into the project root, then running
+it -- needed because the Chrome extension wasn't connected and Playwright's
+own config hardcodes testMatch to retirement-simulator.spec.js only, so a
+scratch file has to live in the project root to be runnable at all) got
+interrupted by a "Compound command contains cd with write operation"
+permission prompt. User approved it and asked to stop being asked for this
+specific pattern going forward. Added a PreToolUse hook on the Bash matcher
+(.claude/settings.local.json, personal/local config, not committed to the
+repo) that auto-allows any Bash command matching /\bcd\b.*&&/ (a `cd`
+followed later by `&&`) via hookSpecificOutput.permissionDecision:"allow".
+Pipe-tested against both a matching and non-matching sample stdin payload,
+then proved it fires by successfully re-running the exact previously-blocked
+compound command with no interruption. Note: `jq` isn't installed in this
+environment, so the hook command uses `node -e` (already allowlisted,
+guaranteed present in a Node project) to parse the hook's stdin JSON instead.
+
 --- OPEN ITEMS FOR A FUTURE SESSION ---
 
-1. The per-debt closingEligible UI relocation itself (give CC/Sophia/Nolan
-   the same per-debt closing-eligible toggle LI loans have in the Loans &
-   Debt section, default true) was NOT done this session -- only the
-   prerequisite payOffHI removal landed, per the user's explicit "own
-   change/commit" instruction. buildDebtList currently treats HI as
-   unconditionally closing-eligible (hardcoded, matching the pre-existing
-   v4.5.0 design comment) -- the next session's job is making that
-   conditional per-debt (`hi.cc.closingEligible` etc., default true) and
-   adding the matching UI toggle per debt, same pattern as the existing LI
-   loan closingEligible toggle (App.jsx ~line 2100).
+1. The orphaned diCap_ (App.jsx buildRowsFromSnapshot)/maintRate (both
+   buildRowsFromSnapshot's maintRate_ and liveParams' maintRate) feed paths
+   into makeParams are DEAD -- confirmed via grep that neither p.diCap nor
+   p.maintRate is read anywhere in engine.js (superseded by the v5.0.0
+   refactor's direct rd/ob/discFloor treatment and A1's direct struct+
+   maintStr formula). v5.0.4 fixed a `||`->`??` bug inside this dead
+   computation (so it can't reintroduce a live bug if ever reconnected) but
+   deliberately did NOT remove the dead code itself -- flagged here as a
+   distinct, separate future-cleanup candidate: delete diCap_/maintRate_ from
+   buildRowsFromSnapshot, diCap/maintRate from liveParams' makeParams() call
+   (note: the `diCap`/`maintRate` local variables themselves are NOT dead --
+   `diCap` is unused elsewhere too but `maintRate` IS read for the live UI
+   display at App.jsx ~line 2309 ("X% of structure, Y% of market") -- only
+   the practice of ALSO feeding them into makeParams()'s params object is
+   dead, since engine.js never reads p.diCap/p.maintRate back out). Not
+   attempted this session per the user's explicit "keep it separate" ask.
 2. Same open items carried from session33 (mtgPrincipalOn + pool-year display
    inconsistency, Nolan-loan grace-period calendar accuracy, capped reserve-
    funding display, no saved never-sell pin) -- untouched this session.
