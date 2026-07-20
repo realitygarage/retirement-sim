@@ -1,0 +1,139 @@
+=== SESSION 35 JOURNAL -- v5.1.0 mortgage-principal paydown as a pooled-
+    routing destination, COMMITTED ===
+
+Date: 2026-07-20
+
+Session goal: single user-directed feature, picked up after session34's
+v5.0.5 commit (per-debt HI closing-eligibility). Read session34's journal
+first per the Session Start convention.
+
+--- FEATURE: MORTGAGE-PRINCIPAL PAYDOWN AS A POOLED-ROUTING DESTINATION (v5.1.0) ---
+
+Motivating scenario from the user: sell both rentals, keep 6th St, and put a
+lump sum from the sale proceeds against 6th St's principal before its
+interest-only period ends (~mid-2031) -- reduces IO-period interest AND
+permanently lowers the post-IO recast payment (the engine already recasts off
+the actual remaining balance, so paying down early compounds).
+
+Before this session there was no way to route sale proceeds to mortgage
+principal: the existing v3.4.0 mortgage-principal waterfall bucket
+(`mtgPrincipalOn`) only sweeps ONGOING monthly surplus, targeting a fixed,
+hardcoded pair (`MTG_PRINCIPAL_ELIGIBLE_IDS = ['sixth','fifteenth']`); the
+one-time pooled-proceeds routing chain (proceeds -> obligation -> draw -> HI
+debt -> reserves -> savings, `buildMonthlyScenario` in engine.js) had no
+mortgage stop at all.
+
+Added an explicit new step in that chain: proceeds -> obligation -> one-time
+draw -> MORTGAGE PRINCIPAL PAYDOWN -> cascade (HI debt avalanche -> reserves/
+buffers -> savings). Two new params, `settleMtgPaydown` ($, lump sum
+requested) and `settleMtgPaydownTarget` (property id) -- both plain fields on
+`sc`/engine params, passed straight through the existing `...sc` spread in
+both `liveParams` and `buildRowsFromSnapshot` (App.jsx), no % conversion
+needed (same convention as `settleLifestyleDraw`).
+
+Engine (`buildMonthlyScenario`, engine.js): the lump sum is a ONE-TIME total,
+not a per-routing-pass amount, so its remaining un-applied balance is tracked
+in a `let` outside the monthly loop and consumed by whichever routing pass
+has room, wherever in calendar time that lands (same quarter-precise timing
+v5.0.2 already gives the rest of the pool). At each pass, capped at three
+things: (a) the lump sum's own remaining total, (b) what's left in that
+pass's pool after the draw, (c) the target mortgage's own current balance.
+Applied BEFORE that month's own `_stepMtg` call (which runs later in the same
+iteration as part of Tier 1 fixed-cost computation) -- this is what makes the
+IO-period-interest and post-IO-recast benefits automatic: `_stepMtg` reads
+`st.bal` fresh each month, and the recast computation (`st.recast =
+loanMonthlyPmt(st.bal, ...)`, fired once at the IO->P&I transition) reads
+whatever `st.bal` is AT that transition month -- so a paydown applied any
+month before recast is already baked in by the time recast happens, no
+separate wiring required. A direction-correct recast-savings estimate
+(computed with the same `loanMonthlyPmt` formula the real recast uses,
+comparing balance-before vs. balance-after at the paydown month) is surfaced
+in a new event line when the paydown lands pre-IO-end.
+
+Target validity: the paydown only applies if the target property is a real,
+still-owned property that month (`ownedMo(...)` check against the SAME
+`unitOwnedThisMonth` ownership gate everything else uses) with a positive
+mortgage balance. A stale/sold/unrecognized target silently contributes $0
+(falls through to the ordinary cascade) rather than throwing -- verified via
+R21 (target the SAME property that's already sold years earlier; the
+requested amount correctly flows to HI debt paydown instead).
+
+Coexistence with the existing v3.4.0 ongoing bucket: both mechanisms mutate
+the SAME `_mtgSt[id].bal` object, sequentially within a month (the new lump
+step runs at the top of the loop, the ongoing sweep bucket runs later in the
+same iteration) -- so there's no separate/stale balance snapshot either one
+could double-count against. Verified via R24 (four scenario variants: neither
+active, lump-only, ongoing-only, both) -- the lump component itself is
+byte-identical whether or not the ongoing bucket is also active, and the
+combined-balance and combined-recast-payment orderings are strictly
+monotonic (both < either alone < neither).
+
+UI (App.jsx, Cash-Flow Engine group, right next to the existing "One-time
+draw" slider): a $ slider (uncapped by the UI itself, same convention as the
+draw slider -- the engine does the real capping, visible in the routing
+result readout) and a `<select>` listing every property still held at launch
+(`hold.mode==='keep'`), defaulting to the sole held property if only one
+survives (matches the motivating scenario exactly: sell both rentals, only
+6th St is left, no configuration needed), else the primary. Same default
+logic duplicated (necessarily -- different `properties` source) in both the
+live sidebar (`effectiveMtgPaydownTarget`) and `buildRowsFromSnapshot` (pins/
+imports can carry a different property set than what's live). Routing
+summary line and the dev-mode pooled-routing conservation `console.warn`
+check (App.jsx) both extended with the new term.
+
+New row fields: `mtgLumpPaydown`/`mtgPaydownDetail` (monthly), `wfMtgPaydown`/
+`mtgPaydownDetail` (annual aggregation) -- `aggregateMonthlyToAnnual`'s
+`poolRow` finder updated to also trigger on a year where ONLY the mortgage
+paydown fired (no HI debt existed to make `oneTimePaydown`/`oneTimeReserveFill`
+nonzero).
+
+--- TESTS (R18-R24, Group R, engine-level via window.__engine) ---
+
+- R18: lump-sum paydown reduces the target's balance exactly, in the sale
+  month, mid-IO-period (flat-balance check makes the arithmetic exact:
+  $805,495 -> $705,495 for a $100K paydown); event text confirmed.
+- R19: pre-IO-end paydown lowers the post-IO recast payment -- direction test,
+  comparing two full scenario runs (with/without the paydown) at the exact
+  recast month (Jul '31 = origin Jul 2021 + 10yr IO).
+- R20: an absurdly large request ($10M) is capped at the pool (15th St's
+  after-tax proceeds), demonstrably NOT capped at the target's own $805,495
+  balance (which is larger) -- isolates "capped by pool" from "capped by
+  target balance."
+- R21: targeting an already-sold property (sold 2 years before the funding
+  sale) applies $0 and the full amount falls through to the ordinary HI-debt
+  cascade instead. First draft of this test used the default $60K ccBal,
+  which an earlier, unrelated sale in the same scenario had already fully
+  cleared by the time the funding sale happened -- oneTimePaydown was
+  legitimately $0 for the WRONG reason (pre-existing zero balance, not the
+  rejected-target mechanism). Fixed by bumping ccBal to $1.5M so it survives
+  both sales; re-ran and confirmed the real mechanism (rejected target,
+  full $708K correctly falls through to HI paydown).
+- R22: conservation -- draw + mortgage paydown + HI-debt paydown + reserve
+  fill + one-time sweep sums to the pool residual (obligation-netted,
+  quarter-precise) within the same $2 rounding tolerance the existing
+  App.jsx conservation check uses.
+- R23: `settleMtgPaydown:0` (explicit) produces output byte-identical to
+  omitting the fields entirely -- confirms the feature is fully inert by
+  default (zero regression risk for every pre-existing test/scenario, since
+  DEFAULTS/SC_DEFAULTS default both new fields to 0/'').
+- R24: coexistence with the v3.4.0 ongoing bucket, see above.
+
+Full suite: 123/123 pass (116 existing + 7 new). Lint clean (no new errors/
+warnings; fixed one exhaustive-deps warning on `liveParams`'s useMemo by
+adding `effectiveMtgPaydownTarget` to its dependency array). Production build
+clean.
+
+--- FINAL STATE ---
+
+Committed as 34d326e (App.jsx, engine.js, defaults.js, retirement-simulator.spec.js
+only -- left the pre-existing, unrelated `.claude/settings.local.json` and
+deleted `test-results/test-run.txt` working-tree changes untouched, both
+already present before this session started). Not pushed to origin --
+awaiting explicit push instruction per CLAUDE.md.
+
+--- OPEN ITEMS CARRIED FORWARD (untouched this session) ---
+
+Same items from session34: the dead diCap_/maintRate_ plumbing (App.jsx
+buildRowsFromSnapshot/liveParams -- confirmed dead again this session, not
+touched), Nolan-loan grace-period calendar accuracy, capped reserve-funding
+display, no saved never-sell pin.
