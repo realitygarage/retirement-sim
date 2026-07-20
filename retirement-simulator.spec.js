@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.0.5"', async ({ page }) => {
+  test('E5 — Version header shows "v5.1.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.0.5').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.0.5');
+    await expect(page.locator('text=v5.1.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.1.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.0.5', async ({ page }) => {
+  test('L1 — Version header shows v5.1.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.0.5').first()).toBeVisible();
-    console.log('  L1 — Version v5.0.5 confirmed');
+    await expect(page.locator('text=v5.1.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.1.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1747,6 +1747,205 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     expect(result.apr.events.some(e => e.includes('6th St (home) sold'))).toBe(true);
     expect(result.apr.events.some(e => e.includes('One-time obligation paid'))).toBe(true);
     expect(result.apr.events.some(e => e.includes('ALL HI DEBT CLEARED'))).toBe(true);
+  });
+
+  // ─── v5.1.0: pooled-routing mortgage-principal paydown (R18-R23) ──────────
+  // Motivating scenario throughout: sell 15th St (funds the pool), keep 6th
+  // St, lump-sum some of the proceeds against 6th St's principal before its
+  // IO period ends (origin Jul 2021 + ioYears 10 = Jul 2031).
+
+  test('R18 — v5.1.0: lump-sum mortgage paydown reduces the target mortgage balance in the sale month', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const params = makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, quarter: 2 } }],
+        obligation: { amount: 0, year: 2026, quarter: 1 },
+        settleLifestyleDraw: 0,
+        settleMtgPaydown: 100_000,
+        settleMtgPaydownTarget: 'sixth',
+        ccBal: 0, sophiaBal: 0, nolanBal: 0,
+      });
+      const rows = buildMonthlyScenario(params);
+      const byMonth = {};
+      for (const r of rows.filter(r => r.calYear === 2027)) byMonth[r.cal] = r;
+      return { mar: byMonth["Mar '27"], apr: byMonth["Apr '27"] };
+    });
+    console.log('  R18 — ' + JSON.stringify({ mar: result.mar.mtgBal6, apr: result.apr.mtgBal6, lump: result.apr.mtgLumpPaydown, events: result.apr.events }));
+    // Still mid-IO-period (flat balance) right up to the sale/paydown month.
+    expect(result.mar.mtgBal6).toBe(805_495);
+    // Sale month: the full requested $100K lands against 6th St's principal.
+    expect(result.apr.mtgLumpPaydown).toBe(100_000);
+    expect(result.apr.mtgBal6).toBe(705_495);
+    expect(result.apr.events.some(e => e.includes('6th St (home) principal'))).toBe(true);
+    expect(result.apr.events.some(e => e.includes('recast payment'))).toBe(true);
+  });
+
+  test('R19 — v5.1.0: pre-IO-end paydown lowers the post-IO recast payment (direction test)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const base = {
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, quarter: 2 } }],
+        obligation: { amount: 0, year: 2026, quarter: 1 },
+        settleLifestyleDraw: 0,
+        ccBal: 0, sophiaBal: 0, nolanBal: 0,
+      };
+      const without = buildMonthlyScenario(makeParams({ ...base }));
+      const withPaydown = buildMonthlyScenario(makeParams({ ...base, settleMtgPaydown: 100_000, settleMtgPaydownTarget: 'sixth' }));
+      // Jul '31 = origin (Jul 2021) + ioYears(10)*12 -- the first P&I (recast) month.
+      const recastMoWithout = without.find(r => r.calYear === 2031 && r.cal === "Jul '31");
+      const recastMoWith    = withPaydown.find(r => r.calYear === 2031 && r.cal === "Jul '31");
+      return { fc_mtgWithout: recastMoWithout.fc_mtg, fc_mtgWith: recastMoWith.fc_mtg };
+    });
+    console.log('  R19 — ' + JSON.stringify(result));
+    expect(result.fc_mtgWith).toBeLessThan(result.fc_mtgWithout);
+  });
+
+  test('R20 — v5.1.0: mortgage paydown capped at what is left in the pool (not the full requested amount)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const params = makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, quarter: 2 } }],
+        obligation: { amount: 0, year: 2026, quarter: 1 },
+        settleLifestyleDraw: 0,
+        settleMtgPaydown: 10_000_000,   // absurdly large -- must be capped
+        settleMtgPaydownTarget: 'sixth',
+        ccBal: 0, sophiaBal: 0, nolanBal: 0,
+      });
+      const rows = buildMonthlyScenario(params);
+      const apr = rows.find(r => r.calYear === 2027 && r.cal === "Apr '27");
+      const dispo = rows.dispoResults.fifteenth;
+      return { applied: apr.mtgLumpPaydown, afterTaxNetProceeds: Math.round(dispo.afterTaxNetProceeds) };
+    });
+    console.log('  R20 — ' + JSON.stringify(result));
+    // Capped at the pool (15th's after-tax proceeds), not the target's own
+    // $805,495 balance (which is larger) and nowhere near the $10M requested.
+    expect(result.applied).toBe(result.afterTaxNetProceeds);
+    expect(result.applied).toBeLessThan(805_495);
+    expect(result.applied).toBeLessThan(10_000_000);
+  });
+
+  test('R21 — v5.1.0: targeting an already-sold/not-held mortgage is unavailable (falls through to the ordinary cascade)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const params = makeParams({
+        properties: [
+          { id: 'fifteenth', hold: { mode: 'sell', year: 2026, quarter: 2 } },   // sold years earlier
+          { id: 'sixth',     hold: { mode: 'sell', year: 2028, quarter: 2 } },   // funds THIS pool
+        ],
+        obligation: { amount: 0, year: 2026, quarter: 1 },
+        settleLifestyleDraw: 0,
+        settleMtgPaydown: 100_000,
+        settleMtgPaydownTarget: 'fifteenth',   // already sold by 2028 -- not held
+        // Large enough that 15th's own 2026 sale proceeds can't fully clear
+        // it on their own -- otherwise there'd be nothing left for the 2028
+        // pool to pay down, and oneTimePaydown>0 below would fail for the
+        // wrong reason (pre-existing $0 balance, not this feature).
+        ccBal: 1_500_000, sophiaBal: 0, nolanBal: 0,
+      });
+      const rows = buildMonthlyScenario(params);
+      const apr = rows.find(r => r.calYear === 2028 && r.cal === "Apr '28");
+      return { mtgLumpPaydown: apr.mtgLumpPaydown, oneTimePaydown: apr.oneTimePaydown, events: apr.events };
+    });
+    console.log('  R21 — ' + JSON.stringify(result));
+    expect(result.mtgLumpPaydown).toBe(0);
+    // The $100K that would have gone to the (unavailable) target instead
+    // flows through the ordinary cascade -- CC debt still gets paid down.
+    expect(result.oneTimePaydown).toBeGreaterThan(0);
+    expect(result.events.some(e => e.includes('principal'))).toBe(false);
+  });
+
+  test('R22 — v5.1.0: conservation -- draw + mortgage paydown + cascade allocations === pool', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const params = makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, quarter: 2 } }],
+        obligation: { amount: 50_000, year: 2027, quarter: 2 },
+        settleLifestyleDraw: 20_000,
+        settleMtgPaydown: 80_000,
+        settleMtgPaydownTarget: 'sixth',
+        ccBal: 60_000, sophiaBal: 0, nolanBal: 0,
+      });
+      const rows = buildMonthlyScenario(params);
+      const apr = rows.find(r => r.calYear === 2027 && r.cal === "Apr '27");
+      const dispo = rows.dispoResults.fifteenth;
+      const pool = dispo.afterTaxNetProceeds - 50_000;
+      const splitSum = apr.settleDraw + apr.mtgLumpPaydown + apr.oneTimePaydown + apr.oneTimeReserveFill + apr.oneTimeSweep;
+      return { pool: Math.round(pool), splitSum: Math.round(splitSum) };
+    });
+    console.log('  R22 — ' + JSON.stringify(result));
+    expect(Math.abs(result.splitSum - result.pool)).toBeLessThanOrEqual(2);
+  });
+
+  test('R23 — v5.1.0: zero mortgage paydown is behaviorally identical to the pre-v5.1.0 shape', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const base = {
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, quarter: 2 } }],
+        obligation: { amount: 0, year: 2026, quarter: 1 },
+      };
+      const without = buildMonthlyScenario(makeParams({ ...base }));
+      const withZero = buildMonthlyScenario(makeParams({ ...base, settleMtgPaydown: 0, settleMtgPaydownTarget: 'sixth' }));
+      const pick = r => ({ mtgBal6: r.mtgBal6, oneTimePaydown: r.oneTimePaydown, oneTimeSweep: r.oneTimeSweep, settleDraw: r.settleDraw, events: r.events });
+      const aprWithout = without.find(r => r.calYear === 2027 && r.cal === "Apr '27");
+      const aprWithZero = withZero.find(r => r.calYear === 2027 && r.cal === "Apr '27");
+      return { without: pick(aprWithout), withZero: pick(aprWithZero) };
+    });
+    console.log('  R23 — ' + JSON.stringify(result));
+    expect(result.withZero).toEqual(result.without);
+  });
+
+  test('R24 — v5.1.0: lump-sum paydown and the ongoing v3.4 mortgage-principal sweep bucket coexist on the same balance without double-counting', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      // Shared shape: sell 15th (funds the lump-sum pool), no HI debt (keeps
+      // the ongoing v3.4 bucket's own funding -- monthly surplus -- simple
+      // and uncontested by the HI-debt sweep queue).
+      const shape = {
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, quarter: 2 } }],
+        obligation: { amount: 0, year: 2026, quarter: 1 },
+        settleLifestyleDraw: 0,
+        ccBal: 0, sophiaBal: 0, nolanBal: 0,
+      };
+      const neither    = buildMonthlyScenario(makeParams({ ...shape }));
+      const lumpOnly    = buildMonthlyScenario(makeParams({ ...shape, settleMtgPaydown: 100_000, settleMtgPaydownTarget: 'sixth' }));
+      const ongoingOnly = buildMonthlyScenario(makeParams({ ...shape, mtgPrincipalOn: true, mtgPrincipalCap: 3000 }));
+      const both        = buildMonthlyScenario(makeParams({ ...shape, settleMtgPaydown: 100_000, settleMtgPaydownTarget: 'sixth', mtgPrincipalOn: true, mtgPrincipalCap: 3000 }));
+      // The lump component itself must be identical whether or not the
+      // ongoing bucket is also active -- proves the two mechanisms don't
+      // interfere with (or double-consume) each other's own amount.
+      const aprLumpOnly = lumpOnly.find(r => r.calYear === 2027 && r.cal === "Apr '27");
+      const aprBoth      = both.find(r => r.calYear === 2027 && r.cal === "Apr '27");
+      // A checkpoint well after the sale, still pre-recast (Jul '31), where
+      // the ongoing bucket has had ~3.5 years to keep sweeping on top of
+      // whatever the lump sum already did.
+      const checkpoint = r => r.find(x => x.calYear === 2030 && x.cal === "Dec '30").mtgBal6;
+      // Recast month itself -- must reflect the COMBINED reduced balance.
+      const recastPmt = r => r.find(x => x.calYear === 2031 && x.cal === "Jul '31").fc_mtg;
+      return {
+        lumpComponentEqual: aprLumpOnly.mtgLumpPaydown === aprBoth.mtgLumpPaydown,
+        balNeither: checkpoint(neither), balLumpOnly: checkpoint(lumpOnly), balOngoingOnly: checkpoint(ongoingOnly), balBoth: checkpoint(both),
+        recastNeither: recastPmt(neither), recastLumpOnly: recastPmt(lumpOnly), recastOngoingOnly: recastPmt(ongoingOnly), recastBoth: recastPmt(both),
+      };
+    });
+    console.log('  R24 — ' + JSON.stringify(result));
+    expect(result.lumpComponentEqual).toBe(true);
+    // Balance strictly decreases as more paydown mechanisms are stacked on.
+    expect(result.balLumpOnly).toBeLessThan(result.balNeither);
+    expect(result.balOngoingOnly).toBeLessThan(result.balNeither);
+    expect(result.balBoth).toBeLessThan(result.balLumpOnly);
+    expect(result.balBoth).toBeLessThan(result.balOngoingOnly);
+    // ...and the post-IO recast payment reflects the combined balance the same way.
+    expect(result.recastLumpOnly).toBeLessThan(result.recastNeither);
+    expect(result.recastOngoingOnly).toBeLessThan(result.recastNeither);
+    expect(result.recastBoth).toBeLessThan(result.recastLumpOnly);
+    expect(result.recastBoth).toBeLessThan(result.recastOngoingOnly);
   });
 
 });

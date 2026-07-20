@@ -850,6 +850,17 @@ export function buildMonthlyScenario(p){
   const _yearPoolCum = {};      // year -> cumulative signed cash-event total to date (unfloored)
   const _yearPoolRouted = {};   // year -> cumulative amount already sent through the routing waterfall
 
+  // v5.1.0: mortgage-principal paydown -- a NEW stop in the pooled-routing
+  // chain (proceeds -> obligation -> one-time draw -> MORTGAGE PRINCIPAL
+  // PAYDOWN -> cascade [HI debt avalanche -> reserves -> sweep]), same pool
+  // (and same quarter-precise timing, see computeDispositions' cashEvents)
+  // the draw/HI-debt/reserve steps already use. It's a single lump-sum total
+  // requested once (settleMtgPaydown, $) -- NOT per-routing-pass -- so its
+  // remaining un-applied amount is tracked across the whole monthly loop and
+  // consumed by whichever routing pass has room, wherever in time that lands.
+  let _settleMtgPaydownRemaining = Math.max(0, p.settleMtgPaydown||0);
+  const _settleMtgPaydownTarget = p.settleMtgPaydownTarget || null;
+
   // Generalized loans -- monthly state (rates already decimal in p).
   const _loans = (p.loans||[]).map(l=>({
     label: l.label||'Loan', rate: l.rate||0, amount: l.amount||0,
@@ -948,11 +959,13 @@ export function buildMonthlyScenario(p){
     //    immediately and leaving the obligation nothing to net against.
     //    Conservation across the year holds exactly regardless of event
     //    order (see _yearPoolRouted). Per pass: (a) one-time draw,
-    //    (b) FULL post-draw remainder pays HI debt first (avalanche),
-    //    (c) rd/ob buffers fill to caps [A1: narrowed from 5 buckets to 2 --
-    //    res6/res15/resLaf retired], (d) survivor joins this month's
-    //    sweep/savings.
+    //    (b) mortgage-principal paydown (v5.1.0 -- a lump sum requested once,
+    //    consumed by whichever pass has room), (c) FULL post-draw-and-paydown
+    //    remainder pays HI debt first (avalanche), (d) rd/ob buffers fill to
+    //    caps [A1: narrowed from 5 buckets to 2 -- res6/res15/resLaf
+    //    retired], (e) survivor joins this month's sweep/savings.
     let _oneTimeSweep = 0, _settleDrawMo = 0, _oneTimeReserveFill = 0, _payDetailMo = null;
+    let _mtgPaydownMo = 0, _mtgPaydownNote = null;
     const _yrCashEvents = (_cashEvents[calYear]||[]).filter(e=>e.month===calMonth1to12);
     if(_yrCashEvents.length){
       const monthSum = _yrCashEvents.reduce((s,e)=>s+e.amount, 0);
@@ -966,7 +979,46 @@ export function buildMonthlyScenario(p){
         const split = splitResidual(residual, {
           lifestyleDraw: hasObligThisPass ? (p.settleLifestyleDraw||0) : 0,
         });
-        const plan = planHiPaydown(split.remainder, buildDebtList(
+        // v5.1.0: mortgage-principal paydown -- capped at (a) the lump sum's
+        // own remaining un-applied total, (b) what's left in THIS pass's pool
+        // after the draw, and (c) the target mortgage's own current balance
+        // (mirrors planHiPaydown's own per-debt balance cap just below).
+        // Applying it here, before this month's _stepMtg call runs later in
+        // the loop, means (1) this month's interest accrual already sees the
+        // reduced balance -- an immediate IO-period benefit -- and (2) the
+        // eventual IO->P&I recast, which reads st.bal at the moment of
+        // transition, picks up the reduction automatically with no separate
+        // wiring. Target must still be a currently-held property with a
+        // live mortgage state (buildMonthlyScenario has one _mtgSt entry per
+        // property in p.properties) -- a sold/unknown target silently
+        // contributes $0 here rather than throwing, so a stale saved
+        // settleMtgPaydownTarget (e.g. a since-sold property) just falls
+        // through to the ordinary cascade instead of erroring.
+        if(_settleMtgPaydownRemaining>0 && _settleMtgPaydownTarget){
+          const _mSt = _mtgSt[_settleMtgPaydownTarget];
+          const _mOwned = ownedMo(_settleMtgPaydownTarget, calYear, calMonth1to12);
+          if(_mSt && _mOwned && _mSt.bal>0){
+            const pay = Math.min(_settleMtgPaydownRemaining, split.remainder, _mSt.bal);
+            if(pay>0){
+              const m = _mSt.p;
+              const kNow = (calYear-m.originYear)*12 + (calMonth1to12-m.originMonth);
+              const preIoEnd = _mSt.recast==null && kNow < m.ioYears*12;
+              let recastDelta = 0;
+              if(preIoEnd){
+                const remMonths = Math.max(1, m.termYears*12 - m.ioYears*12);
+                const withoutPmt = loanMonthlyPmt(_mSt.bal,     m.rate, remMonths);
+                const withPmt    = loanMonthlyPmt(_mSt.bal-pay, m.rate, remMonths);
+                recastDelta = Math.round(withoutPmt - withPmt);
+              }
+              _mSt.bal -= pay;
+              _mtgPaydownMo = pay;
+              _settleMtgPaydownRemaining -= pay;
+              _mtgPaydownNote = {label:_mSt.label, amount:Math.round(pay), preIoEnd, recastDelta};
+            }
+          }
+        }
+        const postPaydownRemainder = split.remainder - _mtgPaydownMo;
+        const plan = planHiPaydown(postPaydownRemainder, buildDebtList(
           {cc:{bal:ccBal,rate:ccRate_,closingEligible:p.ccClosingEligible??true},
            sophia:{bal:sophiaBal,rate:sophiaRate_,closingEligible:p.sophiaClosingEligible??true},
            nolan:{bal:nolanBal,rate:nolanRate_,closingEligible:p.nolanClosingEligible??true}},
@@ -976,8 +1028,8 @@ export function buildMonthlyScenario(p){
           sophia: pay=>{sophiaBal = Math.max(0, sophiaBal-pay);},
           nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
         }, _loans);
-        _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:split.remainder};
-        let rem = split.remainder - plan.total;
+        _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:postPaydownRemainder};
+        let rem = postPaydownRemainder - plan.total;
         const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
         const _rdFill = _fill(rdBal, rdCap); rdBal += _rdFill;
         const _obFill = _fill(obBal, obCap); obBal += _obFill;
@@ -1227,6 +1279,11 @@ export function buildMonthlyScenario(p){
       if(e.kind==='obligation') events.push(`One-time obligation paid -- $${Math.round(-e.amount/1000)}K`);
     }
     if(_settleDrawMo>0) events.push(`Obligation-year one-time draw $${Math.round(_settleDrawMo/1000)}K`);
+    if(_mtgPaydownMo>0){
+      const recastNote = (_mtgPaydownNote.preIoEnd && _mtgPaydownNote.recastDelta>0)
+        ? ` (lowers post-IO recast payment by ~$${_mtgPaydownNote.recastDelta.toLocaleString()}/mo)` : '';
+      events.push(`$${Math.round(_mtgPaydownMo/1000)}K sale proceeds to ${_mtgPaydownNote.label} principal${recastNote}`);
+    }
     if(_payDetailMo && _payDetailMo.total>0) events.push(`Sale proceeds: $${Math.round(_payDetailMo.total/1000)}K lump-sum to debt (avalanche, debt-first)`);
     if(_oneTimeReserveFill>0) events.push(`$${Math.round(_oneTimeReserveFill/1000)}K sale proceeds into reserve/buffer caps`);
     if(_oneTimeSweep>0) events.push(`$${Math.round(_oneTimeSweep/1000)}K sale proceeds into savings sweep`);
@@ -1252,6 +1309,8 @@ export function buildMonthlyScenario(p){
       interestPaid:Math.round(interestPaid), minPmt:Math.round(minPmt),
       sweepToSavings:Math.round(sweepToSavings), savingsAcc:Math.round(savingsAcc),
       settleDraw: Math.round(_settleDrawMo),
+      mtgLumpPaydown: Math.round(_mtgPaydownMo),   // v5.1.0: pooled-routing mortgage-principal stop
+      mtgPaydownDetail: _mtgPaydownNote,
       paydownDetail: _payDetailMo ? _payDetailMo.perDebt : null,
       oneTimePaydown: Math.round(_payDetailMo ? _payDetailMo.total : 0),
       oneTimeReserveFill: Math.round(_oneTimeReserveFill),
@@ -1336,7 +1395,7 @@ export function aggregateMonthlyToAnnual(wfRows, p){
     const nw = Math.round((dplxVal+lafVal+primVal+(first.savingsAcc||0)+0/*cashAst -- A3: inert, treated as 0*/-dplxBal-lafBal-primBal-hiDebtRaw)/1000);
 
     // One-time pool-year event, if any (at most one wfRow per year has it)
-    const poolRow = yrRows.find(r=>(r.settleDraw||0)>0 || (r.oneTimePaydown||0)>0 || (r.oneTimeReserveFill||0)>0);
+    const poolRow = yrRows.find(r=>(r.settleDraw||0)>0 || (r.mtgLumpPaydown||0)>0 || (r.oneTimePaydown||0)>0 || (r.oneTimeReserveFill||0)>0);
 
     // Structured by-year event lists (D4)
     const loanStarts = yrRows.flatMap(r=>r.loanStartLabels||[]);
@@ -1396,6 +1455,8 @@ export function aggregateMonthlyToAnnual(wfRows, p){
       dispoNet: Math.round(dispoNetYr),
       settlementOut: Math.round(settlementOutYr),
       settleDraw:   Math.round(poolRow?.settleDraw||0),
+      wfMtgPaydown: Math.round(poolRow?.mtgLumpPaydown||0),   // v5.1.0: pooled-routing mortgage-principal stop
+      mtgPaydownDetail: poolRow?.mtgPaydownDetail || null,
       wfDebtPaid:   Math.round(poolRow?.oneTimePaydown||0),
       // B2 fix: reserve top-ups and true sweep are no longer conflated --
       // wfToSavings now means TRUE savings only (matches the monthly engine's

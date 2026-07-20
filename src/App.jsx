@@ -1,3 +1,27 @@
+// v5.1.0 -- mortgage-principal paydown as a new pooled-routing destination.
+// The one-time sale-proceeds pool now has an explicit stop between the
+// one-time draw and the HI-debt cascade: proceeds -> obligation -> draw ->
+// MORTGAGE PRINCIPAL PAYDOWN -> cascade (HI debt -> reserves/buffers ->
+// savings). New Cash-Flow Engine controls next to the draw slider: a $
+// amount (settleMtgPaydown, uncapped by the UI, same convention as the draw
+// slider -- the engine caps it at what's left in the pool that pass) and a
+// target-mortgage <select> (settleMtgPaydownTarget) listing every property
+// still held at launch (hold.mode==='keep'), defaulting to the sole held
+// property if only one remains, else the primary (6th St). Motivating
+// scenario: sell both rentals, keep 6th St, and put a lump sum against 6th
+// St's principal before its interest-only period ends (~mid-2031) -- this
+// both reduces IO-period interest immediately (buildMonthlyScenario applies
+// the paydown before that month's own _stepMtg call, so the reduced balance
+// feeds this month's interest accrual too) AND permanently lowers the
+// post-IO recast payment (the recast already reads the live st.bal at the
+// moment of transition, so no separate wiring was needed -- this is the
+// same mortgage state machine the existing v3.4.0 ongoing sweep bucket
+// mutates, applied earlier in the same month, so the two coexist correctly
+// on the same running balance with no double-counting). A direction-tested
+// recast-savings estimate (computed with the same loanMonthlyPmt formula the
+// real recast uses) is surfaced in the event log when the paydown lands
+// pre-IO-end. Routing summary line and the dev-mode pooled-routing
+// conservation check both updated to include the new term.
 // v5.0.5 -- per-debt closing-eligibility for HI (CC/Sophia/Nolan), same
 // control shape LI loans[] already carry: "Sweep over time" (ongoing
 // avalanche only) vs. "Closing-eligible" (also retired by the one-time
@@ -384,11 +408,25 @@ export default function App(){
     properties=freshPropertiesDefaults(),
     obligation=freshObligationDefaults(),
     caGainCap=1_200_000, settleLifestyleDraw=0, settleDrawLabel='',
+    settleMtgPaydown=0, settleMtgPaydownTarget='',
     sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true,
     mtgPrincipalOn=false, mtgPrincipalCap=2000, mtgPrincipalUncapped=false,
   } = sc;
 
   const propById = useMemo(()=>Object.fromEntries(properties.map(pr=>[pr.id,pr])), [properties]);
+
+  // v5.1.0: pooled-routing mortgage-principal paydown target -- "any still-
+  // held mortgage," defaulting to the one property that survives to keep
+  // (hold.mode==='keep') if exactly one does, else the primary (6th St).
+  // Empty settleMtgPaydownTarget means "use the computed default" -- this
+  // mirrors how an unset value falls back rather than being force-saved into
+  // sc, so the default can keep tracking property edits (e.g. changing which
+  // property is primary) instead of freezing at whatever it resolved to once.
+  const heldProperties = useMemo(()=>properties.filter(pr=>pr.hold?.mode==='keep'), [properties]);
+  const defaultMtgPaydownTarget = heldProperties.length===1
+    ? heldProperties[0].id
+    : (properties.find(pr=>pr.isPrimary)?.id || properties[0]?.id || 'sixth');
+  const effectiveMtgPaydownTarget = settleMtgPaydownTarget || defaultMtgPaydownTarget;
 
   // Individual setters -- all route through setSc
   const setProperty = useCallback((id, patch) => setSc(s => ({
@@ -443,6 +481,8 @@ export default function App(){
   const setLoans          = v=>setSc(s=>({...s,loans:typeof v==="function"?v(s.loans||DEFAULT_LOANS_SC):v}));
   const setSettleLifestyleDraw = v=>setSc(s=>({...s,settleLifestyleDraw:v}));
   const setSettleDrawLabel     = v=>setSc(s=>({...s,settleDrawLabel:v}));
+  const setSettleMtgPaydown       = v=>setSc(s=>({...s,settleMtgPaydown:v}));
+  const setSettleMtgPaydownTarget = v=>setSc(s=>({...s,settleMtgPaydownTarget:v}));
   const setMtgPrincipalOn       = v=>setSc(s=>({...s,mtgPrincipalOn:v}));
   const setMtgPrincipalCap      = v=>setSc(s=>({...s,mtgPrincipalCap:v}));
   const setMtgPrincipalUncapped = v=>setSc(s=>({...s,mtgPrincipalUncapped:v}));
@@ -488,6 +528,13 @@ export default function App(){
     const props = sc.properties || freshPropertiesDefaults();
     const totalVal = props.reduce((s,pr)=>s+(pr.hold?.mode==='keep'?pr.value:0), 0);
     const maintRate_=totalVal>0?totalMaint/totalVal:0.005;
+    // v5.1.0: same "one held property, else primary" default the live sidebar
+    // uses (effectiveMtgPaydownTarget above) -- recomputed here off THIS
+    // snapshot's own properties, since a pin/import can differ from live.
+    const heldProps_ = props.filter(pr=>pr.hold?.mode==='keep');
+    const defaultMtgTarget_ = heldProps_.length===1
+      ? heldProps_[0].id
+      : (props.find(pr=>pr.isPrimary)?.id || props[0]?.id || 'sixth');
     const params = makeParams({
       ...sc,
       // v4.4.0: ssAge (stepped toggle) replaced by explicit ssStartYear/Month
@@ -502,6 +549,7 @@ export default function App(){
       ssBrendaStartYear:  sc.ssBrendaStartYear,
       ssBrendaStartMonth: sc.ssBrendaStartMonth,
       diCap:diCap_, maintRate:maintRate_,
+      settleMtgPaydownTarget: sc.settleMtgPaydownTarget || defaultMtgTarget_,
       reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
       coreCpi:sc.cpi/100, healthCpi:sc.healthCpi/100, propCpi:sc.propCpi/100, propInflation:sc.cpi/100+0.007,
       investReturn:sc.investRet/100,
@@ -593,6 +641,7 @@ export default function App(){
     ssBrendaStartYear:  sc.ssBrendaStartYear,
     ssBrendaStartMonth: sc.ssBrendaStartMonth,
     diCap, maintRate,
+    settleMtgPaydownTarget: effectiveMtgPaydownTarget,
     reAppreciation:sc.reApp/100, rentGrowth:sc.rentGr/100, inflation:sc.cpi/100,
     coreCpi:sc.cpi/100, healthCpi:sc.healthCpi/100, propCpi:sc.propCpi/100,
     propInflation:(sc.cpi/100)+0.007,
@@ -604,7 +653,7 @@ export default function App(){
     // the identical note at buildRowsFromSnapshot's equivalent conversion above.
     strPlatformPct:(sc.strPlatformPct??3)/100, strCleanPct:(sc.strCleanPct??4)/100, mgrPct:(sc.mgrPct||0)/100,
     ltrVacancyPct:(sc.ltrVacancyPct??4)/100, mtrCleaningFlat:sc.mtrCleaningFlat??300,
-  }),[sc, diCap, maintRate, defaultsRev]);   // defaultsRev: engines read mutated BASE/DISPO objects
+  }),[sc, diCap, maintRate, effectiveMtgPaydownTarget, defaultsRev]);   // defaultsRev: engines read mutated BASE/DISPO objects
 
   // v5.0.0: single monthly engine is the sole source of truth -- wfData
   // computed first (pure function of liveParams alone, no dependency on
@@ -652,14 +701,17 @@ export default function App(){
     }
     if(Math.abs(settleData.residual - Math.max(0, settleData.totalProceeds - (obligation.amount||0))) > 1)
       console.warn(`[obligation audit] residual ($${Math.round(settleData.residual)}) != max(0, Σ afterTaxNetProceeds - obligation.amount)`);
-    // v4.0.0-B conservation: draw + debt paydown + reserve fill + savings === residual
+    // v4.0.0-B conservation: draw + mortgage paydown + debt paydown + reserve
+    // fill + savings === residual
     // v5.0.0 (B2 fix): wfReserveFill added as its own term -- reserve top-ups
     // and true sweep are no longer conflated into a single wfToSavings figure
     // (the pre-v5 annual engine never modeled the reserve-fill step at all;
     // the single monthly engine always did, correctly).
+    // v5.1.0: wfMtgPaydown added as its own term -- the new mortgage-
+    // principal-paydown pooled-routing stop.
     const rSet = liveRows.find(r=>r.cal===obligation.year);
     if(rSet && settleData.sellers.length>0){
-      const splitSum = (rSet.settleDraw||0)+(rSet.wfDebtPaid||0)+(rSet.wfReserveFill||0)+(rSet.wfToSavings||0);
+      const splitSum = (rSet.settleDraw||0)+(rSet.wfMtgPaydown||0)+(rSet.wfDebtPaid||0)+(rSet.wfReserveFill||0)+(rSet.wfToSavings||0);
       if(Math.abs(splitSum - settleData.residual) > 2)
         console.warn(`[obligation audit] draw+paydown+reserveFill+savings split ($${Math.round(splitSum)}) != residual ($${Math.round(settleData.residual)}) -- conservation violated`);
     }
@@ -1702,7 +1754,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.0.5</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.1.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2190,7 +2242,7 @@ export default function App(){
 
             {/* Cash-Flow Engine: pooled proceeds routing chain + lifestyle draws */}
             {sect("Cash-Flow Engine")}
-            <div style={{fontSize:8,color:dim,marginBottom:8}}>All same-year dispositions feed ONE pool: proceeds → obligation → one-time draw → the dispersement waterfall (HI debt first, then reserves/buffers, then savings).</div>
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>All same-year dispositions feed ONE pool: proceeds → obligation → one-time draw → mortgage principal paydown → the dispersement waterfall (HI debt first, then reserves/buffers, then savings).</div>
             {slider("One-time draw ($, at sale)",settleLifestyleDraw,setSettleLifestyleDraw,0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
             <div style={{marginBottom:8}}>
               <div style={{fontSize:9,color:muted,marginBottom:3}}>Draw label (optional -- lifestyle vs. other use)</div>
@@ -2199,12 +2251,30 @@ export default function App(){
                 style={{width:"100%",background:bg1,border:`1px solid ${bdr}`,borderRadius:4,
                   color:bright,fontFamily:font,fontSize:10,padding:"4px 8px",outline:"none",boxSizing:"border-box"}}/>
             </div>
+            {/* v5.1.0: mortgage-principal paydown -- a lump sum from the same
+                pool, applied after the draw and before the HI-debt cascade.
+                Requested amount isn't clamped by the slider itself (same
+                convention as the draw slider above) -- the engine caps it at
+                what's actually left in the pool that pass, see the routing
+                result readout below for the amount that really applied. */}
+            {slider("Mortgage principal paydown ($, at sale)",settleMtgPaydown,setSettleMtgPaydown,0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:9,color:muted,marginBottom:3}}>Target mortgage</div>
+              <select value={effectiveMtgPaydownTarget} data-testid="settle-mtg-paydown-target"
+                onChange={e=>setSettleMtgPaydownTarget(e.target.value)}
+                style={{width:"100%",background:bg1,border:`1px solid ${bdr}`,borderRadius:4,
+                  color:bright,fontFamily:font,fontSize:10,padding:"4px 8px",outline:"none",boxSizing:"border-box"}}>
+                {heldProperties.length===0 && <option value="">No held property</option>}
+                {heldProperties.map(pr=><option key={pr.id} value={pr.id}>{pr.label}</option>)}
+              </select>
+            </div>
             {(()=>{
               const rSettle = liveRows.find(r=>r.cal===obligation.year) || {};
               const fmtK = v=>"$"+Math.round((v||0)/1000)+"K";
+              const mtgTargetLabel = propById[effectiveMtgPaydownTarget]?.label || '';
               return (
                 <div data-testid="pooled-routing-result" style={{fontSize:9,color:muted,padding:8,background:bg2,borderRadius:4,marginTop:4}}>
-                  proceeds → obligation {fmtK(obligation.amount)} → draw {fmtK(rSettle.settleDraw)}{settleDrawLabel?` (${settleDrawLabel})`:""} → cascade: {fmtK(rSettle.wfDebtPaid)} to HI debt, {fmtK(rSettle.wfReserveFill)} to reserve/buffer caps, {fmtK(rSettle.wfToSavings)} to savings
+                  proceeds → obligation {fmtK(obligation.amount)} → draw {fmtK(rSettle.settleDraw)}{settleDrawLabel?` (${settleDrawLabel})`:""} → mortgage principal {fmtK(rSettle.wfMtgPaydown)}{(rSettle.wfMtgPaydown>0&&mtgTargetLabel)?` (${mtgTargetLabel})`:""} → cascade: {fmtK(rSettle.wfDebtPaid)} to HI debt, {fmtK(rSettle.wfReserveFill)} to reserve/buffer caps, {fmtK(rSettle.wfToSavings)} to savings
                 </div>
               );
             })()}

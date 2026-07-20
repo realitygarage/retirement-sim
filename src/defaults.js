@@ -173,6 +173,10 @@ export const DEFAULTS = {
   obligation: freshObligationDefaults(),
   settleLifestyleDraw:      0,     // pooled-routing (a) one-time draw, $
   settleDrawLabel:         '',     // pooled-routing (a) optional label -- lifestyle vs. other use
+  // v5.1.0: pooled-routing mortgage-principal paydown stop, between the
+  // one-time draw and the HI-debt avalanche cascade -- see buildMonthlyScenario.
+  settleMtgPaydown:         0,     // pooled-routing (b) lump-sum mortgage principal paydown, $
+  settleMtgPaydownTarget:  '',     // target property id (empty = App.jsx computes a default)
   caGainCap:        1_200_000,     // CA $1.2M prior-1031 gain cap (§4.6, unchanged)
   sameYearSaleTaxBump:   50_000,   // +tax if ALL properties sold same calendar year
   sameYearSaleTaxBumpOn:  true,
@@ -249,6 +253,8 @@ export const SC_DEFAULTS = {
   obligation: freshObligationDefaults(),
   settleLifestyleDraw:      0,
   settleDrawLabel:         '',
+  settleMtgPaydown:         0,
+  settleMtgPaydownTarget:  '',
   caGainCap:        1_200_000,
   sameYearSaleTaxBump:   50_000,
   sameYearSaleTaxBumpOn:  true,
