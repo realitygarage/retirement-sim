@@ -1,0 +1,172 @@
+=== SESSION 37 JOURNAL -- v5.3.0 sticky horizontal scrollbar for the
+    Month-by-Month table + a real flex-containment bug it exposed,
+    COMMITTED ===
+
+Date: 2026-07-21
+
+Session goal: single user-directed feature, picked up after session36's
+v5.2.0 commit (Cash Flow table restructure + reqWork monthly resolution).
+Read session36's journal first per the Session Start convention.
+
+--- MOTIVATING QUESTION ---
+
+User asked (exploratory): "how difficult would it be to provide a left/
+right scroll bar control at the bottom of the main screens?" Investigated
+before answering: four `overflowX:"auto"` containers exist in App.jsx
+(two Cash Flow breakdown panels, the relationships-diagram wrapper, and
+the Month-by-Month table), each already scrollable via its own native
+scrollbar -- but that native scrollbar sits at the bottom of whatever div
+it lives in, which can be pushed off-screen if the div is tall or the page
+is scrolled, exactly the annoyance being described. Recommended starting
+with just the Month-by-Month table (the widest, most likely culprit); user
+agreed.
+
+--- FEATURE: STICKYHSCROLL (v5.3.0) ---
+
+Added `StickyHScroll` (App.jsx), a `position:fixed` bar pinned to the
+viewport bottom that mirrors `scrollLeft` bidirectionally with the Month-
+by-Month table's own scroll container (`mbmScrollRef`). Deliberately
+defined at MODULE level (not inside `App()`, unlike `Chart`/
+`WorkCurveEditor`/etc, which already trip the `react-hooks/static-
+components` lint rule) -- a stateful component defined inside a render
+body gets its internal state reset every parent re-render, which would
+have broken visibility tracking constantly.
+
+Visibility logic: `ResizeObserver` on the table container (and its
+`<table>` child, since the container's own box doesn't resize when only
+its *content* grows) plus scroll/resize listeners, all rAF-throttled.
+Shown only when ALL of: (a) the container's `scrollWidth > clientWidth`
+(genuinely overflowing), (b) the container is at least partially in the
+viewport, (c) the container's bottom edge is NOT already on-screen (i.e.
+the real native scrollbar would be redundant). Scroll sync is two `scroll`
+listeners (one on the real table container, one on the floating bar's own
+inner scrollable div) guarded by a `syncingRef` flag to avoid feedback
+loops.
+
+Bug found and fixed mid-implementation: the second `useEffect` that wires
+up the two scroll listeners had `[targetRef]` as its dependency array --
+but `targetRef` never changes identity, so this effect only ever ran ONCE,
+at mount, when `state.visible` was still false and the floating bar's DOM
+node (`barRef.current`) didn't exist yet. Result: the listeners silently
+attached to nothing and never re-attached once the bar actually rendered,
+so dragging/scrolling it did nothing. Fixed by adding `state.visible` to
+the dependency array so the effect re-runs (and finds a real `barRef.
+current`) every time visibility flips. Caught via a manual scroll-event-
+dispatch check (`bar.scrollLeft=400` + dispatch 'scroll', assert the real
+table's `scrollLeft` followed) before it ever reached a Playwright run.
+
+Also brightened the floating bar itself: native scrollbar thumb themed via
+an inline `<style>` block targeting `::-webkit-scrollbar-thumb` (a fixed
+blue, `#60a5fa`) plus `scrollbarColor`/`scrollbarWidth` for Firefox --
+inline styles can't reach the `::-webkit-scrollbar` pseudo-elements, so
+this needed an actual `<style>` tag scoped by the component's own
+`data-testid` selector.
+
+--- BUG FOUND ALONG THE WAY: MISSING minWidth:0 ON THE CASH FLOW GRID ---
+
+While verifying the floating bar with a real browser-driven Playwright
+script (headless Chromium via a scratch `.mjs`, since the claude-in-chrome
+extension wasn't connected this session), discovered the Month-by-Month
+table's `overflowX:"auto"` container never actually constrained its own
+width: `document.documentElement.scrollWidth` exceeded `clientWidth` by
+hundreds of pixels once both breakdown buttons were toggled on -- the
+WHOLE PAGE was growing wider, not the table scrolling inside its card.
+Root cause: the Cash Flow tab's right-hand column
+(`display:"flex",flexDirection:"column"`) is a flex item inside the outer
+`gridTemplateColumns:"240px 1fr"` grid, and flex/grid items default to
+`min-width:auto` -- a wide child (the table, once its intrinsic content
+width exceeds the column's `1fr` share) grows the whole flex item past its
+track instead of being clipped/scrolled by the table's own container. This
+is also WHY the table's native scrollbar was never reachable to begin
+with -- there was no boundary for it to scroll against. Fixed with a
+single `minWidth:0` on that flex column (App.jsx). This was a real,
+independently-shippable fix, not just scaffolding for the scrollbar
+feature -- the table's OWN `overflowX:auto` scrollbar was silently
+inert before this.
+
+--- TESTS (Group X, X1-X3, UI-level via wfData/DOM, not window.__engine) ---
+
+- X1: toggling both Month-by-Month breakdown buttons never widens the
+  whole page (`document.documentElement.scrollWidth ===
+  document.documentElement.clientWidth`) -- the containment regression
+  guard.
+- X2: floating bar visibility across three geometries -- not overflowing
+  (hidden), overflowing + native scrollbar off-screen at a short viewport
+  (visible), overflowing + native scrollbar on-screen at a tall viewport
+  (hidden). First draft of this test assumed scrolling to the very top of
+  the page implied "native scrollbar reachable" -- false at the 700px test
+  viewport (the table's own rect is `{top:578, bottom:998}` even at
+  scroll=0, since there's enough content above it that the table's bottom
+  never fits inside a 700px-tall window regardless of scroll position).
+  Fixed by testing the "reachable -> hidden" case with a genuinely tall
+  viewport (1100px) instead of relying on scroll position at a viewport
+  too short to ever satisfy it -- caught by a real Playwright run, not by
+  the earlier manual scratch-script verification (which happened to only
+  check the "unreachable -> visible" case).
+- X3: bidirectional scroll sync -- setting the floating bar's `scrollLeft`
+  (plus dispatching a real `scroll` event, since programmatic assignment
+  doesn't fire one) moves the real table, and vice versa.
+
+Full suite: 132/132 pass (129 existing + 3 new). Lint: 37 problems,
+byte-identical to the pre-session baseline (verified via a rule-ID-level
+diff, not just the raw total -- an earlier line-number-sensitive message-
+text diff produced false positives from pre-existing issues that had
+merely shifted position). Two real new lint issues WERE caught and fixed
+along the way: an unused `table` var and an unused `r1` var in the first
+draft of the X3 test. Production build clean.
+
+--- SESSION HOUSEKEEPING: PERMISSION/CONFIG FIXES ---
+
+Not app code, but worth recording since it changes how future sessions
+behave. Three fixes to Claude Code's own permission configuration this
+session, at the user's request, after repeated approval prompts for
+patterns that should have already been covered:
+
+1. `.claude/settings.local.json` had a malformed rule `"Bash(node:*)"`
+   (colon) where the actual prefix-wildcard syntax needs a space --
+   `"Bash(node *)"`. The colon variant never matched anything, which is
+   why plain `node script.mjs` verification commands kept prompting even
+   after seemingly being allowlisted.
+2. Extended the existing `PreToolUse`/`Bash` hook (which pre-approved
+   `cd ... &&` compounds) to also auto-allow multi-line/compound scripts
+   where every individual sub-command (split on newlines/`&&`/`;`/`|`)
+   matches an already-established safe-prefix regex list, and added
+   `head`/`tail`/`wc`/`diff`/`find` to both that list and the static
+   allow-list. Per the update-config skill's own documented caveat, hook
+   edits may need a `/hooks` reload or restart to take effect mid-session
+   (the plain allow-list array doesn't have this limitation).
+3. A `git stash`/`git stash pop` round-trip (used to diff lint output
+   before/after this session's changes) collided with the live harness
+   auto-appending its own new approvals to `.claude/settings.local.json`
+   mid-session -- `stash pop` refused with a real conflict on that one
+   file. Resolved by resetting the file to HEAD, popping cleanly, then
+   manually re-merging the harness's newly-approved entries back in by
+   hand. No data was lost, but it's a real hazard worth naming: don't
+   `git stash` a file that a concurrent process (this session's own CLI)
+   might be writing to.
+4. Added a `~/.claude/settings.json` (global, all-projects) permission
+   block for the Claude scratchpad temp tree
+   (`C:/Users/rober/AppData/Local/Temp/claude/**`, Read/Write/Edit) plus
+   `Bash(cat *)`/`Bash(rm -f *)`, since the scratchpad path's session-UUID
+   component meant a project-local rule could never cover future sessions.
+
+--- FINAL STATE ---
+
+Version bumped to v5.3.0 (App.jsx header comment + on-screen badge; E5/L1
+version-string tests updated to match). Committed as two commits (code+
+tests, then this journal), matching session35/36's convention of leaving
+the pre-existing, unrelated deleted `test-results/test-run.txt` and any
+transient `.claude/settings.local.json` drift untouched/separate from the
+app-code commit. Pushed to origin on explicit instruction.
+
+--- OPEN ITEMS CARRIED FORWARD (untouched this session) ---
+
+Same items from session36: the dead diCap_/maintRate_ plumbing, Nolan-loan
+grace-period calendar accuracy, capped reserve-funding display, no saved
+never-sell pin, and the pre-existing "Free Cash Flow -- breakdown" panel's
+gross-rental-without-op-cost gap (BREAKDOWNS.surplus). New: the sticky
+scrollbar is currently wired to ONLY the Month-by-Month table -- the other
+three `overflowX:"auto"` containers (two Cash Flow breakdown panels, the
+Input/Output Map's relationships-diagram wrapper) don't have it yet; user
+scoped this session to the Month-by-Month table first and hasn't asked for
+the others.
