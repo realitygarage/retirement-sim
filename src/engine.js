@@ -1248,6 +1248,14 @@ export function buildMonthlyScenario(p){
     // already above the floor, never competing with "does income cover costs."
     const totalOut = tier1 + sweep + mtgExtraMo;
 
+    // Monthly-resolution required-work-income gap -- same shape as the
+    // annual engine's `passive`/`reqWork` (aggregateMonthlyToAnnual), but
+    // floored at THIS month's own totalOut/passive instead of an annual
+    // average, so a mid-year passive-income jump (e.g. SS starting off-
+    // birth-month) doesn't get smeared across months that don't need it.
+    const passiveMo = pension+yourSsMo+brendaSsMo+(rentalMo-rentalOpCost);
+    const reqWorkMo = Math.max(0, totalOut-passiveMo);
+
     // D4: structured events (label/delta), alongside the existing display
     // strings, at the same points those strings are already emitted -- avoids
     // ever needing to parse the display text back into structured data.
@@ -1317,6 +1325,7 @@ export function buildMonthlyScenario(p){
       oneTimeSweep: Math.round(_oneTimeSweep),
       loansBal: Math.round(_loans.reduce((s,L)=>s+L.bal,0)),
       totalOut: Math.round(totalOut),
+      reqWorkMo: Math.round(reqWorkMo),
       mtgExtra: Math.round(mtgExtraMo),
       mtgBal6:  propMtgBal.sixth||0,
       mtgBal15: propMtgBal.fifteenth||0,
@@ -1378,7 +1387,16 @@ export function aggregateMonthlyToAnnual(wfRows, p){
     // "cost to fold back in" field the way rental/rentalOpCost do).
     const passive = avgMo('pension')+avgMo('yourSs')+avgMo('brendaSs')+avgMo('rental')-avgMo('rentalOpCost');
     const totalOutAvg = avgMo('totalOut');
-    const reqWork = Math.max(0, totalOutAvg-passive);
+    // v5.2.0: was Math.max(0, totalOutAvg-passive) -- an annual-average-then-
+    // floor, which understates the required gap in any year with a mid-year
+    // passive-income jump (e.g. SS starting off Bob's Oct birth month): a
+    // month needing work income before the jump could be averaged away by
+    // months that don't need it after. reqWorkMo (buildMonthlyScenario) does
+    // the SAME totalOut-minus-passive subtraction but floors it EACH MONTH
+    // first, so this is now that per-month floor averaged up, not the other
+    // way around -- the two views (monthly table, annual chart) agree by
+    // construction instead of coincidentally.
+    const reqWork = avgMo('reqWorkMo');
 
     // Stocks: first-of-period snapshot (pre-decrement, matching v4.3.0 convention)
     const hiDebtRaw = (first.ccBalRaw||0)+(first.sophiaBalRaw||0)+(first.nolanBalRaw||0);

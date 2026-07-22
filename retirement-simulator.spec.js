@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.1.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.2.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.1.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.1.0');
+    await expect(page.locator('text=v5.2.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.2.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.1.0', async ({ page }) => {
+  test('L1 — Version header shows v5.2.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.1.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.1.0 confirmed');
+    await expect(page.locator('text=v5.2.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.2.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1946,6 +1946,131 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     expect(result.recastOngoingOnly).toBeLessThan(result.recastNeither);
     expect(result.recastBoth).toBeLessThan(result.recastLumpOnly);
     expect(result.recastBoth).toBeLessThan(result.recastOngoingOnly);
+  });
+
+  test('R25 — v5.2.0: rental-op-cost reclassification (Total In/Costs) does NOT touch the internal tier1 the waterfall runs on', async ({ page }) => {
+    await loadApp(page);
+    // Task A moved rentalOpCost from "netted inside Total In" to "its own
+    // Costs line" on the DISPLAY side only -- the internal `tier1`/`totalInc`
+    // fields that actually drive `available`/`disc` (Free Cash) must stay
+    // byte-identical to their pre-v5.2.0 formulas. Proven here by
+    // reconstructing tier1 from its known fixed-cost components (excluding
+    // rentalOpCost) and confirming it matches the engine's own tier1 exactly
+    // -- if tier1 had absorbed rentalOpCost, this would be off by fc_rentalOp.
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const rows = buildMonthlyScenario(makeParams({}));
+      // 15th St's STR unit is active from launch (see A5/A6) -- first row
+      // with real rental op cost.
+      const r = rows.find(x => (x.fc_rentalOp || 0) > 0);
+      const reconstructed = r.fc_mtg + r.fc_health + r.fc_core + r.fc_famLoan + r.fc_hiMins + r.fc_propCost + r.fc_tax + r.maintRes + r.fc_irmaa;
+      return { tier1: r.tier1, reconstructed, fc_rentalOp: r.fc_rentalOp, cal: r.cal };
+    });
+    console.log('  R25 — ' + JSON.stringify(result));
+    expect(result.fc_rentalOp).toBeGreaterThan(0);
+    expect(Math.abs(result.tier1 - result.reconstructed)).toBeLessThanOrEqual(2);
+    // Confirms tier1 does NOT also include rentalOpCost (would be off by
+    // ~fc_rentalOp if the reclassification had leaked into the internal value).
+    expect(Math.abs(result.tier1 - (result.reconstructed + result.fc_rentalOp))).toBeGreaterThan(result.fc_rentalOp - 2);
+  });
+
+  test('R26 — v5.2.0: Month-by-Month "Total In" (gross inflow columns) sums exactly, and equals net totalInc + rentalOpCost', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const rows = buildMonthlyScenario(makeParams({}));
+      const r = rows.find(x => (x.fc_rentalOp || 0) > 0);
+      const totalInGross = r.pension + r.yourSs + r.brendaSs + r.rental + r.workIncome + r.drawInc;
+      return { totalInGross, totalInc: r.totalInc, rentalOpCost: r.rentalOpCost, cal: r.cal };
+    });
+    console.log('  R26 — ' + JSON.stringify(result));
+    // The breakdown columns (Pension+SS+Rental-gross+Work+Draw) sum to the
+    // displayed Total In by construction (same JSX expression) -- this
+    // confirms that figure is also the net engine totalInc plus the op cost
+    // that moved sides, i.e. genuinely "gross inflow," not a display-only
+    // number disconnected from the engine.
+    expect(Math.abs(result.totalInGross - (result.totalInc + result.rentalOpCost))).toBeLessThanOrEqual(2);
+  });
+
+  test('R27 — v5.2.0: Month-by-Month "Costs" breakdown (fixed items + op cost) sums exactly, and equals tier1 + rentalOpCost', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const rows = buildMonthlyScenario(makeParams({}));
+      const r = rows.find(x => (x.fc_rentalOp || 0) > 0);
+      const costsTotal = r.fc_mtg + r.fc_propCost + r.fc_health + r.fc_core + r.fc_famLoan + r.fc_hiMins + r.maintRes + r.fc_irmaa + r.fc_rentalOp + r.fc_tax;
+      return { costsTotal, tier1: r.tier1, rentalOpCost: r.rentalOpCost, cal: r.cal };
+    });
+    console.log('  R27 — ' + JSON.stringify(result));
+    expect(Math.abs(result.costsTotal - (result.tier1 + result.rentalOpCost))).toBeLessThanOrEqual(2);
+  });
+
+  test('R28 — v5.2.0: monthly reqWorkMo, averaged over a calendar year, equals the annual reqWork the chart uses (consistency guard)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const params = makeParams({});
+      const monthly = buildMonthlyScenario(params);
+      const annual = aggregateMonthlyToAnnual(monthly, params);
+      // Pick a year with a mid-year passive-income jump if one exists in the
+      // default scenario (SS starts off Bob's Oct birth month, not Jan 1) --
+      // exactly the case an annual-average-then-floor formula used to get
+      // wrong; otherwise just use the first full calendar year.
+      const years = [...new Set(monthly.map(r => r.calYear))];
+      const out = years.map(cal => {
+        const yrRows = monthly.filter(r => r.calYear === cal);
+        const avgMonthly = yrRows.reduce((s, r) => s + r.reqWorkMo, 0) / yrRows.length;
+        const annualRow = annual.find(r => r.cal === cal);
+        return { cal, avgMonthly: Math.round(avgMonthly), annualReqWork: annualRow.reqWork };
+      });
+      return out;
+    });
+    console.log('  R28 — ' + JSON.stringify(result));
+    for (const y of result) {
+      expect(Math.abs(y.avgMonthly - y.annualReqWork)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test('R29 — v5.2.0: Work-shortfall condition (Work < Work Req\'d) is well-defined and fires in at least one month, not in a covered month', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const rows = buildMonthlyScenario(makeParams({}));
+      const shortfallRow = rows.find(r => r.workIncome < r.reqWorkMo);
+      const coveredRow = rows.find(r => r.reqWorkMo === 0);
+      return {
+        hasShortfall: !!shortfallRow,
+        shortfallExample: shortfallRow ? { cal: shortfallRow.cal, workIncome: shortfallRow.workIncome, reqWorkMo: shortfallRow.reqWorkMo } : null,
+        coveredIsNotShortfall: coveredRow ? coveredRow.workIncome >= coveredRow.reqWorkMo : null,
+      };
+    });
+    console.log('  R29 — ' + JSON.stringify(result));
+    expect(result.hasShortfall).toBe(true);
+    if (result.coveredIsNotShortfall !== null) expect(result.coveredIsNotShortfall).toBe(true);
+  });
+
+  test('R30 — v5.2.0: Month-by-Month table UI -- renamed headers, toggle buttons, and new Work Req\'d column all render', async ({ page }) => {
+    await loadApp(page);
+    await clickTab(page, 'Cash Flow');
+    await page.waitForSelector('text=Month-by-Month Cash Flow');
+    await expect(page.locator('th').filter({ hasText: 'Rental (gross)' })).toBeVisible();
+    await expect(page.locator('th').filter({ hasText: /^Work Req'd$/ })).toBeVisible();
+    await expect(page.locator('th').filter({ hasText: /^Costs$/ })).toBeVisible();
+    await expect(page.locator('th').filter({ hasText: /^Total In$/ })).toBeVisible();
+    // Costs breakdown toggle reveals the itemized cost columns, including the
+    // new Op Cost line.
+    await page.getByTestId('mbm-breakdown-toggle').click();
+    await page.waitForTimeout(200);
+    await expect(page.locator('th').filter({ hasText: /^Op Cost$/ })).toBeVisible();
+    // Total In breakdown toggle must genuinely add columns, not silently no-op
+    // (regression guard: "SS" used to only ever appear once, since the sole
+    // conditional breakdown column -- Draw -- is invisible unless the
+    // scenario schedules a lifestyle draw, which the default doesn't).
+    const ssBefore = await page.locator('th').filter({ hasText: /^SS$/ }).count();
+    await page.getByTestId('mbm-inc-breakdown-toggle').click();
+    await page.waitForTimeout(200);
+    const ssAfter = await page.locator('th').filter({ hasText: /^SS$/ }).count();
+    expect(ssAfter).toBeGreaterThan(ssBefore);
   });
 
 });

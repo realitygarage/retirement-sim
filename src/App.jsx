@@ -1,3 +1,16 @@
+// v5.2.0 -- Month-by-Month Cash Flow table restructure: rental operating
+// cost moves from netting-inside-"Total In" to its own "Costs" line item
+// (Total In and Costs each rise by the op-cost amount; Free Cash unchanged,
+// pure reclassification). "Rental"->"Rental (gross)", "Fixed"->"Costs", its
+// breakdown button relabeled "costs breakdown" (now itemizes Maint/IRMAA/Op
+// Cost too, so it sums exactly to Costs). New "total in breakdown" button
+// (Pension/SS/Rental-gross/Work/Draw). New monthly-resolution reqWorkMo
+// (buildMonthlyScenario) drives a new "Work Req'd" column with a shortfall
+// highlight when Work < Work Req'd; annual reqWork (aggregateMonthlyToAnnual)
+// now derives from averaging reqWorkMo instead of its own annual-average-
+// then-floor formula, so the monthly table and the "Work Income Required"
+// chart agree by construction. Also: that chart now shows annual (not
+// biennial) x-axis ticks and breakdown-table columns.
 // v5.1.0 -- mortgage-principal paydown as a new pooled-routing destination.
 // The one-time sale-proceeds pool now has an explicit stop between the
 // one-time draw and the HI-debt cascade: proceeds -> obligation -> draw ->
@@ -599,7 +612,8 @@ export default function App(){
   const defaultPropValueById = useMemo(()=>Object.fromEntries(freshPropertiesDefaults().map(p=>[p.id,p.value])),[]);
   // CF waterfall state now in sc object (see setSc setters above)
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
-  const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Fixed-cost columns in month table
+  const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Costs columns in month table
+  const [mbmIncBreakdown, setMbmIncBreakdown] = useState(false);  // v5.2.0 Total In columns in month table
   const [nextId,  setNextId]  = useState(()=>{
     try{ const s=localStorage.getItem('retirement_sim_nextid'); return s?parseInt(s):1; }catch(e){return 1;}
   });
@@ -976,6 +990,9 @@ export default function App(){
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
     return Math.ceil(raw/mag)*mag;
   },[liveRows]);
+  // Only render the Month-by-Month table's "Draw" breakdown column when at
+  // least one scheduled lifestyle draw actually fires -- $0 by default.
+  const anyDrawInc = useMemo(()=>wfData.some(r=>(r.drawInc||0)>0),[wfData]);
 
   // -- Pin actions ------------------------------------------
   // Capture all raw state needed to reconstruct this scenario
@@ -1352,7 +1369,7 @@ export default function App(){
     },
   };
 
-  const Chart=({title,dataKey,pinKey,color,unit,refLines,yFmt,chartId,yDomain,mainName,secondaryDataKey,secondaryColor,secondaryName,pinSecondaryKey,tertiaryDataKey,tertiaryColor,tertiaryName,quaternaryDataKey,quaternaryColor,quaternaryName,headerExtra})=>{
+  const Chart=({title,dataKey,pinKey,color,unit,refLines,yFmt,chartId,yDomain,mainName,secondaryDataKey,secondaryColor,secondaryName,pinSecondaryKey,tertiaryDataKey,tertiaryColor,tertiaryName,quaternaryDataKey,quaternaryColor,quaternaryName,headerExtra,annualTicks})=>{
     const isExpanded = expandedChart===chartId;
     const bd = BREAKDOWNS[chartId];
     const fmt = yFmt||(v=>v>=1000?`${(v/1000).toFixed(0)}K`:v);
@@ -1364,7 +1381,9 @@ export default function App(){
     // reqWork/surplus/debt keys actually live. (v3.4.0 fix: fixedCosts read
     // liveRows and rendered $0 for every fc_* cell.)
     const bdSource = (chartId==='nw' || chartId==='fixedCosts') ? chartData : liveRows;
-    const bdRows = bdSource.filter((_,i)=>i%2===0||i===bdSource.length-1); // every other year
+    // annualTicks charts (e.g. Work Income Required) show every year; others
+    // sample every other year to keep the breakdown table from getting too wide.
+    const bdRows = annualTicks ? bdSource : bdSource.filter((_,i)=>i%2===0||i===bdSource.length-1);
     return (
       <div style={{background:bg1,border:`1px solid ${isExpanded?color:bdr}`,borderRadius:10,
         padding:"14px 10px 8px", gridColumn: isExpanded?"1 / -1":"auto",
@@ -1418,7 +1437,7 @@ export default function App(){
         <ResponsiveContainer width="100%" height={175}>
           <LineChart data={chartData} margin={{top:4,right:12,left:0,bottom:0}}>
             <CartesianGrid {...gdP}/>
-            <XAxis dataKey="year" {...axP} tickFormatter={y=>`'${String(y).slice(2)}`}/>
+            <XAxis dataKey="year" {...axP} tickFormatter={y=>`'${String(y).slice(2)}`} interval={annualTicks?0:undefined}/>
             <YAxis {...axP} tickFormatter={fmt} width={42} domain={axisDomain} allowDecimals={false}/>
             <Tooltip {...ttP} formatter={(v,name)=>{
               const fmtV = yFmt?yFmt(v):(unit||"$")+Math.round(v).toLocaleString();
@@ -1754,7 +1773,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.1.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.2.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2500,7 +2519,7 @@ export default function App(){
           {/* Charts 2x2 -- grid supports full-width expansion */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,alignItems:"start"}}>
             <Chart title="Total Work Income Required / mo" dataKey="reqWork" pinKey="rw" color={amber} chartId="reqWork"
-              yDomain={[0, reqWorkMax]}
+              yDomain={[0, reqWorkMax]} annualTicks={true}
               refLines={[
                 {y:0,stroke:green,strokeDasharray:"3 3",label:{value:"Work-free",fill:green,fontSize:8,position:"insideTopLeft"}},
                 ...(yourSsAge<67?[{y:Math.round(24480/12),stroke:amber,strokeOpacity:0.4,strokeDasharray:"4 2",label:{value:"SS earnings cap",fill:amber,fontSize:7,position:"insideTopRight"}}]:[]),
@@ -3433,11 +3452,18 @@ export default function App(){
                 <div style={{fontSize:11,color:muted,fontWeight:"bold"}}>
                   Month-by-Month Cash Flow
                 </div>
-                <button data-testid="mbm-breakdown-toggle" onClick={()=>setMbmBreakdown(v=>!v)} style={{
-                  background:mbmBreakdown?red+"22":"transparent",border:`1px solid ${mbmBreakdown?red:bdr}`,
-                  borderRadius:4,color:mbmBreakdown?red:dim,cursor:"pointer",
-                  fontSize:9,padding:"2px 8px",fontFamily:font,
-                }}>{mbmBreakdown?"collapse fixed":"fixed breakdown"}</button>
+                <div style={{display:"flex",gap:6}}>
+                  <button data-testid="mbm-inc-breakdown-toggle" onClick={()=>setMbmIncBreakdown(v=>!v)} style={{
+                    background:mbmIncBreakdown?green+"22":"transparent",border:`1px solid ${mbmIncBreakdown?green:bdr}`,
+                    borderRadius:4,color:mbmIncBreakdown?green:dim,cursor:"pointer",
+                    fontSize:9,padding:"2px 8px",fontFamily:font,
+                  }}>{mbmIncBreakdown?"collapse total in":"total in breakdown"}</button>
+                  <button data-testid="mbm-breakdown-toggle" onClick={()=>setMbmBreakdown(v=>!v)} style={{
+                    background:mbmBreakdown?red+"22":"transparent",border:`1px solid ${mbmBreakdown?red:bdr}`,
+                    borderRadius:4,color:mbmBreakdown?red:dim,cursor:"pointer",
+                    fontSize:9,padding:"2px 8px",fontFamily:font,
+                  }}>{mbmBreakdown?"collapse costs":"costs breakdown"}</button>
+                </div>
               </div>
               <div style={{overflowX:"auto",maxHeight:420,overflowY:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:9}}>
@@ -3446,15 +3472,23 @@ export default function App(){
                       <th style={{textAlign:"left",padding:"6px 8px",color:dim,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Month</th>
                       <th style={{textAlign:"right",padding:"6px 8px",color:green,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Pension</th>
                       <th style={{textAlign:"right",padding:"6px 8px",color:green,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>SS</th>
-                      <th style={{textAlign:"right",padding:"6px 8px",color:green,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Rental</th>
+                      <th style={{textAlign:"right",padding:"6px 8px",color:green,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Rental (gross)</th>
                       <th style={{textAlign:"right",padding:"6px 8px",color:amber,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Work</th>
+                      <th style={{textAlign:"right",padding:"6px 8px",color:amber,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Work Req'd</th>
+                      {mbmIncBreakdown&&[
+                        ["Pension","pension"],["SS","ss"],["Rental (gross)","rental"],["Work","workIncome"],
+                        ...(anyDrawInc?[["Draw","drawInc"]]:[]),
+                      ].map(([l])=>(
+                        <th key={l} style={{textAlign:"right",padding:"6px 6px",color:"#6ee7b7",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap",fontStyle:"italic"}}>{l}</th>
+                      ))}
                       <th style={{textAlign:"right",padding:"6px 6px",color:green,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap",borderLeft:`1px solid ${bdr}`}}>Total In</th>
-                      <th style={{textAlign:"right",padding:"6px 8px",color:red,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Fixed</th>
+                      <th style={{textAlign:"right",padding:"6px 8px",color:red,fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Costs</th>
                       {mbmBreakdown&&[
                         ["Mtg","fc_mtg"],["Prop T/I","fc_propCost"],["Health","fc_health"],["Core","fc_core"],
-                        ["Loans","fc_famLoan"],["HI Mins","fc_hiMins"],["Tax","fc_tax"],
+                        ["Loans","fc_famLoan"],["HI Mins","fc_hiMins"],["Maint","maintRes"],["IRMAA","fc_irmaa"],
+                        ["Op Cost","fc_rentalOp"],["Tax","fc_tax"],
                       ].map(([l])=>(
-                        <th key={l} style={{textAlign:"right",padding:"6px 6px",color:"#f87171aa",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap",fontStyle:"italic"}}>{l}</th>
+                        <th key={l} style={{textAlign:"right",padding:"6px 6px",color:"#fca5a5",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap",fontStyle:"italic"}}>{l}</th>
                       ))}
                       <th style={{textAlign:"right",padding:"6px 8px",color:"#fb923c",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Maint Res</th>
                       <th style={{textAlign:"right",padding:"6px 8px",color:"#fbbf24",fontWeight:"bold",fontSize:8,whiteSpace:"nowrap"}}>Rainy Day</th>
@@ -3469,17 +3503,36 @@ export default function App(){
                   <tbody>
                     {wfData.slice(0,wfMonths).map((r,i)=>{
                       const hasEvent = r.events.length>0;
+                      // v5.2.0: rentalOpCost moved from netting-inside-Total-In to a
+                      // Costs-side line item. Both totals are summed here from the
+                      // SAME already-rounded fields the breakdown panels display
+                      // (not read off r.totalInc/r.tier1 as separately-rounded engine
+                      // values) so "breakdown sums to total" holds exactly, not just
+                      // to the nearest rounding unit. Free Cash (r.disc) is untouched,
+                      // still read straight off the engine's own field.
+                      const totalInGross = r.pension+r.yourSs+r.brendaSs+r.rental+r.workIncome+r.drawInc;
+                      const costsTotal = r.fc_mtg+r.fc_propCost+r.fc_health+r.fc_core+r.fc_famLoan+r.fc_hiMins+r.maintRes+r.fc_irmaa+r.fc_rentalOp+r.fc_tax;
+                      const shortfall = r.workIncome < r.reqWorkMo;
                       return (
                         <tr key={i} style={{borderBottom:`1px solid ${bdr}22`,background:hasEvent?blue+"0a":"transparent"}}>
                           <td style={{padding:"5px 8px",color:hasEvent?blue:muted,fontFamily:mono,whiteSpace:"nowrap",fontWeight:hasEvent?"bold":"normal"}}>{r.cal}</td>
                             <td style={{padding:"5px 8px",color:dim,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>${r.pension.toLocaleString()}</td>
                             <td style={{padding:"5px 8px",color:(r.yourSs+r.brendaSs)>0?green:dim,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>{(r.yourSs+r.brendaSs)>0?"$"+(r.yourSs+r.brendaSs).toLocaleString():"-"}</td>
                             <td style={{padding:"5px 8px",color:green,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>${r.rental.toLocaleString()}</td>
-                            <td style={{padding:"5px 8px",color:r.workIncome>0?amber:dim,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>{r.workIncome>0?"$"+r.workIncome.toLocaleString():"-"}</td>
-                            <td style={{padding:"5px 6px",color:green,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontWeight:"bold",borderLeft:`1px solid ${bdr}`}}>${r.totalInc.toLocaleString()}</td>
-                          <td style={{padding:"5px 8px",color:red,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>-${r.tier1.toLocaleString()}</td>
-                          {mbmBreakdown&&["fc_mtg","fc_propCost","fc_health","fc_core","fc_famLoan","fc_hiMins","fc_tax"].map(k=>(
-                            <td key={k} style={{padding:"5px 6px",color:"#f8717199",fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontSize:8}}>
+                            <td style={{padding:"5px 8px",color:shortfall?red:(r.workIncome>0?amber:dim),fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontWeight:shortfall?"bold":"normal"}}>{r.workIncome>0?"$"+r.workIncome.toLocaleString():"-"}</td>
+                            <td data-testid={shortfall?"work-shortfall":undefined} style={{padding:"5px 8px",color:shortfall?red:dim,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontWeight:shortfall?"bold":"normal"}}>{r.reqWorkMo>0?"$"+r.reqWorkMo.toLocaleString():"-"}</td>
+                          {mbmIncBreakdown&&["pension","ss","rental","workIncome",...(anyDrawInc?["drawInc"]:[])].map(k=>{
+                            const v = k==="ss" ? (r.yourSs+r.brendaSs) : r[k];
+                            return (
+                              <td key={k} style={{padding:"5px 6px",color:"#6ee7b7",fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontSize:8}}>
+                                {v>0?"$"+v.toLocaleString():"—"}
+                              </td>
+                            );
+                          })}
+                            <td style={{padding:"5px 6px",color:green,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontWeight:"bold",borderLeft:`1px solid ${bdr}`}}>${totalInGross.toLocaleString()}</td>
+                          <td style={{padding:"5px 8px",color:red,fontFamily:mono,textAlign:"right",whiteSpace:"nowrap"}}>-${costsTotal.toLocaleString()}</td>
+                          {mbmBreakdown&&["fc_mtg","fc_propCost","fc_health","fc_core","fc_famLoan","fc_hiMins","maintRes","fc_irmaa","fc_rentalOp","fc_tax"].map(k=>(
+                            <td key={k} style={{padding:"5px 6px",color:"#fca5a5",fontFamily:mono,textAlign:"right",whiteSpace:"nowrap",fontSize:8}}>
                               {(r[k]||0)>0?"-$"+(r[k]||0).toLocaleString():"—"}
                             </td>
                           ))}
