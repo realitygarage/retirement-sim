@@ -1,3 +1,13 @@
+// v5.4.0 -- Bugfix: the disposition breakdown's "Selling costs" line always
+// labeled itself with the GLOBAL DISPO_DEFAULTS.sellingCostsPct (6%), even for
+// properties with a per-property override (6th St's hold.sellingCostsPct is
+// 5%, per the agent's net sheet) -- the MATH already used the override
+// correctly, only the displayed label was wrong (showed "6%" next to a number
+// actually computed at 5%). Fixed by having disposeAsset (engine.js) return
+// the actual sellingCostsPct it applied, and reading that (d.sellingCostsPct)
+// in the label instead of re-deriving/assuming the global default -- the
+// label can't disagree with the math again, for any property, regardless of
+// future per-property overrides.
 // v5.3.0 -- Sticky floating horizontal scrollbar for the Month-by-Month Cash
 // Flow table (StickyHScroll, module-level component): pinned to the
 // viewport bottom, mirrors scrollLeft bidirectionally with the table's own
@@ -1318,7 +1328,12 @@ export default function App(){
     return (
       <div data-testid={`dispo-breakdown-${prop.id}`} style={{marginTop:8,paddingTop:8,borderTop:`1px dashed ${bdr}`,fontSize:9}}>
         {dispoRow("Sale price (entered)", d.grossPrice)}
-        {dispoRow(`Selling costs (${dispoPct(DISPO_DEFAULTS.sellingCostsPct)})`, d.sellingCosts, "sub")}
+        {/* v5.4.0 fix: was always DISPO_DEFAULTS.sellingCostsPct (the global
+            6% default) regardless of a per-property override -- wrong label
+            for 6th St, whose actual computation uses hold.sellingCostsPct
+            (5%). d.sellingCostsPct is the ACTUAL rate disposeAsset applied
+            (engine.js), so the label can never disagree with the math again. */}
+        {dispoRow(`Selling costs (${dispoPct(d.sellingCostsPct)})`, d.sellingCosts, "sub")}
         {dispoRow("Net sale", d.netSale, "eq")}
         {dispoRow("Mortgage payoff", d.mortgagePayoff, "sub")}
         {dispoRow("Pre-tax proceeds", preTaxProceeds, "eq")}
@@ -1867,7 +1882,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.3.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.4.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>

@@ -556,7 +556,7 @@ export function disposeAsset(prop, mode, opts = {}) {
   const realizedGain = Math.max(0, gainBasisPrice - (prop.basis || 0));
 
   const r = {
-    mode, grossPrice, sellingCosts, netSale, mortgagePayoff, realizedGain,
+    mode, grossPrice, sellingCosts, sellingCostsPct, netSale, mortgagePayoff, realizedGain,
     recognizedGain: 0, deferredGain: 0, cashBoot: 0,
     recaptureTax: 0, fedCapGainsTax: 0, caClawbackTax: 0,
     coTax: 0, otherStateCredit: 0, totalTax: 0,
