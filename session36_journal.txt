@@ -1,0 +1,151 @@
+=== SESSION 36 JOURNAL -- v5.2.0 Work Income Required chart annual
+    resolution + Month-by-Month Cash Flow table restructure, COMMITTED ===
+
+Date: 2026-07-21
+
+Session goal: two independent user-directed items, picked up after
+session35's v5.1.0 commit (mortgage-principal paydown as a pooled-routing
+destination). Read session35's journal first per the Session Start
+convention.
+
+--- ITEM 1: "TOTAL WORK INCOME REQUIRED / MO" CHART -- ANNUAL RESOLUTION ---
+
+Display-density-only fix, no engine change. The chart's `chartData` already
+carries one point per calendar year (`liveRows` is one row per year from
+`aggregateMonthlyToAnnual`) -- the "every 2 years" look was Recharts' own
+XAxis default (`interval:'preserveEnd'`, confirmed by reading
+`node_modules/recharts/.../axisSelectors.js`), which auto-skips ticks under
+`minTickGap` collision pressure, not a data-sampling gap.
+
+Added an `annualTicks` prop to the shared `Chart` component (App.jsx):
+when true, `<XAxis interval={0}>` forces every year's tick, and the
+breakdown-table row filter (`bdRows`, previously a hardcoded "every other
+year" `i%2===0` sample used by every chart's breakdown panel) skips that
+sampling and shows every row instead. Scoped to just the reqWork chart
+(`annualTicks={true}` passed only at that one `<Chart>` call site) --
+every other chart (FCF, Debt Balances, Net Worth, Fixed Costs) keeps its
+existing biennial breakdown-table sampling, since only this one chart was
+in scope.
+
+--- ITEM 2: MONTH-BY-MONTH CASH FLOW TABLE RESTRUCTURE + WORK REQ'D COLUMN ---
+
+Started as a narrower ask ("diagnose whether Work/Total In reflect actual
+vs required work income, then add a Total In breakdown button"). Diagnosis:
+Work column (`r.workIncome`) is genuinely actual/planned income from the
+work curve, never `reqWork` -- correct as-is. But diagnosis surfaced a real
+issue: Total In (`totalInc`) already NETS rental operating cost out of
+income (`totalInc = ...+wkInc-rentalOpCost+...`), which a same-scoped
+breakdown button couldn't itemize honestly (Pension+SS+Rental-gross+Work
+doesn't sum to a Total In that's already down by rentalOpCost). The user
+expanded the ask into a full restructure rather than paper over it.
+
+A. RENTAL OP COST: INCOME-SIDE NETTING -> COST-SIDE LINE ITEM.
+   Deliberately a DISPLAY-ONLY reclassification -- did not touch
+   `buildMonthlyScenario`'s internal `totalInc`/`tier1`/`available`/
+   `totalOut` formulas at all, so Free Cash (`disc`) is provably unchanged
+   (R25 reconstructs `tier1` from its known fixed-cost components and
+   confirms rentalOpCost is NOT in it). In the Month-by-Month table
+   (App.jsx) only:
+   - "Rental" -> "Rental (gross)" (no value change).
+   - "Total In" cell and its breakdown total are now summed from the SAME
+     already-rounded display fields (`pension+yourSs+brendaSs+rental+
+     workIncome+drawInc`), not read off the engine's separately-rounded
+     `r.totalInc` -- guarantees "breakdown sums to total" exactly, not
+     just to the nearest rounding unit (R26).
+   - "Fixed" -> "Costs"; "fixed breakdown" button -> "costs breakdown",
+     which now ALSO itemizes Maint and IRMAA (previously silently missing
+     from that breakdown even before this session -- tier1 has 9 terms,
+     the old breakdown only listed 7) plus the new Op Cost line, so the
+     10 itemized columns sum exactly to the displayed Costs total (R27).
+   - New "total in breakdown" button, itemizing Pension/SS/Rental-gross/
+     Work/Draw. First pass (see below) reused the always-visible leading
+     columns and skipped adding new ones when nothing to show -- wrong,
+     fixed in the follow-up round.
+
+B. MONTHLY-RESOLUTION REQUIRED WORK INCOME + SHORTFALL HIGHLIGHT.
+   `reqWork` (required work income) previously existed ONLY in the annual
+   aggregation (`aggregateMonthlyToAnnual`), as `max(0, totalOutAvg-passive)`
+   -- an annual-AVERAGE-then-floor. Added `reqWorkMo` to the monthly engine
+   (`buildMonthlyScenario`): the same totalOut-minus-passive subtraction,
+   but floored EACH MONTH first. These aren't interchangeable in general --
+   averaging before flooring understates the gap in any year with a
+   mid-year passive-income jump (Bob's SS starts in his Oct birth month,
+   not Jan 1 -- exactly this case). Rather than ship two formulas that only
+   coincidentally agree most years, redefined the annual `reqWork` to
+   derive FROM `reqWorkMo` (`avgMo('reqWorkMo')`) instead of its own
+   separate formula -- the monthly table and the "Work Income Required"
+   chart now agree by construction (R28), not by coincidence. New "Work
+   Req'd" column next to "Work"; red/bold shortfall highlight (+
+   `data-testid="work-shortfall"`) when Work < Work Req'd (R29).
+
+--- UI BUG FOUND IN REVIEW, FIXED SAME SESSION ---
+
+User caught two problems after the first pass:
+1. "total in breakdown" button visibly did nothing. Root cause: the first
+   implementation assumed Pension/SS/Rental/Work "already exist in the
+   table" (true) so only added a conditional Draw column -- but Draw is
+   gated on `anyDrawInc` (any month's `drawInc>0`), and this household's
+   default scenario has zero scheduled lifestyle draws, so the ONE
+   conditional column never appeared. Fixed by making the breakdown
+   genuinely itemize Pension/SS/Rental(gross)/Work as new columns
+   (duplicating the always-visible leading columns, same precedent as
+   "Maint" appearing both standalone as "Maint Res" and inside the Costs
+   breakdown) plus Draw only when used -- toggling now always visibly adds
+   columns.
+2. Costs breakdown text was illegible (screenshot: `#f8717199`/`#34d39999`,
+   i.e. the same red/green at 60% alpha, washed out against the `#0d1117`
+   table background). Brightened both breakdown panels to fully-opaque
+   light shades -- `#fca5a5` (Costs) and `#6ee7b7` (Total In) -- clearly
+   readable while still visually distinct (italic, smaller) from the bold
+   main-row totals.
+
+R30 was rewritten to actually guard against the reported bug instead of
+just clicking the button with no assertion: counts `<th>` elements matching
+"SS" before/after toggling `mbm-inc-breakdown-toggle` and asserts the count
+increases (previously a no-op button would have passed the old version of
+this test, since it only checked the button was clickable).
+
+--- TESTS (R25-R30, Group R, engine-level via window.__engine + one UI test) ---
+
+- R25: reconstructs tier1 from its 9 known fixed-cost components (excluding
+  rentalOpCost) and confirms it matches the engine's own tier1 within $2 --
+  proves the Task-A reclassification never leaked into the internal value
+  Free Cash is computed from.
+- R26: Total In breakdown sum (Pension+SS+Rental-gross+Work+Draw) equals
+  net totalInc+rentalOpCost within $2.
+- R27: Costs breakdown sum (7 old items + Maint + IRMAA + Op Cost) equals
+  tier1+rentalOpCost within $2.
+- R28: for every year in the default 20yr scenario, `avg(reqWorkMo)` over
+  that year's months equals the annual `reqWork` field within $1 --
+  confirms agreement is exact, not coincidental, across the whole horizon
+  (not just spot-checked).
+- R29: a shortfall month exists (Work < Work Req'd) and a covered month
+  (Work Req'd===0) is never flagged as shortfall.
+- R30: renamed headers ("Rental (gross)", "Work Req'd", "Costs", "Total In")
+  render; both toggle buttons reveal their respective itemized columns,
+  with an explicit before/after count assertion on the Total In toggle
+  (the regression this session's own bug would have escaped otherwise).
+
+Full suite: 129/129 pass (123 existing + 6 new). Lint clean (37
+pre-existing problems, unchanged before/after -- confirmed via `git stash`
+comparison, none introduced). Production build clean.
+
+--- FINAL STATE ---
+
+Version bumped to v5.2.0 (App.jsx header comment + on-screen badge; E5/L1
+version-string tests updated to match). Committed as two commits (code+
+tests, then this journal) -- App.jsx, engine.js, retirement-simulator.spec.js
+only, matching session35's convention of leaving the pre-existing, unrelated
+`.claude/settings.local.json` and deleted `test-results/test-run.txt`
+working-tree changes untouched (both already present before this session
+started). Pushed to origin on explicit instruction.
+
+--- OPEN ITEMS CARRIED FORWARD (untouched this session) ---
+
+Same items from session35: the dead diCap_/maintRate_ plumbing, Nolan-loan
+grace-period calendar accuracy, capped reserve-funding display, no saved
+never-sell pin. Also noting (not fixed, out of scope): the pre-existing
+"Free Cash Flow -- breakdown" panel (BREAKDOWNS.surplus, App.jsx) sums a
+GROSS `rental` income item without a matching rentalOpCost cost item --
+the same class of gap this session fixed for the Month-by-Month table's
+Costs breakdown, just in a different, unrequested panel.
