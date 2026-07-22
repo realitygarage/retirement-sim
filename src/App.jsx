@@ -1,3 +1,15 @@
+// v5.3.0 -- Sticky floating horizontal scrollbar for the Month-by-Month Cash
+// Flow table (StickyHScroll, module-level component): pinned to the
+// viewport bottom, mirrors scrollLeft bidirectionally with the table's own
+// overflow-x container, and only renders when the table both overflows AND
+// its native scrollbar has scrolled off-screen. Fixed a real containment
+// bug found along the way: the Cash Flow tab's right-hand column (a flex
+// item) had no minWidth:0, so a flex item defaults to min-width:auto --
+// toggling both Month-by-Month breakdown buttons on made the table wide
+// enough to grow the WHOLE PAGE horizontally instead of scrolling inside
+// its own card, which is also why the table's own scrollbar was never
+// reachable in the first place. New Group X tests (X1-X3) cover the
+// containment fix and the sticky bar's visibility/sync behavior.
 // v5.2.0 -- Month-by-Month Cash Flow table restructure: rental operating
 // cost moves from netting-inside-"Total In" to its own "Costs" line item
 // (Total In and Costs each rise by the op-cost amount; Free Cash unchanged,
@@ -251,7 +263,7 @@
 // every value pulled straight from disposeAsset's return object (or its pre-offset snapshot for
 // the one-time-obligation delta line); rate labels (%) read from DISPO_DEFAULTS, never hardcoded.
 // Dev-mode console.warn guards the arithmetic chain against drifting from the engine's own fields.
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   LineChart, Line, AreaChart, Area, ComposedChart, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -365,6 +377,87 @@ const DEFAULTS_REGISTRY = [
   ]},
 ];
 const pathGet = (obj, path)=>path.split('.').reduce((o,k)=>(o==null?undefined:o[k]), obj);
+
+// A floating horizontal scrollbar pinned to the viewport bottom, for a wide
+// table whose own native scrollbar (bottom edge of its overflow-x container)
+// has scrolled off-screen. Mirrors scrollLeft with `targetRef`'s container
+// both ways; only rendered while that container overflows AND is in view
+// AND its own bottom edge isn't already reachable (i.e. the native scrollbar
+// would be redundant). Module-level (not defined inside App) so its own
+// scroll-position/visibility state isn't reset on every App re-render.
+function StickyHScroll({ targetRef, trackBg, trackBorder }){
+  const barRef = useRef(null);
+  const syncingRef = useRef(false);
+  const [state, setState] = useState({ visible:false, left:0, width:0, contentWidth:0 });
+
+  useEffect(()=>{
+    const target = targetRef.current;
+    if(!target) return;
+    let raf = null;
+    const update = ()=>{
+      raf = null;
+      const rect = target.getBoundingClientRect();
+      const overflowing = target.scrollWidth > target.clientWidth + 2;
+      const vh = window.innerHeight;
+      const partiallyVisible = rect.top < vh && rect.bottom > 0;
+      const nativeReachable = rect.bottom <= vh;
+      setState({ visible: overflowing && partiallyVisible && !nativeReachable, left: rect.left, width: rect.width, contentWidth: target.scrollWidth });
+    };
+    const schedule = ()=>{ if(raf==null) raf = requestAnimationFrame(update); };
+    update();
+    const ro = new ResizeObserver(schedule);
+    ro.observe(target);
+    if(target.firstElementChild) ro.observe(target.firstElementChild);
+    window.addEventListener('scroll', schedule, {passive:true, capture:true});
+    window.addEventListener('resize', schedule);
+    return ()=>{
+      ro.disconnect();
+      window.removeEventListener('scroll', schedule, true);
+      window.removeEventListener('resize', schedule);
+      if(raf!=null) cancelAnimationFrame(raf);
+    };
+  },[targetRef]);
+
+  useEffect(()=>{
+    // barRef.current only exists once `state.visible` is true (the bar isn't
+    // rendered otherwise) -- re-run this effect whenever visibility flips so
+    // the listeners actually attach to the real DOM node instead of wiring
+    // up once at mount (when the bar doesn't exist yet) and never again.
+    const target = targetRef.current, bar = barRef.current;
+    if(!target || !bar) return;
+    const onTarget = ()=>{ if(syncingRef.current) return; syncingRef.current=true; bar.scrollLeft=target.scrollLeft; syncingRef.current=false; };
+    const onBar    = ()=>{ if(syncingRef.current) return; syncingRef.current=true; target.scrollLeft=bar.scrollLeft; syncingRef.current=false; };
+    target.addEventListener('scroll', onTarget, {passive:true});
+    bar.addEventListener('scroll', onBar, {passive:true});
+    onTarget();
+    return ()=>{ target.removeEventListener('scroll', onTarget); bar.removeEventListener('scroll', onBar); };
+  },[targetRef, state.visible]);
+
+  if(!state.visible) return null;
+  return (
+    <div data-testid="sticky-hscroll" style={{position:"fixed", left:state.left, width:state.width, bottom:8, zIndex:50, pointerEvents:"none"}}>
+      {/* Themes the native scrollbar thumb itself (the only part users can
+          actually grab) -- WebKit/Blink via the ::-webkit-scrollbar pseudo-
+          elements (inline styles can't target these), Firefox via the
+          scrollbarColor/Width style props below. Without this the thumb is
+          a barely-visible default-gray sliver on a dark background. */}
+      <style>{`
+        [data-testid="sticky-hscroll"] .shs-track::-webkit-scrollbar{height:10px;}
+        [data-testid="sticky-hscroll"] .shs-track::-webkit-scrollbar-track{background:transparent;}
+        [data-testid="sticky-hscroll"] .shs-track::-webkit-scrollbar-thumb{background:#60a5fa;border-radius:6px;}
+        [data-testid="sticky-hscroll"] .shs-track::-webkit-scrollbar-thumb:hover{background:#93c5fd;}
+      `}</style>
+      <div ref={barRef} className="shs-track" style={{
+        overflowX:"auto", overflowY:"hidden", height:16, pointerEvents:"auto",
+        background:trackBg||"#161b22dd", border:`1px solid ${trackBorder||"#30465f"}`, borderRadius:8,
+        boxShadow:"0 -2px 10px rgba(0,0,0,0.45)",
+        scrollbarColor:"#60a5fa transparent", scrollbarWidth:"thin",
+      }}>
+        <div style={{width:state.contentWidth, height:1}}/>
+      </div>
+    </div>
+  );
+}
 
 export default function App(){
   // -- Tab state ---------------------------------------------
@@ -614,6 +707,7 @@ export default function App(){
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
   const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Costs columns in month table
   const [mbmIncBreakdown, setMbmIncBreakdown] = useState(false);  // v5.2.0 Total In columns in month table
+  const mbmScrollRef = useRef(null);  // v5.3.0 Month-by-Month table's overflow-x container, for StickyHScroll
   const [nextId,  setNextId]  = useState(()=>{
     try{ const s=localStorage.getItem('retirement_sim_nextid'); return s?parseInt(s):1; }catch(e){return 1;}
   });
@@ -1773,7 +1867,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.2.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.3.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -3309,7 +3403,14 @@ export default function App(){
           </div>
 
           {/* RIGHT: Charts + table */}
-          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {/* v5.3.0: minWidth:0 -- without it, a flex/grid item defaults to
+              min-width:auto, so a wide child (the Month-by-Month table with
+              breakdown columns toggled on) grows this whole column past its
+              1fr track instead of being clipped/scrolled by the table's own
+              overflowX:auto container. That's what was making the intended
+              internal table scrollbar never actually engage -- the PAGE grew
+              wider instead. */}
+          <div style={{display:"flex",flexDirection:"column",gap:12,minWidth:0}}>
 
             {/* Waterfall summary stats */}
             <div style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:14}}>
@@ -3465,7 +3566,7 @@ export default function App(){
                   }}>{mbmBreakdown?"collapse costs":"costs breakdown"}</button>
                 </div>
               </div>
-              <div style={{overflowX:"auto",maxHeight:420,overflowY:"auto"}}>
+              <div ref={mbmScrollRef} style={{overflowX:"auto",maxHeight:420,overflowY:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:9}}>
                   <thead style={{position:"sticky",top:0,background:bg2,zIndex:1}}>
                     <tr style={{borderBottom:`1px solid ${bdr}`}}>
@@ -3554,6 +3655,7 @@ export default function App(){
                   </tbody>
                 </table>
               </div>
+              <StickyHScroll targetRef={mbmScrollRef} trackBg={bg1+"ee"} trackBorder={bdr}/>
             </div>
 
           </div>

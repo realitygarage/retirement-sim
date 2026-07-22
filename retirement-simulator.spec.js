@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.2.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.3.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.2.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.2.0');
+    await expect(page.locator('text=v5.3.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.3.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.2.0', async ({ page }) => {
+  test('L1 — Version header shows v5.3.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.2.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.2.0 confirmed');
+    await expect(page.locator('text=v5.3.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.3.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3025,6 +3025,98 @@ test.describe('Group W — v4.6.0 Work Income Curve Quarter Granularity', () => 
     const q1Color = await point0Q1.evaluate(el => getComputedStyle(el).color);
     const q3Color = await point0Q3.evaluate(el => getComputedStyle(el).color);
     expect(q3Color).not.toBe(q1Color);
+  });
+
+});
+
+// ─── Group X: v5.3.0 Sticky Horizontal Scrollbar (Month-by-Month table) ──────
+
+test.describe('Group X — v5.3.0 Sticky Horizontal Scrollbar', () => {
+
+  test('X1 — Cash Flow tab layout stays contained: toggling both breakdown buttons never widens the whole page', async ({ page }) => {
+    await loadApp(page);
+    await clickTab(page, 'Cash Flow');
+    await page.waitForSelector('text=Month-by-Month Cash Flow');
+    // Regression guard: the right-hand column of the Cash Flow tab's grid
+    // used to lack minWidth:0, so a flex/grid item defaults to min-width:auto
+    // -- a wide child (the table with both breakdowns on) grew the whole
+    // page horizontally instead of being clipped by its own overflowX:auto
+    // container. That silently broke the floating scrollbar too (nothing to
+    // sync against if the "contained" div was never actually constrained).
+    await page.getByTestId('mbm-breakdown-toggle').click();
+    await page.getByTestId('mbm-inc-breakdown-toggle').click();
+    await page.waitForTimeout(300);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    console.log('  X1 — page horizontal overflow after both breakdowns:', overflow);
+    expect(overflow).toBe(0);
+  });
+
+  test('X2 — floating scrollbar appears only when the table overflows AND its own native scrollbar has scrolled off-screen', async ({ page }) => {
+    await loadApp(page);
+    // Short viewport so the table's bottom edge (420px tall) clearly moves
+    // out of view partway down the page -- exactly the condition the
+    // floating bar exists for.
+    await page.setViewportSize({ width: 1400, height: 700 });
+    await clickTab(page, 'Cash Flow');
+    await page.waitForSelector('text=Month-by-Month Cash Flow');
+    // Not overflowing yet (no breakdown columns) -- should never appear.
+    await page.evaluate(() => window.scrollTo(0, 150));
+    await page.waitForTimeout(300);
+    expect(await page.locator('[data-testid="sticky-hscroll"]').count()).toBe(0);
+    // Toggle both breakdowns on -- table now overflows horizontally.
+    await page.getByTestId('mbm-breakdown-toggle').click();
+    await page.getByTestId('mbm-inc-breakdown-toggle').click();
+    await page.waitForTimeout(300);
+    // Scroll down so the table's bottom edge is pushed below the (short)
+    // viewport -- its own native scrollbar isn't reachable, so the floating
+    // bar should appear.
+    await page.evaluate(() => window.scrollTo(0, 150));
+    await page.waitForTimeout(300);
+    await expect(page.locator('[data-testid="sticky-hscroll"]')).toBeVisible();
+    // Grow the viewport so the table's full 420px height (bottom edge
+    // included) fits on-screen at this same scroll position -- its native
+    // scrollbar is reachable again, so the floating bar should hide. (Not
+    // testable by scrolling back to the top of THIS short viewport: at
+    // 700px tall there's enough content above the table that even scroll=0
+    // still leaves the table's bottom below the fold -- confirmed directly:
+    // table rect is {top:578, bottom:998} at scroll=0/700px, i.e. the native
+    // scrollbar was never reachable at this viewport height regardless of
+    // scroll position, so that isn't a valid "should hide" checkpoint.)
+    await page.setViewportSize({ width: 1400, height: 1100 });
+    await page.waitForTimeout(300);
+    expect(await page.locator('[data-testid="sticky-hscroll"]').count()).toBe(0);
+  });
+
+  test('X3 — dragging/scrolling the floating bar scrolls the real table, and vice versa (bidirectional sync)', async ({ page }) => {
+    await loadApp(page);
+    await page.setViewportSize({ width: 1400, height: 700 });
+    await clickTab(page, 'Cash Flow');
+    await page.waitForSelector('text=Month-by-Month Cash Flow');
+    await page.getByTestId('mbm-breakdown-toggle').click();
+    await page.getByTestId('mbm-inc-breakdown-toggle').click();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.scrollTo(0, 150));
+    await expect(page.locator('[data-testid="sticky-hscroll"]')).toBeVisible();
+
+    await page.evaluate(() => {
+      const bar = document.querySelector('[data-testid="sticky-hscroll"] > div');
+      bar.scrollLeft = 400;
+      bar.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    await page.waitForTimeout(200);
+    const afterBar = await page.evaluate(() => document.querySelector('table').closest('div').scrollLeft);
+    console.log('  X3 — table.scrollLeft after setting bar.scrollLeft=400:', afterBar);
+    expect(afterBar).toBe(400);
+
+    await page.evaluate(() => {
+      const table = document.querySelector('table').closest('div');
+      table.scrollLeft = 100;
+      table.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    await page.waitForTimeout(200);
+    const afterTable = await page.evaluate(() => document.querySelector('[data-testid="sticky-hscroll"] > div').scrollLeft);
+    console.log('  X3 — bar.scrollLeft after setting table.scrollLeft=100:', afterTable);
+    expect(afterTable).toBe(100);
   });
 
 });
