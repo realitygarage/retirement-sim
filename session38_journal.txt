@@ -1,0 +1,228 @@
+=== SESSION 38 JOURNAL -- Defaults-tab audit (v5.4.0-v5.6.0) +
+    CLAUDE.md single-engine rewrite, FOUR COMMITS, COMMITTED ===
+
+Date: 2026-07-22
+
+Session goal: audit-then-fix, picked up after session37's v5.3.0 commit
+(sticky scrollbar). Read session37's journal first per the Session Start
+convention.
+
+--- MOTIVATING QUESTION ---
+
+User's framing: the Defaults tab is meant to be "every input the model uses
+that has no slider elsewhere," but it's incomplete -- maintenance numbers
+(struct6/15/Laf, maintStr%, propCPI) live on the Cash Flow tab, mortgage
+terms live only on property cards. Concretely: "My wife asked what numbers
+the model uses and I couldn't answer from one place."
+
+--- AUDIT (no changes yet) ---
+
+Read engine.js in full (1560+ lines), defaults.js, and the DEFAULTS_REGISTRY/
+property-card/Cash-Flow-tab UI in App.jsx, then classified every model input
+into three categories and reported before touching anything:
+
+(a) Static/structural, currently living elsewhere -- struct6/15/Laf+maintStr
+    (Cash Flow tab sliders), per-property mortgage terms (property cards),
+    per-property disposition facts (basis/§121/CA-deferred-gain/depreciation-
+    recapture/selling-costs%/CPA-worksheet figures, property cards), and the
+    individual Sophia/Nolan HI-loan balances+rates (engine.js SOPHIA_LOANS/
+    NOLAN_LOANS -- previously invisible anywhere; only their SUM ever showed,
+    in the header's "HI debt at start" readout).
+(b) Scenario levers -- confirmed correctly located already (Economy sliders,
+    cost profiles, One-Time Obligation, waterfall buckets, HI/loan balances,
+    property value/hold/sale timing, work curve, SS claim dates). No action.
+(c) Hardcoded in the engine with NO UI anywhere -- the important findings:
+    caGainCap (CA $1.2M prior-1031 cap, confirmed by the codebase's own
+    v5.0.4 changelog comment: "no UI slider exists for this field at all"),
+    MTG_PRINCIPAL_ELIGIBLE_IDS=['sixth','fifteenth'] (hardcoded array gating
+    the ongoing mortgage-principal-sweep tier), the ENTIRE estimateTax()
+    federal/CO tax model (bracket widths/rates, standard deductions, SS
+    provisional-income thresholds -- real IRS/CO facts that go stale every
+    tax year, zero visibility anywhere), properties[].appreciationPct
+    (schema field, engine-read, no UI -- left as an open item, see below),
+    sameYearSaleTaxBump's dollar amount (toggle was editable, the $ figure
+    wasn't), and dead BASE.myAge/wifeAge constants.
+
+Also found, while tracing hold.sellingCostsPct's near-total invisibility: the
+disposition breakdown's "Selling costs" line ALWAYS labeled itself with the
+global DISPO_DEFAULTS.sellingCostsPct (6%), even for 6th St, whose actual
+math uses hold.sellingCostsPct (5%) -- a real, verifiable display bug, not
+just a missing-UI gap. Scoped as its own commit per the user's request
+(unrelated to the Defaults-tab work).
+
+Also surfaced along the way (not part of this session's fix list, flagged to
+the user): CLAUDE.md still describes a two-engine architecture (annual
+buildScenario + monthly wfData) that collapsed to a single buildMonthlyScenario
+engine in v5.0.0 -- addressed as this session's 4th commit, see below.
+
+User approved proceeding in three ordered commits matching the audit's
+structure, plus (after commit 3 landed) a fourth docs-only commit for the
+CLAUDE.md staleness.
+
+--- COMMIT 1 (v5.4.0): SELLING-COSTS LABEL BUG ---
+
+disposeAsset() (engine.js) now returns the actual sellingCostsPct it applied
+(computed internally already, just never exposed on the result object). The
+disposition-breakdown label (App.jsx) reads d.sellingCostsPct instead of
+always DISPO_DEFAULTS.sellingCostsPct -- 6th St now correctly shows 5%. Pure
+display fix, no computed values changed. Verified no test/pin depends on the
+old label text (grepped the spec file).
+
+--- COMMIT 2 (v5.5.0): READ-ONLY DEFAULTS-TAB MIRRORS ---
+
+New "Read-Only Mirrors" section on the Defaults tab (dashed-border cards,
+visually distinct from the editable grid, each labeled "edit on: ..."):
+Maintenance Structure Values (Cash Flow tab), Mortgage -- {property} per
+property (property card), Disposition Facts -- {property} per property
+(property card), and Sophia/Nolan HI Loans -- every individual loan's
+balance+rate, plus the sum that drives the scenario default (not editable,
+historical fact). Deliberately read-only throughout: one editable home per
+value, Defaults as the audit view, per the design principle from the audit
+report -- mirroring is fine, a second editable control is how values drift.
+
+Fixed the two-sources-of-truth gap the audit specifically flagged: defaults.js
+hardcoded sophiaBal/nolanBal (58_057/141_117) separately from engine.js's
+SOPHIA_LOANS/NOLAN_LOANS per-loan arrays. Added engine.js exports
+SOPHIA_BAL/NOLAN_BAL (Math.round of the summed per-loan balances) and had
+defaults.js import them instead of a second hardcode. This DID change a
+computed value, as the user asked to be told if it did: the true per-loan
+sums are $58,057.62 and $141,117.07 -- the old hardcode had silently
+truncated rather than rounded, so Sophia's derived default moves $58,057 ->
+$58,058 ($1). Nolan's is unchanged (141,117 either way, .07 rounds down).
+Confirmed via grep that no test or saved-pin figure hardcodes the old exact
+value; the one test that computes an expected HI-debt total (T1) derives its
+expectation from live params rather than a literal, so it's self-consistent
+either way.
+
+--- COMMIT 3 (v5.6.0): SURFACE THE HIGHEST-VALUE CATEGORY-(c) INVISIBLES ---
+
+Tax model relocation (the big one): 10 new BASE fields (engine.js) --
+fedStdDed, fedBracket1-4Width/Rate, fedTopRate, coStdDedPerSpouse,
+coTaxRateOrdinary, ssProvisionalThreshold1/2 -- and estimateTax() now reads
+from BASE instead of inline literals. New Defaults-tab "Income Tax Model"
+group exposes all 10. Per the user's explicit requirement, this had to be a
+RELOCATION not a recalibration: wrote a scratch script (verify_tax_tmp.mjs,
+deleted after use) reimplementing the pre-change literal-number formula and
+diffed it against the new BASE-driven one across 20,000 randomized inputs
+plus 4 realistic scenario-shaped cases -- zero mismatches. Left the SS
+50%/85% inclusion rates and the 0.5 provisional-income weighting as literals
+(permanent IRS formula constants fixed by statute since 1984, not the
+"goes-stale-yearly" category the thresholds/brackets/deductions are).
+
+caGainCap moved from an invisible scenario param (p.caGainCap, zero UI) to
+DISPO_DEFAULTS.caGainCap -- same default (1,200,000), now Defaults-tab
+editable alongside its sibling disposition-tax-law constants.
+computeDispositions reads it directly now instead of threading it through p.
+
+Mortgage-principal-sweep eligibility: replaced the hardcoded
+MTG_PRINCIPAL_ELIGIBLE_IDS=['sixth','fifteenth'] array (engine.js) -- which
+the Cash Flow tab's own UI could previously only describe in prose, never
+edit -- with a per-property mtgPrincipalEligible boolean (defaults.js: true/
+true/false, preserving exact prior behavior and priority order), editable
+via checkboxes next to the feature's existing controls, and mirrored
+read-only on each property's Defaults-tab Mortgage card. Verified via a
+second scratch script (verify_engine_tmp.mjs, also deleted after use) that a
+fresh default scenario still resolves to the identical eligibility set and
+that the sweep cascade still applies extra payment correctly.
+
+Also: sameYearSaleTaxBump's dollar amount now has a slider (was toggle-only
+-- the figure was previously view-only text). Deleted the dead
+BASE.myAge/wifeAge constants (confirmed unread anywhere; superseded by the
+v4.4.0 birth-date anchor, which had already caught them drifting stale per
+an existing App.jsx comment).
+
+Bug found and fixed while wiring up mtgPrincipalEligible: loadPinIntoLive
+(App.jsx) assigned a loaded pin's raw properties[] straight onto live state
+via a top-level object spread, with no per-property merge. This was harmless
+for every PRE-existing property field (all had nullish-safe engine fallbacks,
+e.g. appreciationPct ?? p.reAppreciation), but a plain boolean flag reads as
+undefined/false when missing -- an OLD pin (predating this field) loaded
+into live would have silently shown every property as sweep-ineligible until
+the user manually re-checked the boxes, even though the pin's own precomputed
+rows (via buildRowsFromSnapshot, which already ran everything through
+makeParams' existing merge-by-id backfill) would have been unaffected. Fixed
+by extracting makeParams' merge-by-id properties logic into a shared
+mergeProperties() (defaults.js) and reusing it in loadPinIntoLive.
+
+--- COMMIT 4 (docs, NO version bump): CLAUDE.md SINGLE-ENGINE REWRITE ---
+
+Separate small task, flagged during the audit: CLAUDE.md's entire
+"Architecture" section still described the pre-v5.0.0 two-engine design
+(buildScenario annual + wfData monthly, kept in sync by hand, with a
+dev-mode "conservation" check to cross-validate them) -- retired when
+buildMonthlyScenario became the sole engine and the annual view became a
+pure aggregation of it (aggregateMonthlyToAnnual). Drafted the full rewrite
+to a scratch file and diffed it against the tracked CLAUDE.md (not editing
+in place) so the user could review a real diff before anything was written --
+per their explicit ask.
+
+Rewrote: the engine-count framing itself; PROP_TAX_INS/appreciation-on-NW
+locations (now buildMonthlyScenario's propValue/ownedMo(), not the deleted
+valById/keepMap); the model-start-date and birth-date anchor mechanics (the
+old annual engine's "period dollar totals summed then divided back down" SS
+workaround no longer exists -- replaced by simple per-month gating +
+averaging now that there's true monthly resolution everywhere); pin storage
+(pins now carry wfRows too, not just annual rows -- v5.0.0's A2 decision);
+the Nolan-grace-period follow-up note (one gate now, not two that could
+silently disagree); and the file map's engine.js/App.jsx descriptions.
+Explicitly removed the "check both engines agree" / cross-engine
+conservation-check guidance and stated there's nothing left to look for --
+directly answering the user's specific ask to find and reframe any workflow/
+testing guidance premised on the now-eliminated divergence risk.
+
+Also fixed two unrelated-but-genuinely-false statements found in the same
+full-file review, per the user's "if it's false, fix it, regardless of
+section" instruction: the pooled-routing section said proceeds are "applied
+at the start of that pool year" (the v5.0.2 fix made this chronological,
+per-event quarter-start instead -- CLAUDE.md had never been updated for
+that fix even though it predates this session), and the testing notes said
+"~75 tests" (actual count, confirmed via grep: 132).
+
+--- VERIFICATION (this session; no full Playwright run per workflow policy) ---
+
+Ran `npm run lint` and `npm run build` after every code commit (not the docs
+commit): lint stayed at or below baseline throughout (37 -> 35 problems,
+confirmed via location-diffing that nothing new landed in the inserted code;
+the 2-problem drop is incidental to code removed, not a fix), build stayed
+clean. Two scratch Node scripts (tax-model A/B check, engine sanity check)
+were written directly against the real engine.js/defaults.js modules, run,
+and deleted immediately after confirming their results -- not committed.
+Did NOT run the Playwright suite itself this session (not asked to); no new
+Playwright coverage was added for the new UI (mirror cards, mtgPrincipalEligible
+checkboxes, sameYearSaleTaxBump slider, Income Tax Model group) -- only the
+E5/L1 version-string assertions were kept in sync across all three version
+bumps, matching the established "implement + bump, pause for review, test
+only when asked" pattern.
+
+--- FINAL STATE ---
+
+Four commits, in order:
+  8609720  v5.4.0 -- selling-costs label bug fix
+  78e07ee  v5.5.0 -- Defaults-tab read-only mirrors + Sophia/Nolan single-source fix
+  a03f181  v5.6.0 -- tax model / caGainCap / mtg-principal-eligibility surfaced
+  6ae016d  docs: CLAUDE.md single-engine rewrite (no version bump, not app code)
+
+Not pushed to origin -- no push instruction given this session.
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+Per explicit user instruction, deliberately NOT built this session:
+- properties[].appreciationPct per-property override -- still schema-only,
+  engine-read, no UI anywhere (currently inert, null for all three
+  properties by default).
+- Nolan-loan grace-period gate (mo>=5 inside buildMonthlyScenario) -- still
+  an elapsed-months-since-start check, not calendar-anchored; the
+  single-engine collapse eliminated the cross-engine-disagreement risk this
+  gate used to carry, but its calendar accuracy relative to Nolan's actual
+  loan terms remains unverified (same status as every prior session's
+  carried-forward note on this item).
+
+New from this session: no Playwright coverage exists yet for any of the
+v5.4.0-v5.6.0 UI (selling-costs label, read-only mirror cards, mtgPrincipal-
+Eligible checkboxes, sameYearSaleTaxBump slider, Income Tax Model group) --
+worth a dedicated test pass if this UI is going to keep evolving. Same
+pre-existing carried-forward items as session36/37 (dead diCap_/maintRate_
+plumbing -- note: NOT the same as the newly-added mtgPrincipalEligible/
+mergeProperties work, unrelated dead code; capped reserve-funding display;
+no saved never-sell pin; the "Free Cash Flow -- breakdown" panel's gross-
+rental-without-op-cost gap) remain untouched.
