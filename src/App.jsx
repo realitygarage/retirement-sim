@@ -1,3 +1,41 @@
+// v5.6.0 -- Defaults tab audit, part 2: surfaces the highest-value
+// category-(c) invisibles the audit found -- real engine assumptions with NO
+// UI anywhere, as opposed to part 1's (v5.5.0) read-only mirrors of values
+// that already had an editable home.
+//   - Income-tax model (estimateTax, engine.js): federal bracket widths/
+//     rates, fed standard deduction, CO standard deduction/rate, SS
+//     provisional-income thresholds -- all were literal numbers inline with
+//     zero visibility, despite being the figures the IRS/CO revise almost
+//     every year. Relocated into BASE (10 new fields) and onto the Defaults
+//     tab's new "Income Tax Model" group. PURE RELOCATION, not
+//     recalibration -- verified byte-identical output across 20,000
+//     randomized inputs plus 4 realistic scenario-shaped cases before
+//     shipping (see session journal for the check).
+//   - caGainCap (the CA §4.6 $1.2M prior-1031 gain cap): was a scenario
+//     param (p.caGainCap) with genuinely no UI slider anywhere. Moved to
+//     DISPO_DEFAULTS.caGainCap (matching its sibling disposition-tax-law
+//     constants) and added to the Defaults tab's Disposition Tax Rates
+//     group -- same default value (1,200,000), so no behavior change.
+//   - Mortgage-principal-sweep eligibility (which properties qualify for the
+//     ONGOING sweep-based paydown tier, Cash Flow tab): was a hardcoded
+//     MTG_PRINCIPAL_ELIGIBLE_IDS=['sixth','fifteenth'] array (engine.js)
+//     that the UI could only describe in prose, never edit. Now a
+//     per-property mtgPrincipalEligible flag (defaults.js), editable via
+//     checkboxes next to the feature's own controls, and mirrored read-only
+//     on each property's Defaults-tab Mortgage card. Fixed a related latent
+//     bug found while wiring this up: loadPinIntoLive assigned a loaded
+//     pin's raw properties[] straight onto live state with no merge, so an
+//     OLD pin (predating this new boolean field) would silently show every
+//     property as sweep-ineligible in the UI until manually re-checked --
+//     extracted makeParams' merge-by-id logic into a shared mergeProperties()
+//     (defaults.js) and reused it in loadPinIntoLive.
+//   - sameYearSaleTaxBump: the $ amount had no slider, only its on/off
+//     toggle was editable -- added one.
+//   - Deleted BASE.myAge/wifeAge -- confirmed dead (unread anywhere),
+//     superseded by the v4.4.0 birth-date anchor.
+//   - #4 (properties[].appreciationPct override, still no UI) and #8 (the
+//     Nolan-loan mo>=5 grace-period gate) are deliberately left as
+//     documented open items, not touched this pass.
 // v5.5.0 -- Defaults tab audit, part 1: read-only mirrors for every
 // category-(a) static/structural value that already has a natural editable
 // home elsewhere -- struct6/struct15/structLaf/maintStr (Cash Flow tab),
@@ -305,7 +343,7 @@ import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggreg
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
 // wfData's hardcoded June-2026 startDate.
-import { SC_DEFAULTS, makeParams, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS_SC, freshPropertiesDefaults, freshObligationDefaults } from "./defaults.js";
+import { SC_DEFAULTS, makeParams, mergeProperties, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS_SC, freshPropertiesDefaults, freshObligationDefaults } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
@@ -405,6 +443,30 @@ const DEFAULTS_REGISTRY = [
     ["DISPO_DEFAULTS.caClawbackRate","CA clawback"],
     ["DISPO_DEFAULTS.sellingCostsPct","Selling costs (dispositions)"],
     ["DISPO_DEFAULTS.forcedSaleDiscount","Forced-sale discount"],
+    // v5.6.0: was a scenario param (p.caGainCap) with NO UI anywhere -- see
+    // DISPO_DEFAULTS.caGainCap's comment in engine.js.
+    ["DISPO_DEFAULTS.caGainCap","CA prior-1031 gain cap $ (§4.6)"],
+  ]},
+  {group:"Income Tax Model (Federal/CO, simplified)", items:[
+    // v5.6.0: relocated from literal numbers inline in estimateTax()
+    // (engine.js) -- pure relocation, not recalibration, see that function's
+    // own comment. This is the single biggest "what does the model assume"
+    // blind spot the audit found: these figures go stale every tax year and
+    // previously had no visibility anywhere in the app.
+    ["BASE.fedStdDed","Fed standard deduction $ (MFJ)"],
+    ["BASE.fedBracket1Width","Fed bracket 1 width $ (10%)"],
+    ["BASE.fedBracket1Rate","Fed bracket 1 rate"],
+    ["BASE.fedBracket2Width","Fed bracket 2 width $ (12%)"],
+    ["BASE.fedBracket2Rate","Fed bracket 2 rate"],
+    ["BASE.fedBracket3Width","Fed bracket 3 width $ (22%)"],
+    ["BASE.fedBracket3Rate","Fed bracket 3 rate"],
+    ["BASE.fedBracket4Width","Fed bracket 4 width $ (24%)"],
+    ["BASE.fedBracket4Rate","Fed bracket 4 rate"],
+    ["BASE.fedTopRate","Fed top rate (above bracket 4)"],
+    ["BASE.coStdDedPerSpouse","CO standard deduction $/spouse"],
+    ["BASE.coTaxRateOrdinary","CO flat rate (ordinary income)"],
+    ["BASE.ssProvisionalThreshold1","SS provisional income $ (0%→50%)"],
+    ["BASE.ssProvisionalThreshold2","SS provisional income $ (50%→85%)"],
   ]},
 ];
 const pathGet = (obj, path)=>path.split('.').reduce((o,k)=>(o==null?undefined:o[k]), obj);
@@ -544,7 +606,7 @@ export default function App(){
     // v4.0.0-A property-centric schema
     properties=freshPropertiesDefaults(),
     obligation=freshObligationDefaults(),
-    caGainCap=1_200_000, settleLifestyleDraw=0, settleDrawLabel='',
+    settleLifestyleDraw=0, settleDrawLabel='',
     settleMtgPaydown=0, settleMtgPaydownTarget='',
     sameYearSaleTaxBump=50_000, sameYearSaleTaxBumpOn=true,
     mtgPrincipalOn=false, mtgPrincipalCap=2000, mtgPrincipalUncapped=false,
@@ -1184,6 +1246,11 @@ export default function App(){
   const loadPinIntoLive = useCallback((pin)=>{
     const s=pin.paramSnapshot||{};
     const next={...SC_DEFAULTS,...s};
+    // v5.6.0: was a raw top-level spread, so a pin saved before a new
+    // property-level field existed (e.g. mtgPrincipalEligible) landed in live
+    // state with that field simply missing -- see mergeProperties' comment
+    // (defaults.js) for why that's unsafe for a plain boolean flag.
+    next.properties = mergeProperties(s.properties);
     if(next.lifestyleDraws) next.lifestyleDraws=next.lifestyleDraws.map(d=>({...d,enabled:d.enabled!==false}));
     setLiveSc(next);
     setPinName(pin.name);
@@ -1903,7 +1970,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.5.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.6.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2260,6 +2327,9 @@ export default function App(){
                 {v:true,l:'On (+$'+Math.round((sameYearSaleTaxBump||0)/1000)+'K)',c:amber},
                 {v:false,l:'Off',c:dim}
               ])}
+              {/* v5.6.0: the $ amount itself had no slider -- only the on/off
+                  toggle was editable, the figure was view-only. */}
+              {sameYearSaleTaxBumpOn && slider("Amount",sameYearSaleTaxBump,setSameYearSaleTaxBump,0,150000,5000,v=>"$"+Math.round(v/1000)+"K")}
             </div>
 
             {/* Loans & Debt (collapsible): HI debts + generalized loan segments (v3.2) */}
@@ -3289,10 +3359,9 @@ export default function App(){
             {/* v3.4.0: Mortgage principal paydown bucket */}
             {sect("Mortgage Principal Paydown")}
             <div style={{fontSize:8,color:dim,marginBottom:8,lineHeight:1.6}}>
-              Extra principal to 6th St (4.875%) then 15th St (4.35%), fed AFTER all buckets
-              and the HI debt sweep, immediately before the surplus→savings sweep. Only while
-              the property is still held; Lafayette excluded (low rate/balance). Paying during
-              the IO window lowers the 2031 recast payment.
+              Extra principal to eligible properties below (priority = order listed), fed AFTER
+              all buckets and the HI debt sweep, immediately before the surplus→savings sweep.
+              Only while a property is still held. Paying during the IO window lowers the recast payment.
             </div>
             <div data-testid="mtg-principal-toggle" style={{marginBottom:8}}>
               {toggle(mtgPrincipalOn,setMtgPrincipalOn,[
@@ -3300,6 +3369,21 @@ export default function App(){
               ])}
             </div>
             {mtgPrincipalOn&&(<>
+              {/* v5.6.0: was a hardcoded ['sixth','fifteenth'] eligibility list
+                  (engine.js MTG_PRINCIPAL_ELIGIBLE_IDS) with no UI -- this
+                  section's own prose used to just describe it in plain text.
+                  Now a per-property flag, editable here. */}
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:9,color:muted,marginBottom:4}}>Eligible properties</div>
+                {properties.map(prop=>(
+                  <label key={prop.id} data-testid={`mtg-principal-eligible-${prop.id}`}
+                    style={{display:"flex",alignItems:"center",gap:6,marginBottom:3,fontSize:9,color:muted,cursor:"pointer"}}>
+                    <input type="checkbox" checked={!!prop.mtgPrincipalEligible}
+                      onChange={e=>setProperty(prop.id,{mtgPrincipalEligible:e.target.checked})}/>
+                    {prop.label}
+                  </label>
+                ))}
+              </div>
               <div style={{marginBottom:6}}>
                 {toggle(mtgPrincipalUncapped,setMtgPrincipalUncapped,[
                   {v:false,l:"Capped",c:amber},{v:true,l:"Uncapped",c:red}
@@ -3773,13 +3857,17 @@ export default function App(){
         for(const prop of properties){
           const m = prop.mortgage||{};
           mirrorGroups.push({
-            group: `Mortgage — ${prop.label}`, editHint: "property card (Simulator tab)",
+            group: `Mortgage — ${prop.label}`,
+            editHint: "terms: property card (Simulator tab) · principal-sweep eligibility: Cash Flow tab",
             items: [
               ["Balance", fmtUsd(m.balance)],
               ["Rate", ((m.rate||0)*100).toFixed(3)+"%"],
               ["Origin", `${m.originMonth||1}/${m.originYear||2021}`],
               ["Term", (m.termYears||30)+" yrs"],
               ["IO period", (m.ioYears||0)+" yrs"],
+              // v5.6.0: was hardcoded MTG_PRINCIPAL_ELIGIBLE_IDS, no UI --
+              // now a real per-property flag, mirrored here too.
+              ["Principal-sweep eligible?", prop.mtgPrincipalEligible ? "Yes" : "No"],
             ],
           });
         }

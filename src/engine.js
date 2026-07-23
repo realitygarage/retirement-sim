@@ -36,7 +36,12 @@ export const NOLAN_BAL  = Math.round(NOLAN_LOANS.reduce((s,l)=>s+l.bal,0));
 // BASE CONSTANTS (never mutated -- engine reads via cfg overrides)
 // =============================================================================
 export const BASE = {
-  myAge:65, wifeAge:60, startYear:2026,
+  // v5.6.0: myAge/wifeAge deleted -- confirmed dead (unread anywhere in the
+  // codebase; superseded by the v4.4.0 birth-date anchor, which had already
+  // caught them drifting stale -- see the header-readout comment that used
+  // to cite "BASE.myAge/wifeAge:65/60, which had drifted stale"). Age is
+  // derived from birth date everywhere now (ssClaimAge, deriveAgeAnchors).
+  startYear:2026,
   // v4.3.0: explicit model anchor -- "now" is startMonth/startYear, not an
   // implicit Jan 1. Both editable on the Defaults tab (DEFAULTS_REGISTRY in
   // App.jsx) since the whole point of making this explicit is that it must
@@ -79,6 +84,32 @@ export const BASE = {
   fedCapGains:   0.238,     // liq-NW quick-calc cap-gains rate
   coCapGains:    0.044,
   irmaaSurge:    350,
+  // v5.6.0: income-tax model constants -- moved here from being literal
+  // numbers inline in estimateTax() below, where they had ZERO visibility or
+  // edit path anywhere in the app despite being the kind of figure the IRS/CO
+  // adjusts most years (bracket widths, standard deductions). Pure
+  // RELOCATION, not recalibration -- every value here is byte-identical to
+  // what estimateTax() used to hardcode; see estimateTax()'s own comment for
+  // how they're consumed. Federal brackets are stored as WIDTHS (dollars of
+  // taxable income in that bracket), not cumulative thresholds -- e.g.
+  // fedBracket2Width is how many dollars are taxed at fedBracket2Rate after
+  // bracket 1 is exhausted, not "income up to $71,000." coStdDedPerSpouse is
+  // doubled for MFJ (was written as `- 24_000 - 24_000` inline). The SS
+  // provisional-income 50%/85% inclusion rates and the 0.5 weighting of SS
+  // in the provisional-income formula are permanent IRS formula constants
+  // (fixed by statute since 1984, not inflation-adjusted) -- left as literals
+  // in estimateTax(), not exposed here, since they're not the "goes stale
+  // yearly" category the thresholds/brackets/deductions are.
+  fedStdDed:            30_000,
+  fedBracket1Width: 23_000, fedBracket1Rate: 0.10,
+  fedBracket2Width: 71_000, fedBracket2Rate: 0.12,
+  fedBracket3Width:107_000, fedBracket3Rate: 0.22,
+  fedBracket4Width:182_000, fedBracket4Rate: 0.24,
+  fedTopRate:           0.32,
+  coStdDedPerSpouse:    24_000,
+  coTaxRateOrdinary:    0.044,
+  ssProvisionalThreshold1: 32_000,   // below: 0% of SS taxable
+  ssProvisionalThreshold2: 44_000,   // above: 85% (between the two: 50%)
 };
 
 // =============================================================================
@@ -244,18 +275,33 @@ export function estimateTax(p, pension, workInc, ssYours, ssBrenda, rentalGross,
   if(!p.taxEnabled) return 0;
   const ssCombined = ssYours*12 + ssBrenda*12;
   const rentalNet  = Math.max(0, rentalGross - mtgInterest);
+  // v5.6.0: the 0.5 SS weighting and the 50%/85% inclusion rates below are
+  // permanent IRS provisional-income formula constants (fixed by statute
+  // since 1984), not the kind of figure that goes stale yearly -- left as
+  // literals, not moved to BASE. The two DOLLAR thresholds ARE BASE fields
+  // (ssProvisionalThreshold1/2) since those are real facts worth auditing.
   const provisional = pension + workInc + rentalNet + ssCombined*0.5;
-  const ssTaxable   = ssCombined * (provisional>44000 ? 0.85 : provisional>32000 ? 0.50 : 0);
+  const ssTaxable   = ssCombined * (provisional>BASE.ssProvisionalThreshold2 ? 0.85 : provisional>BASE.ssProvisionalThreshold1 ? 0.50 : 0);
   const fedAgi      = pension + workInc + ssTaxable + rentalNet;
-  const stdDed      = 30_000;
+  const stdDed      = BASE.fedStdDed;
   let taxable       = Math.max(0, fedAgi - stdDed);
   let fed = 0;
-  for(const [top,rate] of [[23000,0.10],[71000,0.12],[107000,0.22],[182000,0.24]]){
-    const chunk=Math.min(taxable,top); fed+=chunk*rate; taxable-=chunk; if(taxable<=0)break;
+  // v5.6.0: bracket WIDTHS (not cumulative thresholds) + rates, now BASE
+  // fields -- relocation only, see BASE.fedBracket1Width's comment. Byte-
+  // identical to the old inline [[23000,0.10],[71000,0.12],[107000,0.22],
+  // [182000,0.24]] literal.
+  const fedBrackets = [
+    [BASE.fedBracket1Width, BASE.fedBracket1Rate],
+    [BASE.fedBracket2Width, BASE.fedBracket2Rate],
+    [BASE.fedBracket3Width, BASE.fedBracket3Rate],
+    [BASE.fedBracket4Width, BASE.fedBracket4Rate],
+  ];
+  for(const [width,rate] of fedBrackets){
+    const chunk=Math.min(taxable,width); fed+=chunk*rate; taxable-=chunk; if(taxable<=0)break;
   }
-  if(taxable>0) fed+=taxable*0.32;
-  const coTaxable = Math.max(0, fedAgi - 24_000 - 24_000);
-  const co        = coTaxable * 0.044;
+  if(taxable>0) fed+=taxable*BASE.fedTopRate;
+  const coTaxable = Math.max(0, fedAgi - BASE.coStdDedPerSpouse*2);
+  const co        = coTaxable * BASE.coTaxRateOrdinary;
   return Math.round(fed + co);
 }
 
@@ -514,6 +560,13 @@ export const DISPO_DEFAULTS = {
   caClawbackRate:     0.123,  // CA rate on CA-source deferred gain
   sellingCostsPct:    0.06,
   forcedSaleDiscount: 0.15,
+  // v5.6.0: moved from a scenario param (p.caGainCap, DEFAULTS/SC_DEFAULTS)
+  // -- it's a CA tax-law fact (the §4.6 $1.2M cap on prior-1031 CA-source
+  // gain across all rental dispositions), not a per-scenario lever, and had
+  // zero UI while it lived as a bare scenario field (see the v5.0.4
+  // changelog note in App.jsx). Read directly by computeDispositions below,
+  // same as every other DISPO_DEFAULTS constant.
+  caGainCap:          1_200_000,
 };
 
 // Recapture-first ordering + CA clawback + CO with other-state credit.
@@ -674,7 +727,7 @@ export function computeDispositions(p){
   for(const prop of properties) dispoRes[prop.id] = computeDispo(prop);
 
   // CA $1.2M cap: applies across all NON-primary (rental) properties in year order
-  const caCap = p.caGainCap ?? 1_200_000;
+  const caCap = DISPO_DEFAULTS.caGainCap;   // v5.6.0: was p.caGainCap, see DISPO_DEFAULTS.caGainCap comment
   const rentalDispos = properties.filter(pr=>!pr.isPrimary).map(pr=>dispoRes[pr.id])
     .filter(d => d.mode && d.mode!=='keep' && (d.recognizedGain||0)>0);
   rentalDispos.sort((a,b)=>a.year-b.year);
@@ -889,7 +942,13 @@ export function buildMonthlyScenario(p){
   const _mkMtg = (m,label)=>({p:{...m}, label, bal:m.balance, recast:null, ioPmt:0, transAnnounced:false, payoffAnnounced:false});
   const _mtgSt = {};
   for(const prop of _properties) _mtgSt[prop.id] = _mkMtg(prop.mortgage, prop.label);
-  const MTG_PRINCIPAL_ELIGIBLE_IDS = ['sixth','fifteenth'];
+  // v5.6.0: was a hardcoded ['sixth','fifteenth'] with no UI (App.jsx's
+  // Mortgage Principal Paydown section just described it in prose) -- now a
+  // per-property flag (properties[].mtgPrincipalEligible, defaults.js),
+  // editable via a checkbox there. Order preserved: _properties is
+  // [sixth, fifteenth, barberry] by default, same priority order the old
+  // hardcoded array gave (sixth first, then fifteenth).
+  const MTG_PRINCIPAL_ELIGIBLE_IDS = _properties.filter(pr=>pr.mtgPrincipalEligible).map(pr=>pr.id);
   const _stepMtg = (st, calYear, calMonth1to12, owned)=>{
     const m=st.p;
     const k=(calYear-m.originYear)*12 + (calMonth1to12-m.originMonth);

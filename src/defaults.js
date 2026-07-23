@@ -21,6 +21,13 @@ export function freshPropertiesDefaults(){
     {
       id: 'sixth', label: '6th St (home)', isPrimary: true,
       value: 1_675_000, appreciationPct: null,   // null = inherit the Economy appreciation rate
+      // v5.6.0: was a hardcoded ['sixth','fifteenth'] eligibility list
+      // (engine.js MTG_PRINCIPAL_ELIGIBLE_IDS, no UI) for the ONGOING
+      // sweep-based mortgage-principal-paydown tier -- now a per-property
+      // flag, editable via a checkbox next to the Cash Flow tab's Mortgage
+      // Principal Paydown controls. True here/on 'fifteenth' preserves the
+      // exact pre-v5.6.0 default behavior.
+      mtgPrincipalEligible: true,
       mortgage: { balance: 805_495, rate: 0.04875, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
       hold: {
         mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
@@ -52,6 +59,7 @@ export function freshPropertiesDefaults(){
     {
       id: 'fifteenth', label: '2224 15th St (rental)', isPrimary: false,
       value: 1_375_000, appreciationPct: null,
+      mtgPrincipalEligible: true,   // v5.6.0 -- see 'sixth' comment above
       mortgage: { balance: 347_601, rate: 0.0435, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
       hold: {
         mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
@@ -72,6 +80,9 @@ export function freshPropertiesDefaults(){
     {
       id: 'barberry', label: '540 Barberry / Lafayette (rental)', isPrimary: false,
       value: 625_000, appreciationPct: null,
+      // v5.6.0: false -- was hardcoded EXCLUDED from MTG_PRINCIPAL_ELIGIBLE_IDS
+      // (low rate/balance, per the old Cash Flow tab prose note this replaces).
+      mtgPrincipalEligible: false,
       // ioYears:0 -- amortizing from origination (no interest-only period), matching the
       // pre-v4 Lafayette treatment. Same mortgage state machine as the IO/recast properties.
       // originMonth:1 (not 7, unlike sixth/fifteenth's servicer-calibrated Jul origin) --
@@ -179,23 +190,35 @@ export const DEFAULTS = {
   // one-time draw and the HI-debt avalanche cascade -- see buildMonthlyScenario.
   settleMtgPaydown:         0,     // pooled-routing (b) lump-sum mortgage principal paydown, $
   settleMtgPaydownTarget:  '',     // target property id (empty = App.jsx computes a default)
-  caGainCap:        1_200_000,     // CA $1.2M prior-1031 gain cap (§4.6, unchanged)
+  // v5.6.0: caGainCap moved to DISPO_DEFAULTS.caGainCap (engine.js) -- it's a
+  // CA tax-law fact (the §4.6 $1.2M prior-1031 gain cap), not a per-scenario
+  // lever, and had zero UI while it lived here (see the v5.0.4 changelog
+  // note above). Now Defaults-tab editable alongside the other disposition
+  // tax-law constants.
   sameYearSaleTaxBump:   50_000,   // +tax if ALL properties sold same calendar year
   sameYearSaleTaxBumpOn:  true,
 };
 
 // =============================================================================
-// makeParams  --  spread + deep-normalize properties (no legacy field mapping)
-// =============================================================================
-export function makeParams(overrides={}){
-  const p={...DEFAULTS,...overrides};
+// mergeProperties -- merge a saved/partial properties[] array (e.g. a pin's
+// paramSnapshot) onto freshPropertiesDefaults() BY ID, so any field the saved
+// array predates (added to the schema after that pin was saved) backfills
+// from the current default instead of coming back undefined. Extracted out
+// of makeParams (v5.6.0) so App.jsx's loadPinIntoLive can reuse the exact
+// same merge for LIVE state -- loadPinIntoLive used to assign a pin's raw
+// properties array straight onto liveSc with no merge, which was harmless
+// while every property field had a nullish-safe engine-side fallback (e.g.
+// appreciationPct ?? p.reAppreciation), but broke for the new
+// mtgPrincipalEligible boolean flag (v5.6.0): a missing key reads as
+// undefined/falsy, which is NOT the same as the pre-v5.6.0 hardcoded
+// eligibility list -- an old pin loaded into live would silently show every
+// property as sweep-ineligible until the user re-checked the boxes by hand.
+// -----------------------------------------------------------------------------
+export function mergeProperties(ovProps){
   const baseProps = freshPropertiesDefaults();
-  const ovProps = Array.isArray(overrides.properties) ? overrides.properties : null;
-  // Merge by id so partial overrides (e.g. just {hold:{mode:'sell', year:2028}})
-  // pick up every other default field. Properties not present in the override
-  // fall back to fresh defaults untouched.
-  p.properties = baseProps.map(base=>{
-    const ov = ovProps?.find(x=>x.id===base.id);
+  const list = Array.isArray(ovProps) ? ovProps : null;
+  return baseProps.map(base=>{
+    const ov = list?.find(x=>x.id===base.id);
     if(!ov) return base;
     return {
       ...base, ...ov,
@@ -205,6 +228,17 @@ export function makeParams(overrides={}){
         segments: Array.isArray(u.segments) ? u.segments : (base.units[i]?.segments||[]) })) : base.units,
     };
   });
+}
+
+// =============================================================================
+// makeParams  --  spread + deep-normalize properties (no legacy field mapping)
+// =============================================================================
+export function makeParams(overrides={}){
+  const p={...DEFAULTS,...overrides};
+  // Merge by id so partial overrides (e.g. just {hold:{mode:'sell', year:2028}})
+  // pick up every other default field. Properties not present in the override
+  // fall back to fresh defaults untouched.
+  p.properties = mergeProperties(overrides.properties);
   p.obligation = { ...freshObligationDefaults(), ...(overrides.obligation||{}) };
   p.loans = (p.loans||[]).filter(l=>l && (l.amount||0)>0 && (l.months||0)>0);
   return p;
@@ -259,7 +293,7 @@ export const SC_DEFAULTS = {
   settleDrawLabel:         '',
   settleMtgPaydown:         0,
   settleMtgPaydownTarget:  '',
-  caGainCap:        1_200_000,
+  // v5.6.0: caGainCap removed -- see the identical note in DEFAULTS above.
   sameYearSaleTaxBump:   50_000,
   sameYearSaleTaxBumpOn:  true,
 };
