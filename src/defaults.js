@@ -4,7 +4,7 @@
 //           dispositions/sixthIncomeSegments/topUnit/lafRental model.
 //           NO backward compatibility -- fresh schema, no migration.
 // =============================================================================
-import { BASE, DISPO_DEFAULTS } from "./engine.js";
+import { BASE, DISPO_DEFAULTS, SOPHIA_BAL, NOLAN_BAL } from "./engine.js";
 
 // -----------------------------------------------------------------------------
 // PROPERTIES_DEFAULTS (v4.0.0-A) -- one entry per property; units array length
@@ -151,9 +151,11 @@ export const DEFAULTS = {
   taxEnabled:    true,
   investReturn:  0.055,
   maintRate:     0.01,
-  ccBal:         60_000,   ccRate:    0.14,  ccMin:   1200,
-  sophiaBal:     58_057,   sophiaRate:0.0814,sophiaMin: 737,
-  nolanBal:     141_117,   nolanRate: 0.084, nolanMin: 1787,
+  // v5.5.0: sophiaBal/nolanBal derived from engine.js's SOPHIA_LOANS/
+  // NOLAN_LOANS (single source of truth) -- see the comment there.
+  ccBal:         60_000,     ccRate:    0.14,  ccMin:   1200,
+  sophiaBal:     SOPHIA_BAL, sophiaRate:0.0814,sophiaMin: 737,
+  nolanBal:      NOLAN_BAL,  nolanRate: 0.084, nolanMin: 1787,
   // v5.0.5: per-debt closing-eligibility (was a global payOffHI toggle,
   // retired in v5.0.3) -- same flag LI loans[] already carry, default true
   // (matches the old global toggle's typical setting, so no configuration
@@ -233,9 +235,11 @@ export const SC_DEFAULTS = {
   taxEnabled:    true,
   investRet:     5.5,
   lifestyleDraws:[],
-  ccBal:         60000,  ccRate:14.0,  ccMin:1200,
-  sophiaBal:     58057,  sophiaRate:8.14, sophiaMin:737,
-  nolanBal:      141117, nolanRate:8.40,  nolanMin:1787,
+  // v5.5.0: sophiaBal/nolanBal derived from engine.js's SOPHIA_LOANS/
+  // NOLAN_LOANS (single source of truth) -- see the comment there.
+  ccBal:         60000,      ccRate:14.0,  ccMin:1200,
+  sophiaBal:     SOPHIA_BAL, sophiaRate:8.14, sophiaMin:737,
+  nolanBal:      NOLAN_BAL,  nolanRate:8.40,  nolanMin:1787,
   // v5.0.5: per-debt closing-eligibility -- see the identical note in DEFAULTS above.
   ccClosingEligible: true, sophiaClosingEligible: true, nolanClosingEligible: true,
   loans:         DEFAULT_LOANS_SC,   // rate as %

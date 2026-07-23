@@ -1,3 +1,24 @@
+// v5.5.0 -- Defaults tab audit, part 1: read-only mirrors for every
+// category-(a) static/structural value that already has a natural editable
+// home elsewhere -- struct6/struct15/structLaf/maintStr (Cash Flow tab),
+// per-property mortgage terms (balance/rate/origin/term/IO years) and
+// disposition facts (basis/§121/CA-deferred-gain/depreciation-recapture/
+// selling-costs%/CPA-worksheet figures, all property cards), and the
+// Sophia/Nolan individual HI-loan balances+rates (engine.js SOPHIA_LOANS/
+// NOLAN_LOANS, previously invisible anywhere -- only their SUM ever showed,
+// in the header's "HI debt at start" readout). Deliberately read-only: this
+// is a second VIEW of each value, never a second editable control, per the
+// design principle that drove this pass -- one editable home per value, with
+// Defaults as the audit view. Also fixes the two-sources-of-truth gap this
+// same audit found: defaults.js used to hardcode sophiaBal/nolanBal
+// (58,057/141,117) separately from the SOPHIA_LOANS/NOLAN_LOANS arrays that
+// are the real underlying fact -- engine.js now exports SOPHIA_BAL/NOLAN_BAL,
+// derived (Math.round of the summed per-loan balances) and imported by
+// defaults.js instead of a second hardcode. The true sums are $58,057.62 and
+// $141,117.07 -- Nolan's rounded default is unchanged (141,117), but
+// Sophia's moves from 58,057 to 58,058 (the old hardcode had silently
+// truncated rather than rounded). A $1 default-balance change, confirmed via
+// grep that no test/pin hardcodes the old exact figure.
 // v5.4.0 -- Bugfix: the disposition breakdown's "Selling costs" line always
 // labeled itself with the GLOBAL DISPO_DEFAULTS.sellingCostsPct (6%), even for
 // properties with a per-property override (6th St's hold.sellingCostsPct is
@@ -279,7 +300,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
+import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
 // v4.3.0: BASE.startYear/startMonth (imported above) are the single source
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
@@ -1882,7 +1903,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.4.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.5.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -3729,6 +3750,72 @@ export default function App(){
           reader.readAsText(file);
           e.target.value='';
         };
+        // v5.5.0: read-only mirrors for category-(a) static/structural values
+        // that already have a natural editable home elsewhere (property
+        // cards, Cash Flow tab) -- these are NOT a second editable control
+        // (that's how values drift out of sync, see the Sophia/Nolan
+        // sophiaBal/nolanBal fix this same version), just a way to audit
+        // every static fact from one tab. Slug matches this app's kebab-case
+        // data-testid convention.
+        const slug = s=>s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+        const fmtUsd = v=>"$"+Math.round(v||0).toLocaleString();
+        const fmtUsd2 = v=>"$"+(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+        const mirrorGroups = [];
+        mirrorGroups.push({
+          group: "Maintenance Structure Values", editHint: "Cash Flow tab",
+          items: [
+            ["6th St structure value", "$"+struct6+"K"],
+            ["15th St structure value", "$"+struct15+"K"],
+            ["Lafayette structure value", "$"+structLaf+"K"],
+            ["Rate (% of structure/yr)", maintStr+"%"],
+          ],
+        });
+        for(const prop of properties){
+          const m = prop.mortgage||{};
+          mirrorGroups.push({
+            group: `Mortgage — ${prop.label}`, editHint: "property card (Simulator tab)",
+            items: [
+              ["Balance", fmtUsd(m.balance)],
+              ["Rate", ((m.rate||0)*100).toFixed(3)+"%"],
+              ["Origin", `${m.originMonth||1}/${m.originYear||2021}`],
+              ["Term", (m.termYears||30)+" yrs"],
+              ["IO period", (m.ioYears||0)+" yrs"],
+            ],
+          });
+        }
+        for(const prop of properties){
+          const h = prop.hold||{};
+          const items = [["Adjusted basis", fmtUsd(h.basis)]];
+          if(prop.isPrimary){
+            items.push(["§121 exclusion", fmtUsd(h.sec121Exclusion)]);
+          } else {
+            items.push(["CA-source deferred gain", fmtUsd(h.caSourceDeferredGain)]);
+            items.push(["Depreciation recapture", fmtUsd(h.depreciationRecapture)]);
+          }
+          // v5.4.0 fixed this exact override being invisible/mislabeled in the
+          // disposition breakdown -- mirrored here too now, flagged when it
+          // diverges from the global DISPO_DEFAULTS rate.
+          const effSellPct = h.sellingCostsPct ?? DISPO_DEFAULTS.sellingCostsPct;
+          items.push(["Selling costs %", dispoPct(effSellPct) + (h.sellingCostsPct!=null ? " (override)" : " (global default)")]);
+          items.push(["Selling costs in basis?", h.sellingCostsInBasis ? "Yes" : "No"]);
+          items.push(["CPA est. tax", fmtUsd(h.cpaEstTax)]);
+          items.push(["CPA net proceeds after tax", fmtUsd(h.cpaNetProceedsAfterTax)]);
+          mirrorGroups.push({ group: `Disposition Facts — ${prop.label}`, editHint: "property card (Simulator tab)", items });
+        }
+        mirrorGroups.push({
+          group: "Sophia HI Loans (Feb 2026)", editHint: "not editable -- historical fact, see engine.js SOPHIA_LOANS",
+          items: [
+            ...SOPHIA_LOANS.map((l,i)=>[`Loan ${i+1}`, fmtUsd2(l.bal)+" @ "+(l.rate*100).toFixed(2)+"%"]),
+            ["Sum (drives sophiaBal default)", fmtUsd2(SOPHIA_LOANS.reduce((s,l)=>s+l.bal,0))],
+          ],
+        });
+        mirrorGroups.push({
+          group: "Nolan HI Loans (Feb 2026)", editHint: "not editable -- historical fact, see engine.js NOLAN_LOANS",
+          items: [
+            ...NOLAN_LOANS.map((l,i)=>[`Loan ${i+1}`, fmtUsd2(l.bal)+" @ "+(l.rate*100).toFixed(2)+"%"]),
+            ["Sum (drives nolanBal default)", fmtUsd2(NOLAN_LOANS.reduce((s,l)=>s+l.bal,0))],
+          ],
+        });
         return (
         <div data-testid="defaults-tab">
           <div style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:14,marginBottom:14}}>
@@ -3796,6 +3883,33 @@ export default function App(){
                 </div>
               );
             })}
+          </div>
+
+          {/* v5.5.0: read-only mirrors -- category-(a) static facts whose
+              editable home is elsewhere (property cards, Cash Flow tab).
+              Deliberately NOT inputs: mirroring a value read-only is fine,
+              duplicating an editable control is how values drift apart. */}
+          <div style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:14,margin:"18px 0 14px"}}>
+            <div style={{fontSize:12,color:bright,fontWeight:"bold"}}>Read-Only Mirrors</div>
+            <div style={{fontSize:9,color:dim,marginTop:4,lineHeight:1.6,maxWidth:640}}>
+              Static facts that already have an editable home elsewhere. Shown here so every
+              model assumption can be audited from one tab — edit at the location noted on each card,
+              not here.
+            </div>
+          </div>
+          <div data-testid="defaults-mirrors" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(340px, 1fr))",gap:12}}>
+            {mirrorGroups.map(({group,editHint,items})=>(
+              <div key={group} data-testid={`mirror-${slug(group)}`} style={{background:bg1,border:`1px dashed ${bdr}`,borderRadius:10,padding:12}}>
+                <div style={{fontSize:10,color:muted,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>{group}</div>
+                <div style={{fontSize:8,color:dim,fontStyle:"italic",marginBottom:8}}>edit on: {editHint}</div>
+                {items.map(([label,val])=>(
+                  <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,gap:8}}>
+                    <span style={{fontSize:9,color:muted,flex:1,minWidth:0}}>{label}</span>
+                    <span style={{fontSize:10,color:bright,fontFamily:mono}}>{val}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         </div>
         );

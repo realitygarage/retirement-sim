@@ -19,6 +19,18 @@ export const NOLAN_LOANS = [
 export const CC_BAL   = 60_000;
 export const CC_RATE  = 0.14;
 export const HI_TOTAL = SOPHIA_LOANS.reduce((s,l)=>s+l.bal,0) + NOLAN_LOANS.reduce((s,l)=>s+l.bal,0) + CC_BAL;
+// v5.5.0: single source of truth for the blended Sophia/Nolan default
+// balances -- defaults.js used to hardcode 58_057/141_117 separately from
+// these per-loan arrays (two places asserting the same real-world fact,
+// with no mechanism keeping them in sync). Derived here instead so a future
+// update to a loan's balance above can't silently leave the SC_DEFAULTS/
+// DEFAULTS scenario default stale. Rounded to the nearest whole dollar (this
+// codebase's raw-dollars convention) -- the true sums are $58,057.62 and
+// $141,117.07, so this moves Sophia's derived default up by $1 (58,058, was
+// hardcoded 58,057, which had silently truncated rather than rounded) while
+// Nolan's is unchanged (141,117 either way).
+export const SOPHIA_BAL = Math.round(SOPHIA_LOANS.reduce((s,l)=>s+l.bal,0));
+export const NOLAN_BAL  = Math.round(NOLAN_LOANS.reduce((s,l)=>s+l.bal,0));
 
 // =============================================================================
 // BASE CONSTANTS (never mutated -- engine reads via cfg overrides)
