@@ -1,3 +1,16 @@
+// v5.8.0 -- Bugfix: the Free Cash Flow chart's breakdown table sampled every
+// other year (the default for non-annualTicks charts, to keep the table from
+// getting too wide) -- but annualTicks also forces the chart's own XAxis to
+// label every year, which wasn't wanted here. New annualBreakdown prop lets
+// a chart's table opt into every-year rows independently of its line chart's
+// tick density; FCF now uses it.
+// v5.7.0 -- Bugfix: the Free Cash Flow chart's Y-axis ceiling (surplusMax)
+// factored in EVERY saved pin's sweep values, not just pins currently toggled
+// visible -- a hidden pin with a large one-time sweep (e.g. a lump-sum
+// payoff/sale scenario) could stretch the axis to tens of thousands even
+// though nothing on-screen came close, since every other pin-aware
+// calculation in the file already filters by visiblePins and this was the
+// one holdout. Now filters to visiblePins like everywhere else.
 // v5.6.0 -- Defaults tab audit, part 2: surfaces the highest-value
 // category-(c) invisibles the audit found -- real engine assumptions with NO
 // UI anywhere, as opposed to part 1's (v5.5.0) read-only mirrors of values
@@ -1139,12 +1152,17 @@ export default function App(){
   const surplusMax = useMemo(()=>{
     const schedMax = (fcfSchedule||[]).reduce((m,s)=>Math.max(m,s.floor),0);
     const sweepMax = Math.max(...(chartData||[]).map(r=>r.combinedSweep||0), 0);
-    const pinSweepMax = pins.length>0 ? Math.max(...(chartData||[]).flatMap(r=>pins.map(p=>r[`pin_${p.id}_sweep`]||0)), 0) : 0;
+    // v5.7.0 fix: only stretch the axis for pins actually drawn on this chart --
+    // a hidden pin's sweep values used to count toward the ceiling even though
+    // its line never renders (every other pin-aware calc already filters by
+    // visiblePins; this was the one holdout).
+    const visPins = pins.filter(p=>visiblePins.has(p.id));
+    const pinSweepMax = visPins.length>0 ? Math.max(...(chartData||[]).flatMap(r=>visPins.map(p=>r[`pin_${p.id}_sweep`]||0)), 0) : 0;
     const poolMax = Math.max(...(chartData||[]).map(r=>r.surplusPool||0), 0);
     const raw = Math.max(...(chartData||[]).map(r=>r.surplus||0), ...(chartData||[]).map(r=>r.combinedSweep||0), discFloor*1.5, schedMax*1.5, sweepMax*1.2, pinSweepMax*1.2, poolMax*1.1, 500);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
     return Math.ceil(raw/mag)*mag;
-  },[liveRows,discFloor,fcfSchedule,chartData]);
+  },[liveRows,discFloor,fcfSchedule,chartData,pins,visiblePins]);
   const fixedCostMax = useMemo(()=>{
     const raw = Math.max(...(chartData||[]).map(r=>r.fixedTotal||0), 5000);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -1566,7 +1584,7 @@ export default function App(){
     },
   };
 
-  const Chart=({title,dataKey,pinKey,color,unit,refLines,yFmt,chartId,yDomain,mainName,secondaryDataKey,secondaryColor,secondaryName,pinSecondaryKey,tertiaryDataKey,tertiaryColor,tertiaryName,quaternaryDataKey,quaternaryColor,quaternaryName,headerExtra,annualTicks})=>{
+  const Chart=({title,dataKey,pinKey,color,unit,refLines,yFmt,chartId,yDomain,mainName,secondaryDataKey,secondaryColor,secondaryName,pinSecondaryKey,tertiaryDataKey,tertiaryColor,tertiaryName,quaternaryDataKey,quaternaryColor,quaternaryName,headerExtra,annualTicks,annualBreakdown})=>{
     const isExpanded = expandedChart===chartId;
     const bd = BREAKDOWNS[chartId];
     const fmt = yFmt||(v=>v>=1000?`${(v/1000).toFixed(0)}K`:v);
@@ -1580,7 +1598,12 @@ export default function App(){
     const bdSource = (chartId==='nw' || chartId==='fixedCosts') ? chartData : liveRows;
     // annualTicks charts (e.g. Work Income Required) show every year; others
     // sample every other year to keep the breakdown table from getting too wide.
-    const bdRows = annualTicks ? bdSource : bdSource.filter((_,i)=>i%2===0||i===bdSource.length-1);
+    // annualBreakdown opts a chart's TABLE into every-year rows independently
+    // of annualTicks -- annualTicks also forces the main chart's own XAxis to
+    // label every year (interval=0), which not every chart wanting a full
+    // table wants (v5.8.0: Free Cash Flow's line chart keeps its normal
+    // tick density; only its breakdown table needed 1-year resolution).
+    const bdRows = (annualTicks||annualBreakdown) ? bdSource : bdSource.filter((_,i)=>i%2===0||i===bdSource.length-1);
     return (
       <div style={{background:bg1,border:`1px solid ${isExpanded?color:bdr}`,borderRadius:10,
         padding:"14px 10px 8px", gridColumn: isExpanded?"1 / -1":"auto",
@@ -1970,7 +1993,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.6.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.8.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2725,7 +2748,7 @@ export default function App(){
                 ...(yourSsAge<67?[{y:Math.round(24480/12),stroke:amber,strokeOpacity:0.4,strokeDasharray:"4 2",label:{value:"SS earnings cap",fill:amber,fontSize:7,position:"insideTopRight"}}]:[]),
               ]}/>
             <Chart title="Free Cash Flow / mo" dataKey="surplus" pinKey="di" color={green} chartId="surplus"
-              yDomain={[0, surplusMax]} mainName="Free Cash"
+              yDomain={[0, surplusMax]} mainName="Free Cash" annualBreakdown={true}
               secondaryDataKey="combinedSweep" secondaryColor={blue} secondaryName="Sweep" pinSecondaryKey="sweep"
               tertiaryDataKey="surplusPool" tertiaryColor={amber} tertiaryName="Surplus"
               quaternaryDataKey={(fcfSchedule||[]).length>0?"floorLine":undefined} quaternaryColor={green} quaternaryName="Floor schedule"

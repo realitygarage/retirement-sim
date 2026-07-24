@@ -1,0 +1,90 @@
+=== SESSION 39 JOURNAL -- Free Cash Flow chart Y-axis bug (v5.7.0) +
+    breakdown-table resolution fix (v5.8.0), TWO COMMITS ===
+
+Date: 2026-07-24
+
+Session goal: user reported the "Free Cash Flow / mo" chart's Y-axis scale
+looked way too large (ticks up to 90K, with visible data -- Free Cash,
+Sweep, Surplus lines -- all sitting near $0-$1K). Read session38's journal
+first per the Session Start convention.
+
+--- DIAGNOSIS (v5.7.0) ---
+
+Ran a scratch Node script (diag_surplus_tmp.mjs, deleted after use) against
+engine.js's buildMonthlyScenario directly with default params, scanning
+every monthly row across the full 20-year horizon for the max afterBuckets/
+surplus/combinedSweep value -- found nothing above ~$1,100/mo anywhere. The
+screenshot's visible chart data (Pension $3,300, mortgage $5,510, etc.)
+also matched default-scenario values almost exactly. That ruled out "the
+live scenario's own numbers are just big" as the explanation.
+
+Traced surplusMax (App.jsx, feeds the chart's yDomain) and found the actual
+bug: its `pinSweepMax` term scans EVERY pin in the `pins` array for sale/
+sweep values, with no visibility filter --
+
+  const pinSweepMax = pins.length>0 ? Math.max(...(chartData||[]).flatMap(
+    r=>pins.map(p=>r[`pin_${p.id}_sweep`]||0)), 0) : 0;
+
+Every other pin-aware read in the file (legend, chart lines, tooltips --
+lines 1618/1625/1657/1676 pre-fix) filters through
+`pins.filter(pin=>visiblePins.has(pin.id))` first. This was the one
+holdout. The screenshot's legend showed only "Live" (no pin lines drawn),
+consistent with the user having a saved pin toggled invisible -- its sweep
+values (from whatever scenario it snapshotted, e.g. a lump-sum payoff/sale)
+were still stretching the axis to ~90K even though nothing from it was
+ever rendered.
+
+Fix: filter to `visiblePins` in the `pinSweepMax` calc, same as everywhere
+else, and add `pins`/`visiblePins` to the memo's dependency array (both
+were missing -- the memo could have gone stale on pin add/toggle even
+before this fix).
+
+--- FOLLOW-UP (v5.8.0) ---
+
+After the v5.7.0 fix, user flagged a second, unrelated issue on the same
+chart: the breakdown table below it was sampling every OTHER year, not
+every year. This wasn't a regression from the v5.7.0 edit -- it's the
+long-standing default behavior for any chart without `annualTicks={true}`
+(see the existing comment: "annualTicks charts... show every year; others
+sample every other year to keep the breakdown table from getting too
+wide"). The Free Cash Flow chart never had `annualTicks` set, so its table
+always did this.
+
+Couldn't just add `annualTicks={true}` to the FCF chart -- that flag also
+forces the chart's own XAxis to label every year (`interval={annualTicks?
+0:undefined}`), and the user explicitly said "the graph looks OK", only
+wanting the table changed. Decoupled the two: added a new `annualBreakdown`
+prop to the shared `Chart` component, independent of `annualTicks`, that
+only affects the table's row sampling:
+
+  const bdRows = (annualTicks||annualBreakdown) ? bdSource : bdSource.filter(...)
+
+Applied `annualBreakdown={true}` to the FCF chart only. Its line chart's
+tick density is untouched; its table now shows every year.
+
+--- VERIFICATION ---
+
+Ran `npm run lint` and `npm run build` after each fix. Lint held at 34
+problems both times (at/below session38's 35-problem baseline, confirming
+no new issues introduced). Build stayed clean both times. Did not run the
+Playwright suite this session (not asked to, until this journal/checkin
+request) -- see below.
+
+--- FINAL STATE ---
+
+Two commits, in order:
+  (v5.7.0) Free Cash Flow Y-axis pinSweepMax visibility fix
+  (v5.8.0) Free Cash Flow breakdown-table annualBreakdown (every-year rows)
+
+E5/L1 Playwright version-string assertions kept in sync across both bumps.
+Pushed to origin at user's request (git push, explicit permission given).
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+Same as session38's carried-forward list (properties[].appreciationPct
+per-property override still schema-only/no UI; Nolan-loan grace-period gate
+still elapsed-months-based, not calendar-anchored; no Playwright coverage
+yet for v5.4.0-v5.6.0 Defaults-tab UI; dead diCap_/maintRate_ plumbing;
+capped reserve-funding display; no saved never-sell pin; the "Free Cash
+Flow -- breakdown" panel's gross-rental-without-op-cost gap) -- untouched
+this session, no new items surfaced beyond the two fixed above.
