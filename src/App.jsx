@@ -1,3 +1,21 @@
+// v5.9.0 -- Quarter granularity for rental income segments (previously
+// year-only). Segments gain qFrom/qTo (default 1/4, reproducing exact
+// pre-v5.9.0 full-year behavior); coverage is now tested at the absolute-
+// month level via segmentStartAbsMonth/EndAbsMonth (engine.js), reusing
+// quarterStartMonth -- the same quarter->month mapping property sales and
+// obligations have used since v5.0.2 -- rather than a parallel
+// implementation. A segment covering only part of a year now prorates its
+// income to the months actually covered (falls out naturally from the
+// existing per-month /12 loop once membership is month-based), and its
+// inner STR-day/MTR-month caps scale down via segmentCapMonths() so a
+// partial-year segment can't claim a full year's 365 days / 12 months.
+// LTR-exclusivity (validateUnitSegments) and the informational overlap
+// detector (unitSegmentOverlaps) both now compare quarter/month ranges
+// instead of year ranges, so e.g. LTR Q1-Q2 + STR Q3-Q4 on one unit is
+// legal (previously wrongly rejected as a same-year overlap). New Q1-Q4
+// toggle rows on each segment's From/To year sliders in the property card
+// UI, mirroring the existing quarter button-group pattern (property sale
+// timing, work-income-curve points).
 // v5.8.0 -- Bugfix: the Free Cash Flow chart's breakdown table sampled every
 // other year (the default for non-annualTicks charts, to keep the table from
 // getting too wide) -- but annualTicks also forces the chart's own XAxis to
@@ -351,7 +369,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
+import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, segmentStartAbsMonth, segmentEndAbsMonth, segmentCoversMonth, segmentCapMonths, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
 // v4.3.0: BASE.startYear/startMonth (imported above) are the single source
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
@@ -366,6 +384,7 @@ if (typeof window !== 'undefined') {
     workFromCurve, remainBal, estimateTax,
     unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps,
     yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo,
+    segmentStartAbsMonth, segmentEndAbsMonth, segmentCoversMonth, segmentCapMonths,
     planHiPaydown, splitResidual, loanMonthlyPmt,
     mortgageBalanceClosed, mortgageMonthsSince,
     applyDefaultsOverrides, getDefaultsCode,
@@ -1993,7 +2012,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.8.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.9.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2160,7 +2179,9 @@ export default function App(){
                                 const prev=list[list.length-1];
                                 // v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046)
                                 const yrFrom=prev?Math.min(BASE.startYear+20,(prev.yrTo||prev.yrFrom||BASE.startYear)+1):BASE.startYear;
-                                return [...list,{yrFrom, yrTo:Math.min(BASE.startYear+20,yrFrom+1), kind:'ltr',
+                                // v5.9.0: qFrom/qTo default to a full year (1/4) -- same behavior as
+                                // pre-quarter-granularity segments.
+                                return [...list,{yrFrom, qFrom:1, yrTo:Math.min(BASE.startYear+20,yrFrom+1), qTo:4, kind:'ltr',
                                   str:[{days:120,rate:280,type:"nightly"}], mtr:[{months:10,rate:3000}], ltr:{monthlyRent:3000}}];
                               })}
                               style={{fontSize:9,padding:"2px 8px",borderRadius:3,fontFamily:font,
@@ -2183,23 +2204,50 @@ export default function App(){
                             return (
                               <div key={ei} data-testid={`seg-${unit.id}-${ei}`} style={{background:bg2,border:`1px solid ${kColor}55`,borderRadius:6,padding:8,marginBottom:6}}>
                                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                                  <span style={{fontSize:9,color:kColor,fontWeight:"bold"}}>{seg.yrFrom}–{seg.yrTo} — {seg.kind.toUpperCase()} — ${Math.round(gross/12).toLocaleString()}/mo avg</span>
+                                  <span style={{fontSize:9,color:kColor,fontWeight:"bold"}}>{seg.yrFrom} Q{seg.qFrom??1}–{seg.yrTo} Q{seg.qTo??4} — {seg.kind.toUpperCase()} — ${Math.round(gross/12).toLocaleString()}/mo avg</span>
                                   <button onClick={()=>setUnitSegments(prop.id,unitIdx,list=>list.filter((_,j)=>j!==ei))}
                                     style={{fontSize:8,padding:"1px 6px",borderRadius:3,fontFamily:font,cursor:"pointer",
                                       background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
                                 </div>
                                 <div style={{display:"flex",gap:8,marginBottom:6}}>
                                   <div style={{flex:1}}>
-                                    <div style={{fontSize:8,color:dim,marginBottom:2}}>From {seg.yrFrom}</div>
+                                    <div style={{fontSize:8,color:dim,marginBottom:2}}>From {seg.yrFrom} Q{seg.qFrom??1}</div>
                                     <input type="range" min={BASE.startYear} max={BASE.startYear+20} step={1} value={seg.yrFrom}
-                                      onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrFrom:v,yrTo:Math.max(v,seg.yrTo)});}}
+                                      onChange={e=>{
+                                        const v=parseInt(e.target.value);
+                                        const yrTo=Math.max(v,seg.yrTo);
+                                        const patch={yrFrom:v,yrTo};
+                                        // v5.9.0: years collapsing to one -- keep qFrom<=qTo valid
+                                        if(v===yrTo && (seg.qFrom??1)>(seg.qTo??4)) patch.qTo=seg.qFrom??1;
+                                        updSeg(ei,patch);
+                                      }}
                                       style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                                    <div data-testid={`seg-qfrom-${unit.id}-${ei}`} style={{marginTop:3}}>
+                                      {toggle(seg.qFrom??1, q=>{
+                                        const patch={qFrom:q};
+                                        if(seg.yrFrom===seg.yrTo && q>(seg.qTo??4)) patch.qTo=q;
+                                        updSeg(ei,patch);
+                                      }, [1,2,3,4].map(q=>({v:q,l:'Q'+q,c:kColor})))}
+                                    </div>
                                   </div>
                                   <div style={{flex:1}}>
-                                    <div style={{fontSize:8,color:dim,marginBottom:2}}>To {seg.yrTo}</div>
+                                    <div style={{fontSize:8,color:dim,marginBottom:2}}>To {seg.yrTo} Q{seg.qTo??4}</div>
                                     <input type="range" min={BASE.startYear} max={BASE.startYear+20} step={1} value={seg.yrTo}
-                                      onChange={e=>{const v=parseInt(e.target.value);updSeg(ei,{yrTo:v,yrFrom:Math.min(seg.yrFrom,v)});}}
+                                      onChange={e=>{
+                                        const v=parseInt(e.target.value);
+                                        const yrFrom=Math.min(seg.yrFrom,v);
+                                        const patch={yrTo:v,yrFrom};
+                                        if(yrFrom===v && (seg.qTo??4)<(seg.qFrom??1)) patch.qFrom=seg.qTo??4;
+                                        updSeg(ei,patch);
+                                      }}
                                       style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                                    <div data-testid={`seg-qto-${unit.id}-${ei}`} style={{marginTop:3}}>
+                                      {toggle(seg.qTo??4, q=>{
+                                        const patch={qTo:q};
+                                        if(seg.yrFrom===seg.yrTo && q<(seg.qFrom??1)) patch.qFrom=q;
+                                        updSeg(ei,patch);
+                                      }, [1,2,3,4].map(q=>({v:q,l:'Q'+q,c:kColor})))}
+                                    </div>
                                   </div>
                                 </div>
                                 <div style={{marginBottom:4}}>
@@ -2258,7 +2306,7 @@ export default function App(){
                           {segOverlaps.length>0 && (
                             <div data-testid={`seg-overlap-info-${unit.id}`} style={{fontSize:9,color:blue,background:blue+"11",border:`1px solid ${blue}33`,borderRadius:5,padding:"6px 8px",marginTop:4}}>
                               {segOverlaps.map((o,i)=>(
-                                <div key={i}>ⓘ {o.yrFrom===o.yrTo?o.yrFrom:`${o.yrFrom}–${o.yrTo}`}: concurrent segments — combined gross ${Math.round(o.combinedGross/1000)}K/yr</div>
+                                <div key={i}>ⓘ {o.yrFrom===o.yrTo&&o.qFrom===o.qTo?`${o.yrFrom} Q${o.qFrom}`:`${o.yrFrom} Q${o.qFrom}–${o.yrTo} Q${o.qTo}`}: concurrent segments — combined gross ${Math.round(o.combinedGross/1000)}K/yr</div>
                               ))}
                             </div>
                           )}

@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.8.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.9.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.8.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.8.0');
+    await expect(page.locator('text=v5.9.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.9.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.8.0', async ({ page }) => {
+  test('L1 — Version header shows v5.9.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.8.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.8.0 confirmed');
+    await expect(page.locator('text=v5.9.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.9.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -2071,6 +2071,120 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     await page.waitForTimeout(200);
     const ssAfter = await page.locator('th').filter({ hasText: /^SS$/ }).count();
     expect(ssAfter).toBeGreaterThan(ssBefore);
+  });
+
+  test('R31 — quarter-bounded segment produces income only in covered months, with partial-year proration', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { makeParams, buildMonthlyScenario, freshPropertiesDefaults } = window.__engine;
+      const baseProps = freshPropertiesDefaults();
+      // Barberry has one unit -- replace its segments with a single LTR
+      // segment covering only 2027 Q2-Q3 (Apr-Sep).
+      const props = baseProps.map(p => p.id === 'barberry'
+        ? { ...p, units: p.units.map(u => ({ ...u, segments: [
+            { yrFrom: 2027, qFrom: 2, yrTo: 2027, qTo: 3, kind: 'ltr', ltr: { monthlyRent: 2000 } },
+          ] })) }
+        : p);
+      const params = makeParams({ properties: props });
+      const wf = buildMonthlyScenario(params);
+      return wf.filter(r => r.calYear === 2027).map(r => ({ cal: r.cal, barberry: r.propRentalMo?.barberry ?? 0 }));
+    });
+    console.log('  R31 — ' + JSON.stringify(result));
+    const covered = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep'];
+    const nonZero = result.filter(r => r.barberry > 0);
+    const zero = result.filter(r => r.barberry === 0);
+    expect(nonZero.length).toBe(6);                                             // exactly the 6 Q2-Q3 months
+    expect(zero.length).toBe(6);                                                // the other 6 months of 2027 get nothing
+    expect(nonZero.every(r => covered.some(m => r.cal.startsWith(m)))).toBe(true);
+  });
+
+  test('R32 — inner caps (STR days / MTR months) scale to the segment\'s actual covered months', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { validateUnitSegments, unitSegmentGross, segmentCapMonths } = window.__engine;
+      // Q3-Q4 only -- 6 real months, not 12.
+      const strSeg = { yrFrom: 2027, qFrom: 3, yrTo: 2027, qTo: 4, kind: 'str', str: [{ days: 300, rate: 200, type: 'nightly' }] };
+      const mtrSeg = { yrFrom: 2027, qFrom: 3, yrTo: 2027, qTo: 4, kind: 'mtr', mtr: [{ months: 10, rate: 3000 }] };
+      return {
+        capMonths: segmentCapMonths(strSeg),
+        strErrors: validateUnitSegments([strSeg]),
+        strGross: unitSegmentGross(strSeg),
+        mtrErrors: validateUnitSegments([mtrSeg]),
+        mtrGross: unitSegmentGross(mtrSeg),
+      };
+    });
+    console.log('  R32 — ' + JSON.stringify(result));
+    expect(result.capMonths).toBe(6);                            // half a year, not a full 12
+    expect(result.strErrors.length).toBeGreaterThan(0);          // 300 days > the ~183-day scaled cap
+    expect(result.strGross).toBeLessThanOrEqual(Math.round(365 * 6 / 12) * 200);  // silently clamped too
+    expect(result.mtrErrors.length).toBeGreaterThan(0);          // 10 months > the 6-month scaled cap
+    expect(result.mtrGross).toBe(6 * 3000);                      // clamped to 6 months, not 10
+  });
+
+  test('R33 — LTR + STR in non-overlapping quarters on one unit is accepted', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { validateUnitSegments } = window.__engine;
+      return validateUnitSegments([
+        { yrFrom: 2027, qFrom: 1, yrTo: 2027, qTo: 2, kind: 'ltr', ltr: { monthlyRent: 2500 } },
+        { yrFrom: 2027, qFrom: 3, yrTo: 2027, qTo: 4, kind: 'str', str: [{ days: 150, rate: 200 }] },
+      ]);
+    });
+    console.log('  R33 — errors: ' + JSON.stringify(result));
+    expect(result.length).toBe(0);   // year-level overlap (both 2027) is legal now -- quarters don't overlap
+  });
+
+  test('R34 — LTR overlapping another segment in the same quarter is rejected', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { validateUnitSegments } = window.__engine;
+      return validateUnitSegments([
+        { yrFrom: 2027, qFrom: 1, yrTo: 2027, qTo: 3, kind: 'ltr', ltr: { monthlyRent: 2500 } },
+        { yrFrom: 2027, qFrom: 3, yrTo: 2027, qTo: 4, kind: 'str', str: [{ days: 150, rate: 200 }] },
+      ]);
+    });
+    console.log('  R34 — errors: ' + JSON.stringify(result));
+    expect(result.length).toBeGreaterThan(0);   // both touch Q3 2027 -- real overlap
+  });
+
+  test('R35 — year-only segments (qFrom=1/qTo=4) produce identical income to pre-quarter-granularity behavior (regression guard)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { unitSegmentGross, segmentCapMonths } = window.__engine;
+      const seg = { yrFrom: 2026, qFrom: 1, yrTo: 2046, qTo: 4, kind: 'str', str: [{ days: 120, rate: 280, type: 'nightly' }] };
+      return { capMonths: segmentCapMonths(seg), gross: unitSegmentGross(seg) };
+    });
+    console.log('  R35 — ' + JSON.stringify(result));
+    expect(result.capMonths).toBe(12);          // full year every year -- no cap scaling
+    expect(result.gross).toBe(120 * 280);        // identical to the pre-v5.9.0 unscaled formula (120 days never hit the 365 cap anyway)
+    // Cross-check against the live default scenario -- fifteenth-top (qFrom=1/qTo=4 by default) still earns rental normally.
+    const live = await page.evaluate(() => {
+      const wf = window.__wfData;
+      return wf.filter(r => r.calYear === 2030).reduce((s, r) => s + (r.propRentalMo?.fifteenth || 0), 0);
+    });
+    expect(live).toBeGreaterThan(0);
+  });
+
+  test('R36 — Q1-Q4 UI selectors on a segment actually change its coverage/income', async ({ page }) => {
+    await loadApp(page);
+    await addSegment(page, 'sixth', 'sixth-main');
+    const unit = page.locator('[data-testid="unit-sixth-main"]');
+    const seg = unit.locator('[data-testid^="seg-sixth-main-"]').first();
+    await seg.getByRole('button', { name: 'LTR', exact: true }).click();
+    await page.waitForTimeout(200);
+    // New segment defaults to 2026 Q1 - 2027 Q4 (full years). Narrow the "To"
+    // quarter to Q2 -- 2027 should then only be covered through June.
+    await page.locator('[data-testid="seg-qto-sixth-main-0"]').getByRole('button', { name: 'Q2', exact: true }).click();
+    await page.waitForTimeout(300);
+    const result = await page.evaluate(() => {
+      const wf = window.__wfData;
+      const jan27 = wf.find(r => r.calYear === 2027 && r.cal.startsWith('Jan'))?.propRentalMo?.sixth ?? 0;
+      const jul27 = wf.find(r => r.calYear === 2027 && r.cal.startsWith('Jul'))?.propRentalMo?.sixth ?? 0;
+      return { jan27, jul27 };
+    });
+    console.log('  R36 — Jan27/Jul27 sixth propRentalMo after narrowing To-quarter to Q2: ' + JSON.stringify(result));
+    expect(result.jan27).toBeGreaterThan(0);   // still covered (Q1)
+    expect(result.jul27).toBe(0);              // no longer covered -- was Q3, now past qTo=Q2
   });
 
 });

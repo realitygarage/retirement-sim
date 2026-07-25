@@ -307,28 +307,77 @@ export function estimateTax(p, pension, workInc, ssYours, ssBrenda, rentalGross,
 
 // =============================================================================
 // UNIT SEGMENTED INCOME (v4.0.0-A, generalized from the v3.1.1 6th-St-only model)
-// Outer segment: { yrFrom, yrTo, kind:'str'|'mtr'|'ltr',
+// Outer segment: { yrFrom, qFrom, yrTo, qTo, kind:'str'|'mtr'|'ltr',
 //                  str:[{days,rate,type?}], mtr:[{months,rate}], ltr:{monthlyRent} }
+// v5.9.0: qFrom/qTo add quarter precision to what was previously year-only
+// coverage -- default 1/4 (via ??) reproduces the old full-year behavior
+// exactly. Reuses quarterStartMonth (the same quarter->month mapping property
+// sales/obligations have used since v5.0.2), not a parallel implementation.
 // Inner caps: STR days clamp to 365/yr, MTR months clamp to 12/yr (enforced by
-// unitSegmentGross's running-total clamp AND flagged by validateUnitSegments).
+// unitSegmentGross's running-total clamp AND flagged by validateUnitSegments)
+// -- both now SCALE to segmentCapMonths() for a segment that never covers a
+// full 12-month calendar year, since the inner str/mtr array describes one
+// year's worth of activity that repeats every year the segment spans; a
+// segment confined to Q3-Q4 only has ~6 real months to book, not 12.
 // =============================================================================
+// Absolute month index (calYear*12+mo1to12, the same convention _ssAbsMo etc.
+// use elsewhere in this file) for the first/last real month a segment covers.
+export function segmentStartAbsMonth(seg){
+  const f = seg.yrFrom??seg.yr;
+  return f*12 + quarterStartMonth(seg.qFrom??1);
+}
+export function segmentEndAbsMonth(seg){
+  const t = seg.yrTo??seg.yrFrom??seg.yr;
+  return t*12 + quarterStartMonth(seg.qTo??4) + 2; // +2: quarterStartMonth is the quarter's FIRST month
+}
+export function segmentCoversMonth(seg, calYear, mo1to12){
+  const abs = calYear*12+mo1to12;
+  return abs>=segmentStartAbsMonth(seg) && abs<=segmentEndAbsMonth(seg);
+}
+// Months of coverage this segment has within one specific calendar year
+// (0 if that year isn't touched at all; a middle year of a multi-year span
+// is always the full 12).
+function segmentCoverageMonthsInYear(seg, year){
+  const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
+  if(year<f || year>t) return 0;
+  const qFrom = year===f ? (seg.qFrom??1) : 1;
+  const qTo   = year===t ? (seg.qTo??4)   : 4;
+  return Math.max(0, qTo-qFrom+1)*3;
+}
+// The scale for the 365-day/12-month inner caps: the MOST months this
+// segment ever covers within any single calendar year it touches. 12 (no
+// scaling) as soon as any fully-covered year is in its span; less only when
+// the whole segment lives inside partial-quarter territory every year.
+export function segmentCapMonths(seg){
+  const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
+  // No date range at all (e.g. a caller that only cares about the kind+rate
+  // structure, not when it's active) -- treat as always-on, same as every
+  // caller got pre-v5.9.0 when the cap was an unconditional 365/12.
+  if(f==null || t==null) return 12;
+  let max=0;
+  for(let y=f;y<=t;y++) max=Math.max(max, segmentCoverageMonthsInYear(seg,y));
+  return max;
+}
 export function unitSegmentGross(seg){
   if(!seg) return 0;
   if(seg.kind==='ltr') return (seg.ltr?.monthlyRent||0)*12;
+  const capMonths = segmentCapMonths(seg);
   if(seg.kind==='mtr'){
     let used=0,total=0;
     for(const g of (seg.mtr||[])){
       if(!g.months||!g.rate) continue;
-      const m=Math.min(g.months, Math.max(0,12-used));
+      const m=Math.min(g.months, Math.max(0,capMonths-used));
       total+=m*g.rate; used+=m;
     }
     return total;
   }
-  // 'str' -- days x nightly-or-monthly rate, capped at 365 days/yr
+  // 'str' -- days x nightly-or-monthly rate, capped at 365 days/yr (scaled
+  // down to capMonths/12 for a segment that never covers a full year)
+  const capDays = Math.round(365*capMonths/12);
   let used=0,total=0;
   for(const g of (seg.str||[])){
     if(!g.days||!g.rate) continue;
-    const d=Math.min(g.days, Math.max(0,365-used));
+    const d=Math.min(g.days, Math.max(0,capDays-used));
     total += g.type==='monthly' ? (d/30)*g.rate : d*g.rate;
     used+=d;
   }
@@ -357,31 +406,46 @@ export function unitSegmentNet(seg, opts={}){
   return Math.max(0, gross - vac - mgr);
 }
 
+// Human-readable "2027 Q1–2028 Q3" (collapses to "2027 Q1" for a single
+// quarter) -- shared by validateUnitSegments' errors and unitSegmentOverlaps'
+// info rows so both describe ranges the same way.
+function segRangeLabel(f,qf,t,qt){
+  return (f===t && qf===qt) ? `${f} Q${qf}` : `${f} Q${qf}–${t} Q${qt}`;
+}
+
 // Returns [] when valid; list of human-readable errors otherwise. Overlapping
-// outer year ranges are ALLOWED and SUM, except: LTR is exclusive within its
-// span for a unit (a tenant occupies the whole unit) -- reject LTR overlapping
-// ANY other segment on the same unit. STR+MTR may coexist on one unit freely.
+// outer ranges are ALLOWED and SUM, except: LTR is exclusive within its span
+// for a unit (a tenant occupies the whole unit) -- reject LTR overlapping ANY
+// other segment on the same unit IN THE SAME QUARTERS (v5.9.0: was year-level
+// overlap, which wrongly rejected e.g. LTR Q1-Q2 + STR Q3-Q4 on one unit --
+// now compares absolute-month ranges via segmentStartAbsMonth/EndAbsMonth, so
+// non-overlapping quarter ranges on the same unit are legal). STR+MTR may
+// coexist on one unit freely, at any granularity.
 export function validateUnitSegments(segs){
   const errors=[];
   const list=segs||[];
   for(let i=0;i<list.length;i++){
     const a=list[i];
+    const capMonths = segmentCapMonths(a);
     if(a.kind==='str'){
+      const cap = Math.round(365*capMonths/12);
       const d=(a.str||[]).reduce((s,g)=>s+(g.days||0),0);
-      if(d>365) errors.push(`Segment ${i+1}: ${d} STR days exceeds 365/yr cap`);
+      if(d>cap) errors.push(`Segment ${i+1}: ${d} STR days exceeds ${cap}-day cap (${capMonths}/12 months covered)`);
     }
     if(a.kind==='mtr'){
       const m=(a.mtr||[]).reduce((s,g)=>s+(g.months||0),0);
-      if(m>12) errors.push(`Segment ${i+1}: ${m} MTR months exceeds 12/yr cap`);
+      if(m>capMonths) errors.push(`Segment ${i+1}: ${m} MTR months exceeds ${capMonths}-month cap`);
     }
     if(a.kind==='ltr'){
-      const aF=a.yrFrom??a.yr, aT=a.yrTo??a.yr;
+      const aF=a.yrFrom??a.yr, aT=a.yrTo??a.yr, aQf=a.qFrom??1, aQt=a.qTo??4;
+      const aS=segmentStartAbsMonth(a), aE=segmentEndAbsMonth(a);
       for(let j=0;j<list.length;j++){
         if(i===j) continue;
         const b=list[j];
-        const bF=b.yrFrom??b.yr, bT=b.yrTo??b.yr;
-        if(aF<=bT && bF<=aT){
-          errors.push(`Segment ${i+1} (LTR, ${aF}–${aT}) cannot overlap segment ${j+1} (${(b.kind||'').toUpperCase()}, ${bF}–${bT}) — LTR occupies the whole unit`);
+        const bF=b.yrFrom??b.yr, bT=b.yrTo??b.yr, bQf=b.qFrom??1, bQt=b.qTo??4;
+        const bS=segmentStartAbsMonth(b), bE=segmentEndAbsMonth(b);
+        if(aS<=bE && bS<=aE){
+          errors.push(`Segment ${i+1} (LTR, ${segRangeLabel(aF,aQf,aT,aQt)}) cannot overlap segment ${j+1} (${(b.kind||'').toUpperCase()}, ${segRangeLabel(bF,bQf,bT,bQt)}) — LTR occupies the whole unit`);
           break;
         }
       }
@@ -390,19 +454,27 @@ export function validateUnitSegments(segs){
   return errors;
 }
 
-// Contiguous year ranges (within a unit) covered by 2+ segments, with the
+// Contiguous quarter ranges (within a unit) covered by 2+ segments, with the
 // combined nominal gross $/yr (no rent growth) -- informational only, never
-// blocking (LTR-exclusivity above is the only rejection rule).
+// blocking (LTR-exclusivity above is the only rejection rule). v5.9.0: was
+// year-granularity (a hardcoded 2026-2047 scan); now scans quarter-by-quarter
+// via segmentStartAbsMonth/EndAbsMonth so it doesn't flag e.g. LTR Q1-Q2 +
+// STR Q3-Q4 as "concurrent" when they don't actually overlap in real time.
 export function unitSegmentOverlaps(segs){
   const list=segs||[];
-  const cover = yr=>list.filter(s=>{const f=s.yrFrom??s.yr;const t=s.yrTo??s.yr;return yr>=f&&yr<=t;});
+  const coverQ = (yr,q)=>{
+    const abs = yr*12+quarterStartMonth(q);
+    return list.filter(s=>abs>=segmentStartAbsMonth(s) && abs<=segmentEndAbsMonth(s));
+  };
   const out=[];
   let run=null;
   for(let yr=2026;yr<=2047;yr++){
-    const c = yr<=2046 ? cover(yr) : [];
-    if(c.length>=2 && !run){ run={yrFrom:yr, yrTo:yr, combinedGross:c.reduce((s,x)=>s+unitSegmentGross(x),0)}; }
-    else if(c.length>=2 && run){ run.yrTo=yr; }
-    else if(run){ out.push(run); run=null; }
+    for(let q=1;q<=4;q++){
+      const c = yr<=2046 ? coverQ(yr,q) : [];
+      if(c.length>=2 && !run){ run={yrFrom:yr, qFrom:q, yrTo:yr, qTo:q, combinedGross:c.reduce((s,x)=>s+unitSegmentGross(x),0)}; }
+      else if(c.length>=2 && run){ run.yrTo=yr; run.qTo=q; }
+      else if(run){ out.push(run); run=null; }
+    }
   }
   return out;
 }
@@ -1126,8 +1198,11 @@ export function buildMonthlyScenario(p){
       if(ownedMo(prop.id, calYear, calMonth1to12)){
         for(const unit of (prop.units||[])){
           for(const seg of (unit.segments||[])){
-            const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
-            if(calYear<f || calYear>t) continue;
+            // v5.9.0: month-level coverage (was year-level) -- a segment
+            // covering only part of a year now contributes its 1/12 share
+            // only for the months it actually covers, prorating a partial
+            // year automatically (no separate proration multiplier needed).
+            if(!segmentCoversMonth(seg, calYear, calMonth1to12)) continue;
             propGross += unitSegmentGross(seg)/12*rg;
             propNet   += unitSegmentNet(seg, costOpts)/12*rg;
           }

@@ -68,11 +68,12 @@ export function freshPropertiesDefaults(){
       },
       units: [
         { id: 'fifteenth-top', label: 'Top unit', segments: [
-          { yrFrom: 2026, yrTo: 2046, kind: 'str',
+          // v5.9.0: qFrom:1/qTo:4 -- full-year coverage, identical to pre-quarter-granularity behavior.
+          { yrFrom: 2026, qFrom: 1, yrTo: 2046, qTo: 4, kind: 'str',
             str: [{ days: 120, rate: 280, type: 'nightly' }], mtr: [{ months: 10, rate: 3100 }], ltr: { monthlyRent: 3100 } },
         ] },
         { id: 'fifteenth-bottom', label: 'Bottom unit', segments: [
-          { yrFrom: 2026, yrTo: 2046, kind: 'ltr',
+          { yrFrom: 2026, qFrom: 1, yrTo: 2046, qTo: 4, kind: 'ltr',
             str: [{ days: 120, rate: 280, type: 'nightly' }], mtr: [{ months: 10, rate: 3520 }], ltr: { monthlyRent: 3520 } },
         ] },
       ],
@@ -96,7 +97,7 @@ export function freshPropertiesDefaults(){
       },
       units: [
         { id: 'barberry-main', label: 'Main', segments: [
-          { yrFrom: 2026, yrTo: 2046, kind: 'ltr',
+          { yrFrom: 2026, qFrom: 1, yrTo: 2046, qTo: 4, kind: 'ltr',
             str: [{ days: 120, rate: 280, type: 'nightly' }], mtr: [{ months: 10, rate: 3150 }], ltr: { monthlyRent: 3150 } },
         ] },
       ],

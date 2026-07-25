@@ -1,0 +1,164 @@
+=== SESSION 40 JOURNAL -- Quarter granularity for rental income segments
+    (v5.9.0), ONE COMMIT ===
+
+Date: 2026-07-25
+
+Session goal: extend rental income segments (properties[].units[].segments[])
+from year-only coverage to quarter precision, matching the quarter precision
+property sales/obligations have had since v5.0.2. Explicit spec from the
+user: reuse quarterStartMonth()/the existing quarter helpers rather than
+invent parallel logic; new schema fields default to 1/4 (full year) so
+existing behavior is unchanged; validation, UI, and a specific test list
+were all called out up front. Read session39's journal first per the
+Session Start convention.
+
+--- SCHEMA (engine.js, defaults.js) ---
+
+Segments gain qFrom/qTo: { yrFrom, qFrom, yrTo, qTo, kind, str/mtr/ltr }.
+Every read uses `seg.qFrom??1` / `seg.qTo??4`, the same nullish-coalescing
+backward-compat pattern the codebase already used for `seg.yrFrom??seg.yr`
+(the pre-v4.0.0-A field name) -- no migration code, no SAVE_SCHEMA_VERSION
+bump needed, since a saved segment predating this feature just reads as
+full-year via the fallback. freshPropertiesDefaults()'s three real segments
+got explicit qFrom:1/qTo:4 added for schema clarity (not required for
+correctness, since the fallback already covers it).
+
+--- ENGINE (engine.js) ---
+
+New helpers, all reusing quarterStartMonth() rather than reimplementing the
+quarter->month mapping:
+  - segmentStartAbsMonth/segmentEndAbsMonth(seg) -- absolute month index
+    (calYear*12+mo, the same convention _ssAbsMo etc. already use) for a
+    segment's first/last real covered month.
+  - segmentCoversMonth(seg, calYear, mo1to12) -- month-membership test,
+    replacing the old year-membership test in buildMonthlyScenario's rental
+    loop. Income proration for a partial-covered year falls out for free:
+    the loop already added a segment's annual-gross/12 for every covered
+    month, so switching the test from year- to month-granularity means a
+    6-month segment automatically contributes exactly 6 months' worth, no
+    separate proration multiplier needed.
+  - segmentCoverageMonthsInYear/segmentCapMonths(seg) -- the inner STR-day/
+    MTR-month caps (365/12) now scale to the MOST months the segment covers
+    in any single calendar year it touches (12 = uncapped, as soon as any
+    fully-covered year exists in its span; less only if the whole segment
+    lives inside partial-quarter territory every year). Applied inside both
+    unitSegmentGross's own clamp AND validateUnitSegments' error check,
+    mirroring the pre-existing "enforced twice" pattern noted in the file's
+    own top-of-section comment.
+
+validateUnitSegments' LTR-exclusivity check and the informational
+unitSegmentOverlaps() detector both moved from year-range overlap to
+absolute-month-range overlap (segmentStartAbsMonth/EndAbsMonth) -- per the
+user's explicit example, LTR Q1-Q2 + STR Q3-Q4 on one unit is now legal
+(previously rejected as a same-year overlap even though the quarters never
+actually overlapped in real time). unitSegmentOverlaps kept its existing
+hardcoded 2026-2047 year-range scan (a pre-existing BASE.startYear-relative
+hardcode, out of this session's scope) but now nests a quarter loop inside
+it so its "concurrent segments" info notice doesn't false-positive on
+non-overlapping quarters either.
+
+--- UI (App.jsx) ---
+
+New Q1-Q4 toggle rows beside each segment's existing From/To year sliders,
+using the same `toggle()` button-group helper and Q1-4 pattern as property
+sale timing (`sale-quarter-toggle-${propId}`) and work-income-curve points --
+not a new widget pattern. Added data-testid`seg-qfrom-${unitId}-${ei}` /
+`seg-qto-${unitId}-${ei}` wrappers so tests can target the right toggle
+group directly (CLAUDE.md's existing warning about setSlider's `near`
+heuristic grabbing the wrong control applies here too -- two Q1-4 button
+rows per segment card would otherwise be ambiguous). The year-slider onChange
+handlers also clamp the paired quarter (qFrom<=qTo) if dragging causes
+yrFrom/yrTo to collapse to the same year, mirroring the pre-existing
+mutual-clamp pattern the year sliders already had for each other. Segment
+header label, the LTR-exclusivity error text, and the concurrent-segments
+info notice all updated to show quarter info ("2027 Q1-2027 Q2" instead of
+just "2027").
+
+--- BUG FOUND AND FIXED MID-SESSION: segmentCapMonths on date-less segments ---
+
+First Playwright run (run_tests.ps1, headed, 138 tests) surfaced a real
+regression: two PRE-EXISTING tests (C4, R5) call unitSegmentGross/
+unitSegmentNet directly with a bare `{kind:'str', str:[...]}` fixture --
+deliberately no yrFrom/yrTo/yr, since those tests only care about the
+kind/rate-structure math, not timing. segmentCapMonths's own loop
+(`for(let y=f;y<=t;y++)`) silently ran zero iterations when f/t were both
+undefined, returning capMonths=0 -- which zeroed the STR/MTR income clamp
+entirely (365*0/12 = 0 days allowed). Before this session, the cap was an
+unconditional 365/12 regardless of whether a segment even had date fields,
+so this was a real behavior change my new scaling logic introduced by
+accident, not a latent pre-existing issue.
+
+Fixed by making segmentCapMonths return 12 (uncapped, matching the old
+unconditional behavior) when a segment has no date range at all -- treating
+"no dates given" as "always active" rather than "active zero months".
+Verified the fix directly against engine.js with a scratch Node script
+(node -e with a dynamic import, not saved) before waiting on the full test
+suite to confirm.
+
+--- VERIFICATION ---
+
+Ran `npm run lint` (34 problems, at session39's baseline, no new issues) and
+`npm run build` (clean) before the first test run. First full run_tests.ps1
+pass (138 tests, ~12min, headed) had exactly two failures: C4 (the bug
+above -- ran before the fix landed mid-suite, since Vite HMR updates
+in-flight; every OTHER segment-related test that ran AFTER the fix,
+including R5, R31-R36, and L1/E5's version-string checks, passed clean) and
+X2 (Group X, v5.3.0 sticky-scrollbar sync -- an area this session never
+touched, unrelated to rental segments). Per explicit user instruction, did
+NOT re-run the full suite a second time to get an all-green report --
+instead relied on: (a) a targeted scratch-script re-verification confirming
+unitSegmentGross/unitSegmentNet now return the exact pre-regression values
+for both C4's and R5's fixtures, and (b) the fact that every quarter-
+granularity test in the first run (R5, R31-R36) already executed against
+the fixed code and passed. X2 was left uninvestigated -- flagged as an open
+item below, not confirmed flaky vs. genuinely broken.
+
+New tests added (Group R, R31-R36):
+  R31 -- quarter-bounded segment (2027 Q2-Q3) produces income in exactly the
+         6 covered months, $0 elsewhere.
+  R32 -- STR/MTR inner caps scale to segmentCapMonths (a Q3-Q4-only segment
+         gets a 6-month/~183-day cap, not 12/365).
+  R33 -- LTR Q1-Q2 + STR Q3-Q4 on one unit: zero validation errors.
+  R34 -- LTR Q1-Q3 + STR Q3-Q4 on one unit (real Q3 overlap): rejected.
+  R35 -- year-only segment (qFrom=1/qTo=4) regression guard: capMonths=12,
+         gross unchanged from the pre-v5.9.0 formula.
+  R36 -- UI-level test: clicking the new Q2 "To"-quarter toggle on a live
+         segment actually changes propRentalMo coverage (Jan still covered,
+         Jul no longer).
+
+--- FINAL STATE ---
+
+One commit:
+  v5.9.0 -- quarter granularity for rental income segments
+
+Not pushed yet this session -- awaiting explicit push confirmation (the
+mid-session segmentCapMonths fix means the diff being committed differs
+slightly from what was first shown for review, so re-confirming before any
+push per this repo's workflow policy).
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+New from this session:
+  - X2 (Group X sticky-scrollbar test) failed in the one full run performed
+    this session. Not investigated -- unclear if flaky or a genuine
+    pre-existing regression from some other cause. Worth a dedicated look
+    next session, ideally with a couple of repeat runs to establish whether
+    it's timing-flaky before treating it as a real bug.
+  - segmentClipInfo (the sale-quarter "truncated" UI note) was deliberately
+    LEFT untouched at year granularity -- it's advisory/non-blocking only,
+    and updating it to be quarter-precise wasn't in the requested scope.
+    Could very slightly misdescribe an edge case (a segment whose own qTo
+    already ends before the property's sale quarter in the same year) but
+    doesn't affect any actual computation.
+  - unitSegmentOverlaps kept its pre-existing hardcoded 2026-2047 year-range
+    scan (not migrated to BASE.startYear-relative) -- same pre-existing
+    hardcode noted in past sessions' CLAUDE.md-compliance passes, untouched
+    here since it was out of this session's stated scope.
+
+Same pre-existing carried-forward items as session38/39 (properties[].
+appreciationPct per-property override still schema-only/no UI; Nolan-loan
+grace-period gate still elapsed-months-based, not calendar-anchored; no
+Playwright coverage yet for v5.4.0-v5.6.0 Defaults-tab UI; dead diCap_/
+maintRate_ plumbing; capped reserve-funding display; no saved never-sell
+pin; the "Free Cash Flow -- breakdown" panel's gross-rental-without-op-cost
+gap) remain untouched.
