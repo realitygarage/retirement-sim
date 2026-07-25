@@ -1,0 +1,198 @@
+=== SESSION 41 JOURNAL -- Shared chart zoom + adaptive quarterly
+    resolution (v5.10.0), TWO COMMITS ===
+
+Date: 2026-07-25
+
+Session goal: add a shared year-range zoom control to the Simulator tab's
+chart grid, with resolution that adapts to the visible span -- quarterly
+detail when zoomed in near sales/obligations/segment transitions, annual
+shape when zoomed out, no horizontal scrolling either way. Explicit spec
+from the user: dual-handle range control, >8yr stays annual / <=8yr (a named
+constant) goes quarterly, applies to ALL charts + their breakdown tables +
+pinned-scenario lines, plus a specific test list (regression/switch/
+consistency/breakdown-match/pin-respect guards).
+
+--- ENGINE (engine.js) ---
+
+Generalized the existing annual-only aggregation into a period-agnostic one:
+  - New calMonth1to12 field on every monthly wfData row (buildMonthlyScenario)
+    -- the value already existed as a local loop variable, just wasn't on the
+    pushed row; needed so period-bucketing can tell which calendar quarter a
+    month falls in.
+  - New periodKeyOf(r, periodMonths) -- returns r.calYear for periodMonths=12
+    (unchanged annual behavior), or calYear*4+quarterIndex0 for periodMonths=3,
+    using the SAME quarterStartMonth calendar-quarter mapping property sales
+    have used since v5.0.2 (Jan-Mar/Apr-Jun/Jul-Sep/Oct-Dec), not a parallel
+    definition.
+  - aggregateMonthlyToAnnual's body became aggregateMonthlyToPeriod(wfRows, p,
+    periodMonths=12) -- groups by periodKeyOf instead of bare calYear; a
+    quarterly group's `cal` field is a fractional year (2027, 2027.25, 2027.5,
+    2027.75...) = pk/4, which for periodMonths=12 reduces to pk itself (byte-
+    identical to the pre-v5.10.0 `cal`). aggregateMonthlyToAnnual is now a
+    one-line wrapper (periodMonths=12) so every existing caller (App.jsx,
+    window.__engine for Playwright) is unaffected.
+  - One non-mechanical fix the generalization required: the disposition/
+    obligation year-match test (`d.year===cal`) would have double/quadruple-
+    counted a same-year sale into every quarter of that year once `cal` could
+    represent a quarter instead of a year. Now matches on the group's real
+    `first.calYear` (not the possibly-fractional `cal` label) and, only when
+    periodMonths===3, also gates on the group's own quarter (d.quarter) --
+    annual behavior (periodMonths===12) is unchanged since that gate is
+    skipped entirely.
+
+--- APP.JSX ---
+
+chartData's builder (previously ~180 lines inline in a useMemo) is now the
+module-level buildChartRows(periodRows, wfRows, periodMonths, pinsForChart,
+liveParams, discFloor) -- same logic, parameterized so it can run at either
+resolution without duplicating it. Its internal by-period bucket maps (disc/
+sweep/fc_*/etc, previously keyed by bare r.cal from wfData) now key by
+periodKeyOf(r,periodMonths); periodRows lookups use a small keyOfCal(cal)
+inverse (cal for annual, Math.round(cal*4) for quarterly) since periodRows
+only carry `cal`, not the raw calYear/calMonth1to12 a wfRow has.
+
+Found and fixed a real latent bug while doing this refactor (not otherwise in
+scope, but unavoidable once the builder needed to run on more than the full
+unfiltered annual array): the Liquidation-NW block's appreciation exponent
+was `Math.pow(1+app, i)` where i is the .map index -- only ever correct
+because chartData was always built from the full unfiltered annual liveRows,
+where index i happens to equal true elapsed years from BASE.startYear. Once
+the same builder can run on a range-filtered and/or quarterly array, i no
+longer means "years elapsed" at all. Replaced with each row's own
+`cal - BASE.startYear`, which is correct in every case and collapses to the
+exact same value i always had for the untouched full-range-annual case (so
+the byte-identical regression guard still holds). Same fix applied to the
+per-pin liqNW block.
+
+New state/memos:
+  - chartRangeStart/chartRangeEnd (state, default BASE.startYear..+20 -- the
+    same horizon bound every other calendar-year slider in this file uses,
+    per CLAUDE.md's "never hardcode 2026/2046" rule -- the user's own spec
+    said "2026-2046" but that's just this household's current BASE.startYear,
+    not a fact to hardcode).
+  - QUARTERLY_ZOOM_THRESHOLD_YEARS=8, module-scope named constant.
+  - chartResolution memo (span<=threshold ? 'quarterly':'annual').
+  - quarterlyLiveRows/quarterlyChartData memos -- quarterly counterparts of
+    liveRows/chartData, always kept current (cheap, same O(months) cost class
+    as liveRows itself) rather than computed lazily, so toggling the range
+    doesn't stall.
+  - displayChartData/displayLiveRows -- resolution-appropriate source,
+    filtered to the zoom range. The ORIGINAL chartData/liveRows are left
+    completely untouched (still full-horizon, always annual) because they
+    also drive stat-card reads elsewhere (yr10 NW, debt-clear year, etc.)
+    that must NOT move just because a user zoomed a chart.
+
+Chart component: LineChart's `data=` and the breakdown-table `bdSource` now
+read displayChartData/displayLiveRows instead of chartData/liveRows. New
+periodTickFmt (quarterly: "Q2'27"; annual: unchanged "'27") drives both the
+XAxis tickFormatter and the breakdown table's column headers.
+
+Pinned lines: quarterlyChartData re-aggregates each pin's OWN already-stored
+raw monthly wfRows via aggregateMonthlyToPeriod(pin.wfRows, pin.paramSnapshot,
+3) -- the exact same "pins run the full engine, not an approximation" pattern
+pins have used since v5.0.0 (A2). Confirmed pin.paramSnapshot.obligation is
+structurally identical to engine params' obligation (same field names, no %
+conversion, per the pre-existing buildRowsFromSnapshot comment) -- the only
+field aggregateMonthlyToPeriod's `p` argument actually reads -- so no new
+pin-side plumbing (e.g. a stored "engine params" field) was needed at all.
+
+Zoom UI: two mutually-clamped From/To range sliders + a resolution readout +
+a "full range" reset button, in a new card above the chart grid. Deliberately
+NOT a single native two-thumb slider -- HTML <input type=range> only supports
+one thumb, and this codebase's established "range" idiom (rental segment
+yrFrom/yrTo, property sale timing) is already two adjacent sliders with
+mutual clamping, so this mirrors that instead of inventing a new widget.
+Scope: applied to all FIVE Chart-component charts in the grid (the user
+named four -- Work Income/FCF/Debt/NW -- but Fixed Costs uses the identical
+shared <Chart> component in the same grid, so excluding it would have been
+inconsistent). Deliberately did NOT extend zoom to the separate "Cumulative
+Income vs Cost" section further down the tab -- that panel's whole point is
+a full-lifetime running total ("20-year running totals"), which a partial-
+range crop would change the meaning of, and the user's spec only described
+the chart-grid comparison charts.
+
+New window.__chartZoom test-scaffolding export (same pattern as __chartData/
+__wfData/__liveRows): {rangeStart, rangeEnd, resolution, displayChartData,
+displayLiveRows, quarterlyChartData, quarterlyLiveRows}.
+
+--- TESTS (Group Y, 6 new) ---
+
+Y1 -- full range/annual is byte-identical to the pre-v5.10.0 chartData/
+      liveRows (JSON.stringify equality) -- the explicit regression guard.
+Y2 -- narrowing to a 5-year window switches resolution to quarterly, 20 rows
+      (5yr*4). Uses a MIDDLE window (base+5..base+9), not the sim's own start,
+      to sidestep the partial-first-year/first-quarter edge case (BASE.
+      startMonth isn't necessarily January, so the very first calendar
+      quarter of the horizon can be genuinely partial).
+Y3 -- consistency guard: reads the always-full window.__chartZoom.
+      quarterlyChartData directly (no slider interaction) and checks the
+      mean of a year's 4 quarterly fixedTotal/reqWork values equals the
+      annual figure (mean-of-means, equal-weighted since real quarters are 3
+      months each) within Math.round tolerance; separately checks hiDebt
+      (a snapshot, not an average) matches exactly at Q1 vs the annual row.
+Y4 -- breakdown table headers become "Q1'31".."Q4'35" pattern-matched at
+      quarterly resolution. (Locator note: had to walk ancestor::div[3] from
+      the chart's title text, not [2] -- the title's grandparent is only the
+      header ROW div, which contains the breakdown button but not the table;
+      the table is a later sibling of the header row inside the OUTER card
+      div, one level further up.)
+Y5 -- pinned line's chart-data field (pin_<id>_di) is present and numeric at
+      every row of a quarterly-resolution zoomed view.
+Y6 -- "full range" reset restores annual/21-rows.
+
+--- VERIFICATION ---
+
+npm run build: clean. npm run lint: 34 problems, matching session40's exact
+baseline (no new issues -- the pre-existing "Chart created during render"
+errors are unrelated to this session, Chart was already defined inline
+before these changes too).
+
+Full run_tests.ps1 (144 tests, headed, ~12.4min): 143 passed, 1 failed (X2,
+Group X's sticky-horizontal-scrollbar test) -- the SAME failure session40's
+journal already flagged as an open item from ITS full run, unrelated to
+rental segments then and unrelated to chart zoom now (this session never
+touched the Cash Flow tab). Left uninvestigated again, still carried forward
+below. All 6 new Group Y tests passed, along with every other previously-
+passing test including the two version-string checks (E5, L1, now "v5.10.0").
+
+--- SIDE TASK: permission-prompt friction ---
+
+Mid-session, the user asked to stop being prompted for permission every time
+the test suite runs. Root cause: .claude/settings.local.json had explicit
+"ask" overrides (`Bash(powershell*run_tests*)`, `Bash(*run_tests.ps1*)`) that
+forced a prompt for any Bash-tool invocation of run_tests.ps1 regardless of
+the allow list, AND no allow rule at all covered a PowerShell-tool
+invocation (the tool actually used to launch it this session) -- past
+sessions' allow entries were narrow exact-string matches for old command
+variants, not prefix-wildcarded. Removed the two ask overrides and added
+prefix-wildcarded allow rules for both tool forms (Bash and PowerShell) of
+run_tests.ps1 and npx playwright test. Committed separately from the feature
+work (unrelated concern). Note: .claude/settings.local.json is tracked in
+git in this repo (not actually gitignored -- the repo's *.local gitignore
+pattern doesn't match "settings.local.json", which ends in .json not
+.local) -- pre-existing, not touched this session.
+
+--- FINAL STATE ---
+
+Two commits:
+  v5.10.0 -- shared year-range chart zoom with adaptive quarterly resolution
+  chore: stop prompting for run_tests.ps1 / playwright test permission
+
+Not pushed yet this session -- awaiting explicit push confirmation per this
+repo's workflow policy.
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+New from this session: none beyond what's noted above.
+
+Same pre-existing carried-forward items as session40 (X2 Group X sticky-
+scrollbar test still failing/unconfirmed-flaky across two separate sessions'
+full runs now -- worth a dedicated look, ideally several repeat runs, before
+treating it as a real regression rather than viewport/timing flake;
+segmentClipInfo year-only advisory note; unitSegmentOverlaps' hardcoded
+2026-2047 scan; properties[].appreciationPct per-property override still
+schema-only/no UI; Nolan-loan grace-period gate still elapsed-months-based;
+no Playwright coverage yet for v5.4.0-v5.6.0 Defaults-tab UI; dead diCap_/
+maintRate_ plumbing; capped reserve-funding display; no saved never-sell
+pin; the "Free Cash Flow -- breakdown" panel's gross-rental-without-op-cost
+gap) remain untouched.
