@@ -1,3 +1,41 @@
+// v5.10.0 -- Shared year-range zoom control for the Simulator tab's chart
+// grid, with resolution that adapts to the visible span: >8 years (the new
+// QUARTERLY_ZOOM_THRESHOLD_YEARS constant) renders/tables at the existing
+// annual resolution; <=8 years switches every chart (Work Income/FCF/Debt/
+// NW/Fixed Costs) and its breakdown table to quarterly, aggregated from the
+// same monthly wfData annual already draws from -- no separate engine.
+// engine.js: aggregateMonthlyToAnnual is now a thin wrapper around a new
+// aggregateMonthlyToPeriod(wfRows,p,periodMonths), generalized via a new
+// periodKeyOf() helper (calYear for annual, calYear*4+quarterIndex0 for
+// quarterly -- quarters are real calendar quarters, Jan-Mar/Apr-Jun/etc, via
+// the same quarterStartMonth mapping property sales already use). Monthly
+// rows gained a calMonth1to12 field so periodKeyOf can bucket by real
+// calendar quarter. The one non-mechanical part of the generalization: a
+// disposition/obligation's year-only match test (`d.year===cal`) would have
+// double/quadruple-counted a same-year sale into every quarter of that year,
+// so it now also gates on the group's own quarter (d.quarter) when
+// periodMonths===3 -- annual behavior (periodMonths===12) is unchanged.
+// App.jsx: chartData's builder logic (previously inline in a useMemo) is
+// now the module-level buildChartRows(), parameterized by periodMonths so it
+// can run at either resolution; the same refactor fixed a real latent bug in
+// its Liquidation-NW appreciation math (Math.pow(1+app,i) used the array
+// index as "years elapsed" -- only ever correct because the array was always
+// the full unfiltered annual liveRows; now uses each row's own
+// `cal-BASE.startYear`, which is correct in every case including a
+// range-filtered and/or quarterly array, and reduces to the exact same value
+// for the untouched full-range-annual case). New chartRangeStart/
+// chartRangeEnd state drives displayChartData/displayLiveRows (range-
+// filtered, resolution-appropriate); Chart's own LineChart/breakdown table
+// now read those instead of the always-full-range-annual chartData/liveRows
+// (which are kept as-is, still full/annual, for the stat-card reads
+// elsewhere that must NOT move when a user zooms a chart). Pinned-scenario
+// lines get the same treatment: quarterlyChartData re-aggregates each pin's
+// already-stored raw monthly wfRows via aggregateMonthlyToPeriod(...,3), the
+// same one-engine-always pattern pins have used since v5.0.0 (A2) -- no
+// separate quarterly pin approximation. Zoom UI is two mutually-clamped
+// From/To sliders (not a native two-thumb control -- HTML range inputs only
+// support one thumb, and this codebase's established "range" idiom for e.g.
+// each rental segment's yrFrom/yrTo is already two adjacent sliders).
 // v5.9.0 -- Quarter granularity for rental income segments (previously
 // year-only). Segments gain qFrom/qTo (default 1/4, reproducing exact
 // pre-v5.9.0 full-year behavior); coverage is now tested at the absolute-
@@ -369,7 +407,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, segmentStartAbsMonth, segmentEndAbsMonth, segmentCoversMonth, segmentCapMonths, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
+import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggregateMonthlyToAnnual, aggregateMonthlyToPeriod, periodKeyOf, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, segmentStartAbsMonth, segmentEndAbsMonth, segmentCoversMonth, segmentCapMonths, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
 // v4.3.0: BASE.startYear/startMonth (imported above) are the single source
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
@@ -379,7 +417,7 @@ import { SC_DEFAULTS, makeParams, mergeProperties, PIN_COLORS, SAVE_SCHEMA_VERSI
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
   window.__engine = {
-    BASE, HI_TOTAL, buildMonthlyScenario, aggregateMonthlyToAnnual, computeDispositions, keyStats, disposeAsset, taxRecognized,
+    BASE, HI_TOTAL, buildMonthlyScenario, aggregateMonthlyToAnnual, aggregateMonthlyToPeriod, periodKeyOf, computeDispositions, keyStats, disposeAsset, taxRecognized,
     DISPO_DEFAULTS, makeParams,
     workFromCurve, remainBal, estimateTax,
     unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps,
@@ -398,6 +436,11 @@ if (typeof window !== 'undefined') {
 // pickers, event-timeline notes). Single shared constant -- was previously an
 // inline array literal at the "Launch {month} {year}" header display.
 const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// v5.10.0: the Simulator tab's chart zoom control switches all charts+tables
+// from annual to quarterly resolution once the visible span is this many
+// years or fewer -- named so the threshold isn't a magic number scattered
+// across the resolution memo, the tick formatter, and the range slider.
+const QUARTERLY_ZOOM_THRESHOLD_YEARS = 8;
 // v4.4.0: Bob's SS $ formula, generalized from the old stepped ssAge (65/66/67)
 // toggle to a continuous derived age (see ssClaimAge, engine.js). Same two-piece
 // rule as before: flat FRA at/after 67, linear Early->FRA interpolation below --
@@ -582,6 +625,204 @@ function StickyHScroll({ targetRef, trackBg, trackBorder }){
       </div>
     </div>
   );
+}
+
+// v5.10.0: pure builder for the Simulator tab's chart-point array, factored
+// out of the (formerly inline) chartData useMemo so the exact same logic can
+// run at either annual (periodMonths=12, periodRows=liveRows) or quarterly
+// (periodMonths=3, periodRows=aggregateMonthlyToPeriod(wfData,liveParams,3))
+// resolution -- annual output is byte-identical to the pre-v5.10.0 version
+// (periodKeyOf(r,12)===r.calYear, exactly the old per-calYear bucket key).
+//
+// `wfRows` is always the LIVE monthly wfData (the fc_*/disc/sweep breakdown
+// fields are live-only; pin comparison values come straight off each pin's
+// own periodRows, not from re-bucketing pin.wfRows here). `pinsForChart` is
+// [{id,color,name,paramSnapshot,periodRows}] with periodRows already resolved
+// to the SAME resolution as `periodRows` by the caller (pin.rows for annual,
+// or a fresh aggregateMonthlyToPeriod(pin.wfRows,...,3) for quarterly) --
+// this function only does index-aligned lookups into it.
+//
+// v5.10.0 fix: the liquidation-NW appreciation exponent used to be the raw
+// `.map` index `i` -- correct only because chartData was always built from
+// the FULL unfiltered annual liveRows, where index i happens to equal true
+// elapsed years from BASE.startYear. Once this same builder can run on a
+// range-FILTERED and/or quarterly periodRows array, `i` no longer means
+// "years since start" (a filtered array's first row isn't index 0's elapsed
+// year, and a quarterly array advances 0.25yr per index). Now uses each
+// row's own `cal - BASE.startYear` instead, which is correct in every case
+// and reduces to the exact same value `i` always had for the full annual array.
+function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, liveParams, discFloor){
+  const discByKey={}, sweepByKey={}, totalSweepByKey={}, cntByKey={}, savAccByKey={}, abByKey={}, floorByKey={};
+  const fc_mtgByKey={}, fc_hlthByKey={}, fc_coreByKey={}, fc_famByKey={}, fc_hiMinsByKey={}, fc_ropByKey={}, fc_propByKey={}, fc_taxByKey={};
+  (wfRows||[]).forEach(r=>{
+    const k=periodKeyOf(r, periodMonths);
+    discByKey[k]=(discByKey[k]||0)+(r.disc||0);
+    sweepByKey[k]=(sweepByKey[k]||0)+(r.sweepToSavings||0);
+    // combinedSweep: debt sweep while in debt, savings sweep after — mutually exclusive in wfData
+    totalSweepByKey[k]=(totalSweepByKey[k]||0)+(r.sweep||0)+(r.sweepToSavings||0);
+    abByKey[k]=(abByKey[k]||0)+(r.afterBuckets||0);
+    floorByKey[k]=r.floor||discFloor;  // last month's floor (stable within period)
+    fc_mtgByKey[k]=(fc_mtgByKey[k]||0)+(r.fc_mtg||0);
+    fc_hlthByKey[k]=(fc_hlthByKey[k]||0)+(r.fc_health||0);
+    fc_coreByKey[k]=(fc_coreByKey[k]||0)+(r.fc_core||0);
+    fc_famByKey[k]=(fc_famByKey[k]||0)+(r.fc_famLoan||0);
+    fc_hiMinsByKey[k]=(fc_hiMinsByKey[k]||0)+(r.fc_hiMins||0);
+    fc_ropByKey[k]=(fc_ropByKey[k]||0)+(r.fc_rentalOp||0);
+    fc_propByKey[k]=(fc_propByKey[k]||0)+(r.fc_propCost||0);
+    fc_taxByKey[k]=(fc_taxByKey[k]||0)+(r.fc_tax||0);
+    cntByKey[k]=(cntByKey[k]||0)+1;
+    // savingsAcc is a running total — take the last month value per period (end-of-period balance)
+    savAccByKey[k]=r.savingsAcc||0;
+  });
+
+  // Liquidation NW constants
+  const _CGRATE = BASE.fedCapGains + BASE.coCapGains; // 0.282
+  const _SCOST  = BASE.sellingCosts;                  // 0.05
+  const _liqPropById = Object.fromEntries((liveParams.properties||[]).map(pr=>[pr.id,pr]));
+  const _liqReApp     = liveParams.reAppreciation;
+  const _liqSixthYr = _liqPropById.sixth?.hold.mode    ==='keep' ? Infinity : (_liqPropById.sixth?.hold.year    || 2055);
+  const _liqLafYr   = _liqPropById.barberry?.hold.mode ==='keep' ? Infinity : (_liqPropById.barberry?.hold.year || 2055);
+  const _liqDupYr   = _liqPropById.fifteenth?.hold.mode==='keep' ? Infinity : (_liqPropById.fifteenth?.hold.year|| 2055);
+  // periodKeyOf needs a real calYear/calMonth1to12 wfRow-shape; periodRows only
+  // carry `cal` (bare year for annual, calYear+quarterIndex0/4 for quarterly).
+  // Both keying schemes reduce to the same bucket key -- pk/4 was how `cal`
+  // was derived from pk in aggregateMonthlyToPeriod, so cal*4 inverts it exactly.
+  const keyOfCal = periodMonths===12 ? (cal=>cal) : (cal=>Math.round(cal*4));
+
+  return periodRows.map((r,i)=>{
+    const key=keyOfCal(r.cal);
+    const cnt=cntByKey[key]||periodMonths;
+    const disc=discByKey[key]!=null ? Math.round(discByKey[key]/cnt) : Math.max(0, r.surplus||0);
+    const sweep=Math.round((sweepByKey[key]||0)/cnt);
+    // Add sweep savings accumulation to NW — savingsAcc grows at investReturn inside wfData,
+    // but wfData doesn't compound it after each month, so add it as a separate component.
+    // Convert to $M to match nw units.
+    const savAccRaw=savAccByKey[key]||0;
+    const savAccK=Math.round(savAccRaw/1000);
+    const surplusPool=abByKey[key]!=null ? Math.round(abByKey[key]/cnt) : 0;
+    const floorLine=floorByKey[key]||discFloor;
+    const fc_mtg_=Math.round((fc_mtgByKey[key]||0)/cnt);
+    const fc_hlth_=Math.round((fc_hlthByKey[key]||0)/cnt);
+    const fc_core_=Math.round((fc_coreByKey[key]||0)/cnt);
+    const fc_fam_=Math.round((fc_famByKey[key]||0)/cnt);
+    const fc_hiMins_=Math.round((fc_hiMinsByKey[key]||0)/cnt);
+    const fc_rop_=Math.round((fc_ropByKey[key]||0)/cnt);
+    const fc_prop_=Math.round((fc_propByKey[key]||0)/cnt);
+    const fc_tax_=Math.round((fc_taxByKey[key]||0)/cnt);
+    const fixedTotal=fc_mtg_+fc_hlth_+fc_core_+fc_fam_+fc_hiMins_+fc_rop_+fc_prop_+fc_tax_;
+    const combinedSweep=Math.round((totalSweepByKey[key]||0)/cnt);
+    const pt={year:r.cal, cal:r.cal, reqWork:r.reqWork, surplus:disc, surplusPool, floorLine, hiDebt:r.hiDebt,
+      fixedTotal, fc_mtg:fc_mtg_, fc_hlth:fc_hlth_, fc_core:fc_core_, fc_fam:fc_fam_, fc_hiMins:fc_hiMins_, fc_rop:fc_rop_, fc_prop:fc_prop_, fc_tax:fc_tax_,
+      // v5.0.0: r.nw already includes savingsAcc natively (aggregateMonthlyToAnnual,
+      // engine.js) -- pre-v5 this was a two-engine hybrid add (annual nw + monthly
+      // savAccM tacked on here); adding savAccM again now would double-count it.
+      nw:r.nw/1000,  // $M
+      sweepSavK:savAccK,
+      sweepToSavings:sweep,
+      combinedSweep,
+      // v4.5.0: chartData is an explicit allowlist (not a spread of liveRows'
+      // r), so a chart reading a NEW secondaryDataKey needs its field added
+      // here explicitly too, or the line has no data to plot even though
+      // the legend still renders (exactly what happened before this fix --
+      // the Debt Balances chart's "LI loans" line/legend showed up but was
+      // empty because famLoanBal was never copied into chartData).
+      famLoanBal:r.famLoanBal,
+      // NW breakdown fields (from annual engine, $K units — same as liveRows)
+      reValue:r.reValue, reMortgage:r.reMortgage, reEquity:r.reEquity,
+      hiDebtK:r.hiDebtK, invested:r.invested, savingsAccK:savAccK};
+
+    // Liquidation NW: what you'd net selling everything today at this period
+    // Gate each property on ownership at year (already-sold properties are gone from RE net)
+    {
+      const elapsedYears = r.cal - BASE.startYear;
+      const app=Math.pow(1+_liqReApp,elapsedYears);
+      const sixthOwned = r.cal<_liqSixthYr;
+      const dupOwned   = r.cal<_liqDupYr;
+      const lafOwned   = r.cal<_liqLafYr;
+      let primNet=0;
+      if(sixthOwned){
+        const pv=(_liqPropById.sixth?.value||0)*app;
+        const pb=r.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
+        const sn=pv*(1-_SCOST);
+        const taxable=Math.max(0,Math.max(0,sn-(_liqPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
+        primNet=sn-pb-taxable*_CGRATE;
+      }
+      let dplxNet=0;
+      if(dupOwned){
+        const dv=(_liqPropById.fifteenth?.value||0)*app;
+        const db=r.dplxBalRaw ?? 0;
+        const dsn=dv*(1-_SCOST);
+        dplxNet=dsn-db-Math.max(0,dsn-(_liqPropById.fifteenth?.hold.basis||0))*_CGRATE;
+      }
+      let lafNet=0;
+      if(lafOwned){
+        const lv=(_liqPropById.barberry?.value||0)*app;
+        const lb=r.lafBalRaw ?? 0;
+        const lsn=lv*(1-_SCOST);
+        lafNet=lsn-lb-Math.max(0,lsn-(_liqPropById.barberry?.hold.basis||0))*_CGRATE;
+      }
+      pt.liqNW=(primNet+dplxNet+lafNet+r.invested*1000+savAccRaw-r.hiDebtRaw)/1e6;
+    }
+
+    pinsForChart.forEach(pin=>{
+      const pr = pin.periodRows[i];
+      pt[`pin_${pin.id}_fc`]=Math.abs(pr?.mtg||0)+Math.abs(pr?.health||0)+Math.abs(pr?.core||0)+Math.abs(pr?.famLoan||0)+Math.abs(pr?.minDebt||0);
+      pt[`pin_${pin.id}_rw`]=pr?.reqWork;
+      // v5.0.0 (A4): pins run the full monthly engine now (A2) -- `surplus`
+      // IS the disc-based FCF figure (aggregateMonthlyToAnnual), same
+      // definition live's own `disc` above uses. `pin_id_sweep` mirrors
+      // live's `combinedSweep` the same way (debt-sweep + sweep-to-savings).
+      pt[`pin_${pin.id}_di`]=Math.max(0, pr?.surplus||0);
+      pt[`pin_${pin.id}_sweep`]=Math.max(0,(pr?.debtSweep||0)+(pr?.sweepToSavings||0));
+      pt[`pin_${pin.id}_debt`]=pr?.hiDebt;
+      // v5.0.0: pr.nw already includes savingsAcc natively (same
+      // aggregateMonthlyToAnnual every scenario uses) -- the old manual
+      // pinSavAcc re-accumulation loop existed only because pre-v5 pins
+      // never had their own monthly savingsAcc state to draw from.
+      pt[`pin_${pin.id}_nw`]=(pr?.nw??0)/1000; // $M
+      pt[`pin_${pin.id}_sweepSavK`]=Math.round((pr?.savingsAccEnd||0)/1000);
+      // Liquidation NW for pin
+      {
+        const pSnap=pin.paramSnapshot||{};
+        const pElapsedYears = (pr?.cal ?? r.cal) - BASE.startYear;
+        const pApp=Math.pow(1+(pSnap.reApp??4)/100,pElapsedYears);
+        const pPropById = Object.fromEntries((pSnap.properties||freshPropertiesDefaults()).map(pr2=>[pr2.id,pr2]));
+        const pSixthYr = pPropById.sixth?.hold.mode    ==='keep' ? Infinity : (pPropById.sixth?.hold.year    || 2055);
+        const pDupYr   = pPropById.fifteenth?.hold.mode==='keep' ? Infinity : (pPropById.fifteenth?.hold.year|| 2055);
+        const pLafYr   = pPropById.barberry?.hold.mode ==='keep' ? Infinity : (pPropById.barberry?.hold.year || 2055);
+        const pSixthOwned = r.cal<pSixthYr;
+        const pDupOwned   = r.cal<pDupYr;
+        const pLafOwned   = r.cal<pLafYr;
+        let pPrimNet=0;
+        if(pSixthOwned){
+          const pv=(pPropById.sixth?.value||0)*pApp;
+          const pb=pr?.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
+          const sn=pv*(1-_SCOST);
+          const taxable=Math.max(0,Math.max(0,sn-(pPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
+          pPrimNet=sn-pb-taxable*_CGRATE;
+        }
+        let pDplxNet=0;
+        if(pDupOwned){
+          const dv=(pPropById.fifteenth?.value||0)*pApp;
+          const db=pr?.dplxBalRaw ?? 0;
+          const dsn=dv*(1-_SCOST);
+          pDplxNet=dsn-db-Math.max(0,dsn-(pPropById.fifteenth?.hold.basis||0))*_CGRATE;
+        }
+        let pLafNet=0;
+        if(pLafOwned){
+          const lv=(pPropById.barberry?.value||0)*pApp;
+          const lb=pr?.lafBalRaw ?? 0;
+          const lsn=lv*(1-_SCOST);
+          pLafNet=lsn-lb-Math.max(0,lsn-(pPropById.barberry?.hold.basis||0))*_CGRATE;
+        }
+        const pInvested=(pr?.invested??0)*1000;
+        const pHiDebtRaw=(pr?.hiDebtRaw??0);
+        const pSavAcc=(pr?.savingsAccEnd??0);
+        pt[`pin_${pin.id}_liqNW`]=(pPrimNet+pDplxNet+pLafNet+pInvested+pSavAcc-pHiDebtRaw)/1e6;
+      }
+    });
+    return pt;
+  });
 }
 
 export default function App(){
@@ -820,6 +1061,13 @@ export default function App(){
   const [showLive, setShowLive] = useState(true);       // show live scenario on charts
   const [expandedChart, setExpandedChart] = useState(null); // which chart is drilled into
   const [nwMode,        setNwMode]        = useState('book'); // 'book' | 'liq'
+  // v5.10.0: shared year-range zoom for the Simulator tab's chart grid -- applies
+  // to all five Chart-component charts (reqWork/FCF/hiDebt/nw/fixedCosts) plus
+  // their breakdown tables. Defaults to the model's full 21-year horizon
+  // (BASE.startYear..+20, same bound every other calendar-year slider in this
+  // file uses -- never hardcode 2026/2046, see CLAUDE.md).
+  const [chartRangeStart, setChartRangeStart] = useState(BASE.startYear);
+  const [chartRangeEnd,   setChartRangeEnd]   = useState(BASE.startYear+20);
   const [propCardOpen,  setPropCardOpen]  = useState({});     // v4.0.0-B per-property collapse (default open)
   const [propValueEdit, setPropValueEdit] = useState(null);   // {id,text} | null -- click-to-type property value
   const [loansDebtOpen, setLoansDebtOpen] = useState(true);   // v4.0.0-B Loans & Debt group collapse
@@ -982,186 +1230,59 @@ export default function App(){
   },[sc, pins]);
 
   // -- Chart data ------------------------------------------
-  // -- Chart data ------------------------------------------
+  // Aggregate monthly wfData into annual averages for the FCF chart.
+  // Use disc (monthly engine's actual kept FCF) instead of annual engine surplus —
+  // this ensures lifestyleSplit slider and graceDone sweep logic are reflected correctly.
+  // v5.0.0 (A4): the old `fcfChart`-fallback-for-pins path is gone -- pins
+  // now run the full monthly engine (A2) and their aggregated `surplus`
+  // field IS the disc-based figure (aggregateMonthlyToAnnual, engine.js),
+  // sourced identically to live's own `disc` grouping below. Live and
+  // pinned FCF lines can no longer drift apart by construction.
+  // v5.10.0: the actual per-row math now lives in the module-level
+  // buildChartRows() (factored out so it can run at either resolution) --
+  // pinsForChart wraps each pin with its OWN annual rows (pin.rows, already
+  // computed at pin/save time). See quarterlyChartData below for the
+  // quarterly counterpart.
   const chartData = useMemo(()=>{
-    // Aggregate monthly wfData into annual averages for the FCF chart.
-    // Use disc (monthly engine's actual kept FCF) instead of annual engine surplus —
-    // this ensures lifestyleSplit slider and graceDone sweep logic are reflected correctly.
-    // v5.0.0 (A4): the old `fcfChart`-fallback-for-pins path is gone -- pins
-    // now run the full monthly engine (A2) and their aggregated `surplus`
-    // field IS the disc-based figure (aggregateMonthlyToAnnual, engine.js),
-    // sourced identically to live's own `disc` grouping below. Live and
-    // pinned FCF lines can no longer drift apart by construction.
-    const discByYear={}, sweepByYear={}, totalSweepByYr={}, cntByYear={}, savAccByYear={}, abByYear={}, floorByYear={};
-    const fc_mtgByYr={}, fc_hlthByYr={}, fc_coreByYr={}, fc_famByYr={}, fc_hiMinsByYr={}, fc_ropByYr={}, fc_propByYr={}, fc_taxByYr={};
-    (wfData||[]).forEach(r=>{
-      // v4.3.0: r.calYear (was `2026+Math.floor(r.mo/12)`, which silently
-      // assumed wfData's mo=0 was January -- it wasn't even before this
-      // change (wfData started at a hardcoded June), so this bucketing was
-      // already mislabeling roughly half of every "calendar year" bucket
-      // with the wrong 6 months. r.calYear is the SAME real calendar year
-      // wfData itself computed for that row -- can't drift from it.
-      const yr=r.calYear;
-      discByYear[yr]=(discByYear[yr]||0)+(r.disc||0);
-      sweepByYear[yr]=(sweepByYear[yr]||0)+(r.sweepToSavings||0);
-      // combinedSweep: debt sweep while in debt, savings sweep after — mutually exclusive in wfData
-      totalSweepByYr[yr]=(totalSweepByYr[yr]||0)+(r.sweep||0)+(r.sweepToSavings||0);
-      abByYear[yr]=(abByYear[yr]||0)+(r.afterBuckets||0);
-      floorByYear[yr]=r.floor||discFloor;  // last month's floor (stable within year)
-      fc_mtgByYr[yr]=(fc_mtgByYr[yr]||0)+(r.fc_mtg||0);
-      fc_hlthByYr[yr]=(fc_hlthByYr[yr]||0)+(r.fc_health||0);
-      fc_coreByYr[yr]=(fc_coreByYr[yr]||0)+(r.fc_core||0);
-      fc_famByYr[yr]=(fc_famByYr[yr]||0)+(r.fc_famLoan||0);
-      fc_hiMinsByYr[yr]=(fc_hiMinsByYr[yr]||0)+(r.fc_hiMins||0);
-      fc_ropByYr[yr]=(fc_ropByYr[yr]||0)+(r.fc_rentalOp||0);
-      fc_propByYr[yr]=(fc_propByYr[yr]||0)+(r.fc_propCost||0);
-      fc_taxByYr[yr]=(fc_taxByYr[yr]||0)+(r.fc_tax||0);
-      cntByYear[yr]=(cntByYear[yr]||0)+1;
-      // savingsAcc is a running total — take the last month value per year (end-of-year balance)
-      savAccByYear[yr]=r.savingsAcc||0;
+    const pinsForChart = pins.map(pin=>({...pin, periodRows: pin.rows}));
+    return buildChartRows(liveRows, wfData, 12, pinsForChart, liveParams, discFloor);
+  },[liveRows,pins,wfData,liveParams,discFloor]);
 
-    });
-    // Liquidation NW constants
-    const _CGRATE = BASE.fedCapGains + BASE.coCapGains; // 0.282
-    const _SCOST  = BASE.sellingCosts;                  // 0.05
-    const _liqPropById = Object.fromEntries((liveParams.properties||[]).map(pr=>[pr.id,pr]));
-    const _liqReApp     = liveParams.reAppreciation;
-    const _liqSixthYr = _liqPropById.sixth?.hold.mode    ==='keep' ? Infinity : (_liqPropById.sixth?.hold.year    || 2055);
-    const _liqLafYr   = _liqPropById.barberry?.hold.mode ==='keep' ? Infinity : (_liqPropById.barberry?.hold.year || 2055);
-    const _liqDupYr   = _liqPropById.fifteenth?.hold.mode==='keep' ? Infinity : (_liqPropById.fifteenth?.hold.year|| 2055);
+  // v5.10.0: shared year-range zoom control (Simulator tab chart grid) --
+  // resolution switches to quarterly once the visible span is short enough
+  // to make quarter-level detail readable (sales/obligations/segment
+  // transitions), else stays annual for the full-horizon shape. Bounds
+  // clamp to the model's actual horizon so a Defaults-tab BASE.startYear
+  // change can't strand the range outside the sim's own bounds.
+  const chartRangeBoundMin = BASE.startYear, chartRangeBoundMax = BASE.startYear+20;
+  const effChartRangeStart = Math.min(Math.max(chartRangeStart,chartRangeBoundMin),chartRangeBoundMax);
+  const effChartRangeEnd   = Math.min(Math.max(chartRangeEnd,  chartRangeBoundMin),chartRangeBoundMax);
+  const chartResolution = useMemo(()=>
+    (effChartRangeEnd-effChartRangeStart+1)<=QUARTERLY_ZOOM_THRESHOLD_YEARS ? 'quarterly' : 'annual',
+  [effChartRangeStart,effChartRangeEnd]);
 
-    return liveRows.map((r,i)=>{
-      const cnt=cntByYear[r.cal]||12;
-      const disc=discByYear[r.cal]!=null ? Math.round(discByYear[r.cal]/cnt) : Math.max(0, r.surplus||0);
-      const sweep=Math.round((sweepByYear[r.cal]||0)/cnt);
-      // Add sweep savings accumulation to NW — savingsAcc grows at investReturn inside wfData,
-      // but wfData doesn't compound it after each month, so add it as a separate component.
-      // Convert to $M to match nw units.
-      const savAccRaw=savAccByYear[r.cal]||0;
-      const savAccM=savAccRaw/1000000;
-      const savAccK=Math.round(savAccRaw/1000);
-      const surplusPool=abByYear[r.cal]!=null ? Math.round(abByYear[r.cal]/cnt) : 0;
-      const floorLine=floorByYear[r.cal]||discFloor;
-      const fc_mtg_=Math.round((fc_mtgByYr[r.cal]||0)/cnt);
-      const fc_hlth_=Math.round((fc_hlthByYr[r.cal]||0)/cnt);
-      const fc_core_=Math.round((fc_coreByYr[r.cal]||0)/cnt);
-      const fc_fam_=Math.round((fc_famByYr[r.cal]||0)/cnt);
-      const fc_hiMins_=Math.round((fc_hiMinsByYr[r.cal]||0)/cnt);
-      const fc_rop_=Math.round((fc_ropByYr[r.cal]||0)/cnt);
-      const fc_prop_=Math.round((fc_propByYr[r.cal]||0)/cnt);
-      const fc_tax_=Math.round((fc_taxByYr[r.cal]||0)/cnt);
-      const fixedTotal=fc_mtg_+fc_hlth_+fc_core_+fc_fam_+fc_hiMins_+fc_rop_+fc_prop_+fc_tax_;
-      const combinedSweep=Math.round((totalSweepByYr[r.cal]||0)/cnt);
-      const pt={year:r.cal, cal:r.cal, reqWork:r.reqWork, surplus:disc, surplusPool, floorLine, hiDebt:r.hiDebt,
-        fixedTotal, fc_mtg:fc_mtg_, fc_hlth:fc_hlth_, fc_core:fc_core_, fc_fam:fc_fam_, fc_hiMins:fc_hiMins_, fc_rop:fc_rop_, fc_prop:fc_prop_, fc_tax:fc_tax_,
-        // v5.0.0: r.nw already includes savingsAcc natively (aggregateMonthlyToAnnual,
-        // engine.js) -- pre-v5 this was a two-engine hybrid add (annual nw + monthly
-        // savAccM tacked on here); adding savAccM again now would double-count it.
-        nw:r.nw/1000,  // $M
-        sweepSavK:savAccK,
-        sweepToSavings:sweep,
-        combinedSweep,
-        // v4.5.0: chartData is an explicit allowlist (not a spread of liveRows'
-        // r), so a chart reading a NEW secondaryDataKey needs its field added
-        // here explicitly too, or the line has no data to plot even though
-        // the legend still renders (exactly what happened before this fix --
-        // the Debt Balances chart's "LI loans" line/legend showed up but was
-        // empty because famLoanBal was never copied into chartData).
-        famLoanBal:r.famLoanBal,
-        // NW breakdown fields (from annual engine, $K units — same as liveRows)
-        reValue:r.reValue, reMortgage:r.reMortgage, reEquity:r.reEquity,
-        hiDebtK:r.hiDebtK, invested:r.invested, savingsAccK:savAccK};
+  // Quarterly counterpart of liveRows/chartData -- only meaningfully
+  // consumed when chartResolution==='quarterly', but cheap enough (same
+  // O(months) cost class as liveRows itself) to always keep current so
+  // toggling the range doesn't cause a visible recompute stall.
+  const quarterlyLiveRows = useMemo(()=>aggregateMonthlyToPeriod(wfData, liveParams, 3),[wfData, liveParams]);
+  const quarterlyChartData = useMemo(()=>{
+    const pinsForChart = pins.map(pin=>({...pin, periodRows: aggregateMonthlyToPeriod(pin.wfRows||[], pin.paramSnapshot||{}, 3)}));
+    return buildChartRows(quarterlyLiveRows, wfData, 3, pinsForChart, liveParams, discFloor);
+  },[quarterlyLiveRows,pins,wfData,liveParams,discFloor]);
 
-      // Liquidation NW: what you'd net selling everything today at year i
-      // Gate each property on ownership at year (already-sold properties are gone from RE net)
-      {
-        const app=Math.pow(1+_liqReApp,i);
-        const sixthOwned = r.cal<_liqSixthYr;
-        const dupOwned   = r.cal<_liqDupYr;
-        const lafOwned   = r.cal<_liqLafYr;
-        let primNet=0;
-        if(sixthOwned){
-          const pv=(_liqPropById.sixth?.value||0)*app;
-          const pb=r.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
-          const sn=pv*(1-_SCOST);
-          const taxable=Math.max(0,Math.max(0,sn-(_liqPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
-          primNet=sn-pb-taxable*_CGRATE;
-        }
-        let dplxNet=0;
-        if(dupOwned){
-          const dv=(_liqPropById.fifteenth?.value||0)*app;
-          const db=r.dplxBalRaw ?? 0;
-          const dsn=dv*(1-_SCOST);
-          dplxNet=dsn-db-Math.max(0,dsn-(_liqPropById.fifteenth?.hold.basis||0))*_CGRATE;
-        }
-        let lafNet=0;
-        if(lafOwned){
-          const lv=(_liqPropById.barberry?.value||0)*app;
-          const lb=r.lafBalRaw ?? 0;
-          const lsn=lv*(1-_SCOST);
-          lafNet=lsn-lb-Math.max(0,lsn-(_liqPropById.barberry?.hold.basis||0))*_CGRATE;
-        }
-        pt.liqNW=(primNet+dplxNet+lafNet+r.invested*1000+savAccRaw-r.hiDebtRaw)/1e6;
-      }
-
-      pins.forEach(pin=>{
-        pt[`pin_${pin.id}_fc`]=Math.abs(pin.rows[i]?.mtg||0)+Math.abs(pin.rows[i]?.health||0)+Math.abs(pin.rows[i]?.core||0)+Math.abs(pin.rows[i]?.famLoan||0)+Math.abs(pin.rows[i]?.minDebt||0);
-        pt[`pin_${pin.id}_rw`]=pin.rows[i]?.reqWork;
-        // v5.0.0 (A4): pins run the full monthly engine now (A2) -- `surplus`
-        // IS the disc-based FCF figure (aggregateMonthlyToAnnual), same
-        // definition live's own `disc` above uses. `pin_id_sweep` mirrors
-        // live's `combinedSweep` the same way (debt-sweep + sweep-to-savings).
-        pt[`pin_${pin.id}_di`]=Math.max(0, pin.rows[i]?.surplus||0);
-        pt[`pin_${pin.id}_sweep`]=Math.max(0,(pin.rows[i]?.debtSweep||0)+(pin.rows[i]?.sweepToSavings||0));
-        pt[`pin_${pin.id}_debt`]=pin.rows[i]?.hiDebt;
-        // v5.0.0: pin.rows[i].nw already includes savingsAcc natively (same
-        // aggregateMonthlyToAnnual every scenario uses) -- the old manual
-        // pinSavAcc re-accumulation loop existed only because pre-v5 pins
-        // never had their own monthly savingsAcc state to draw from.
-        pt[`pin_${pin.id}_nw`]=(pin.rows[i]?.nw??0)/1000; // $M
-        pt[`pin_${pin.id}_sweepSavK`]=Math.round((pin.rows[i]?.savingsAccEnd||0)/1000);
-        // Liquidation NW for pin
-        {
-          const pSnap=pin.paramSnapshot||{};
-          const pApp=Math.pow(1+(pSnap.reApp??4)/100,i);
-          const pPropById = Object.fromEntries((pSnap.properties||freshPropertiesDefaults()).map(pr=>[pr.id,pr]));
-          const pSixthYr = pPropById.sixth?.hold.mode    ==='keep' ? Infinity : (pPropById.sixth?.hold.year    || 2055);
-          const pDupYr   = pPropById.fifteenth?.hold.mode==='keep' ? Infinity : (pPropById.fifteenth?.hold.year|| 2055);
-          const pLafYr   = pPropById.barberry?.hold.mode ==='keep' ? Infinity : (pPropById.barberry?.hold.year || 2055);
-          const pSixthOwned = r.cal<pSixthYr;
-          const pDupOwned   = r.cal<pDupYr;
-          const pLafOwned   = r.cal<pLafYr;
-          let pPrimNet=0;
-          if(pSixthOwned){
-            const pv=(pPropById.sixth?.value||0)*pApp;
-            const pb=pin.rows[i]?.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
-            const sn=pv*(1-_SCOST);
-            const taxable=Math.max(0,Math.max(0,sn-(pPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
-            pPrimNet=sn-pb-taxable*_CGRATE;
-          }
-          let pDplxNet=0;
-          if(pDupOwned){
-            const dv=(pPropById.fifteenth?.value||0)*pApp;
-            const db=pin.rows[i]?.dplxBalRaw ?? 0;
-            const dsn=dv*(1-_SCOST);
-            pDplxNet=dsn-db-Math.max(0,dsn-(pPropById.fifteenth?.hold.basis||0))*_CGRATE;
-          }
-          let pLafNet=0;
-          if(pLafOwned){
-            const lv=(pPropById.barberry?.value||0)*pApp;
-            const lb=pin.rows[i]?.lafBalRaw ?? 0;
-            const lsn=lv*(1-_SCOST);
-            pLafNet=lsn-lb-Math.max(0,lsn-(pPropById.barberry?.hold.basis||0))*_CGRATE;
-          }
-          const pInvested=(pin.rows[i]?.invested??0)*1000;
-          const pHiDebtRaw=(pin.rows[i]?.hiDebtRaw??0);
-          const pSavAcc=(pin.rows[i]?.savingsAccEnd??0);
-          pt[`pin_${pin.id}_liqNW`]=(pPrimNet+pDplxNet+pLafNet+pInvested+pSavAcc-pHiDebtRaw)/1e6;
-        }
-      });
-      return pt;
-    });
-  },[liveRows,pins,wfData,liveParams.properties]);
+  // displayChartData/displayLiveRows: what the chart grid + its breakdown
+  // tables actually render -- resolution-appropriate source, filtered to the
+  // zoom range. Full range + annual (the default) is exactly chartData/
+  // liveRows unfiltered -- byte-identical to the pre-v5.10.0 always-annual
+  // always-full-range charts.
+  const inChartRange = r => Math.floor(r.cal+1e-9)>=effChartRangeStart && Math.floor(r.cal+1e-9)<=effChartRangeEnd;
+  const displayChartData = useMemo(()=>
+    (chartResolution==='annual' ? chartData : quarterlyChartData).filter(inChartRange),
+  [chartResolution,chartData,quarterlyChartData,effChartRangeStart,effChartRangeEnd]);
+  const displayLiveRows = useMemo(()=>
+    (chartResolution==='annual' ? liveRows : quarterlyLiveRows).filter(inChartRange),
+  [chartResolution,liveRows,quarterlyLiveRows,effChartRangeStart,effChartRangeEnd]);
 
   // NW yr10 from chartData (includes savingsAcc from sweep) — used in stat card
   const liveNwYr10 = useMemo(()=>(chartData[10]?.nw ?? liveStats.nwYr10/1000),
@@ -1209,6 +1330,19 @@ export default function App(){
   useEffect(()=>{
     if(typeof window !== 'undefined'){ window.__chartData = chartData; }
   },[chartData]);
+  // v5.10.0: same test-scaffolding pattern, for the zoom/resolution feature --
+  // __chartZoom exposes what's actually plotted (range/resolution-filtered)
+  // plus the quarterly full-horizon arrays, so tests can assert consistency
+  // (quarterly summed back up to a year === the annual figure for that year)
+  // without re-deriving any of this from wfData themselves.
+  useEffect(()=>{
+    if(typeof window !== 'undefined'){
+      window.__chartZoom = {
+        rangeStart: effChartRangeStart, rangeEnd: effChartRangeEnd, resolution: chartResolution,
+        displayChartData, displayLiveRows, quarterlyChartData, quarterlyLiveRows,
+      };
+    }
+  },[effChartRangeStart,effChartRangeEnd,chartResolution,displayChartData,displayLiveRows,quarterlyChartData,quarterlyLiveRows]);
   const reqWorkMax = useMemo(()=>{
     const raw = Math.max(...liveRows.map(r=>r.reqWork||0), 1000);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -1614,7 +1748,10 @@ export default function App(){
     // monthly wfData; liveRows has neither). Other charts read liveRows, where
     // reqWork/surplus/debt keys actually live. (v3.4.0 fix: fixedCosts read
     // liveRows and rendered $0 for every fc_* cell.)
-    const bdSource = (chartId==='nw' || chartId==='fixedCosts') ? chartData : liveRows;
+    // v5.10.0: both sides swapped for their range/resolution-aware
+    // counterparts, so the table always matches what the chart above it is
+    // actually plotting (same zoom range, same annual/quarterly resolution).
+    const bdSource = (chartId==='nw' || chartId==='fixedCosts') ? displayChartData : displayLiveRows;
     // annualTicks charts (e.g. Work Income Required) show every year; others
     // sample every other year to keep the breakdown table from getting too wide.
     // annualBreakdown opts a chart's TABLE into every-year rows independently
@@ -1623,6 +1760,12 @@ export default function App(){
     // table wants (v5.8.0: Free Cash Flow's line chart keeps its normal
     // tick density; only its breakdown table needed 1-year resolution).
     const bdRows = (annualTicks||annualBreakdown) ? bdSource : bdSource.filter((_,i)=>i%2===0||i===bdSource.length-1);
+    // v5.10.0: quarterly rows carry a fractional `cal`/`year` (2027, 2027.25,
+    // ...) -- label those as "Q2'27" instead of the annual "'27" so the axis/
+    // table stay readable once zoomed below the quarterly threshold.
+    const periodTickFmt = chartResolution==='quarterly'
+      ? (y)=>{ const yr=Math.floor(y+1e-9); const q=Math.round((y-yr)*4)+1; return `Q${q}'${String(yr).slice(2)}`; }
+      : (y)=>`'${String(y).slice(2)}`;
     return (
       <div style={{background:bg1,border:`1px solid ${isExpanded?color:bdr}`,borderRadius:10,
         padding:"14px 10px 8px", gridColumn: isExpanded?"1 / -1":"auto",
@@ -1674,9 +1817,9 @@ export default function App(){
 
         {/* Main chart */}
         <ResponsiveContainer width="100%" height={175}>
-          <LineChart data={chartData} margin={{top:4,right:12,left:0,bottom:0}}>
+          <LineChart data={displayChartData} margin={{top:4,right:12,left:0,bottom:0}}>
             <CartesianGrid {...gdP}/>
-            <XAxis dataKey="year" {...axP} tickFormatter={y=>`'${String(y).slice(2)}`} interval={annualTicks?0:undefined}/>
+            <XAxis dataKey="year" {...axP} tickFormatter={periodTickFmt} interval={annualTicks?0:undefined}/>
             <YAxis {...axP} tickFormatter={fmt} width={42} domain={axisDomain} allowDecimals={false}/>
             <Tooltip {...ttP} formatter={(v,name)=>{
               const fmtV = yFmt?yFmt(v):(unit||"$")+Math.round(v).toLocaleString();
@@ -1740,7 +1883,7 @@ export default function App(){
                     <th style={{textAlign:"left",padding:"4px 8px",color:dim,fontWeight:"bold",whiteSpace:"nowrap"}}>Series</th>
                     {bdRows.map(r=>(
                       <th key={r.cal} style={{textAlign:"right",padding:"4px 8px",color:dim,fontWeight:"bold",
-                        fontFamily:mono,whiteSpace:"nowrap"}}>{`'${String(r.cal).slice(2)}`}</th>
+                        fontFamily:mono,whiteSpace:"nowrap"}}>{periodTickFmt(r.cal)}</th>
                     ))}
                   </tr>
                 </thead>
@@ -2012,7 +2155,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.9.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.10.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2785,6 +2928,57 @@ export default function App(){
                 </div>
               );
             })()}
+          </div>
+
+          {/* v5.10.0: shared year-range zoom for the chart grid below -- two
+              mutually-clamped From/To sliders (same pattern as each rental
+              segment's yrFrom/yrTo, App.jsx ~2280) rather than a single
+              native two-thumb control (HTML <input type=range> only supports
+              one thumb; this codebase's established "range" idiom is already
+              two adjacent sliders, so this mirrors that instead of inventing
+              a new widget). Applies to every Chart-component chart below
+              (Work Income/FCF/Debt/NW/Fixed Costs) plus their breakdown
+              tables and pinned-scenario lines, all via displayChartData/
+              displayLiveRows above. */}
+          <div data-testid="chart-zoom-range" style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:"10px 14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontSize:9,color:dim,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase"}}>Chart zoom</span>
+              <span data-testid="chart-zoom-resolution" style={{fontSize:9,color:chartResolution==='quarterly'?amber:dim,fontFamily:mono}}>
+                {chartResolution==='quarterly' ? `Quarterly (≤${QUARTERLY_ZOOM_THRESHOLD_YEARS}yr span)` : 'Annual'}
+              </span>
+            </div>
+            <div style={{display:"flex",gap:12}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span style={{fontSize:9,color:muted}}>From</span>
+                  <span style={{fontSize:9,color:amber,fontFamily:mono}}>{effChartRangeStart}</span>
+                </div>
+                <input type="range" data-testid="chart-zoom-from" min={chartRangeBoundMin} max={chartRangeBoundMax} step={1} value={effChartRangeStart}
+                  onChange={e=>{
+                    const v=parseInt(e.target.value);
+                    setChartRangeStart(v);
+                    if(v>effChartRangeEnd) setChartRangeEnd(v);
+                  }}
+                  style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+              </div>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span style={{fontSize:9,color:muted}}>To</span>
+                  <span style={{fontSize:9,color:amber,fontFamily:mono}}>{effChartRangeEnd}</span>
+                </div>
+                <input type="range" data-testid="chart-zoom-to" min={chartRangeBoundMin} max={chartRangeBoundMax} step={1} value={effChartRangeEnd}
+                  onChange={e=>{
+                    const v=parseInt(e.target.value);
+                    setChartRangeEnd(v);
+                    if(v<effChartRangeStart) setChartRangeStart(v);
+                  }}
+                  style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+              </div>
+              <button onClick={()=>{setChartRangeStart(chartRangeBoundMin);setChartRangeEnd(chartRangeBoundMax);}}
+                data-testid="chart-zoom-reset"
+                style={{alignSelf:"flex-end",fontSize:9,padding:"4px 10px",borderRadius:4,fontFamily:font,cursor:"pointer",
+                  background:"transparent",border:`1px solid ${bdr}`,color:dim,height:22}}>full range</button>
+            </div>
           </div>
 
           {/* Charts 2x2 -- grid supports full-width expansion */}

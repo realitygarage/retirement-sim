@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.9.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.10.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.9.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.9.0');
+    await expect(page.locator('text=v5.10.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.10.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.9.0', async ({ page }) => {
+  test('L1 — Version header shows v5.10.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.9.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.9.0 confirmed');
+    await expect(page.locator('text=v5.10.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.10.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3231,6 +3231,155 @@ test.describe('Group X — v5.3.0 Sticky Horizontal Scrollbar', () => {
     const afterTable = await page.evaluate(() => document.querySelector('[data-testid="sticky-hscroll"] > div').scrollLeft);
     console.log('  X3 — bar.scrollLeft after setting table.scrollLeft=100:', afterTable);
     expect(afterTable).toBe(100);
+  });
+
+});
+
+// ─── Group Y: v5.10.0 Chart Zoom / Quarterly Resolution ─────────────────────
+
+test.describe('Group Y — v5.10.0 Chart Zoom / Quarterly Resolution', () => {
+
+  async function setRangeSlider(page, testId, value) {
+    const slider = page.getByTestId(testId);
+    await slider.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(value));
+    await page.waitForTimeout(200);
+  }
+
+  test('Y1 — full-range default is annual resolution and byte-identical to the pre-zoom chart/live rows (regression guard)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const zoom = window.__chartZoom;
+      const cd = window.__chartData || [];
+      const lr = window.__liveRows || [];
+      return {
+        resolution: zoom?.resolution,
+        chartDataEqual: JSON.stringify(zoom?.displayChartData) === JSON.stringify(cd),
+        liveRowsEqual: JSON.stringify(zoom?.displayLiveRows) === JSON.stringify(lr),
+        len: zoom?.displayChartData?.length,
+      };
+    });
+    console.log('  Y1 — ' + JSON.stringify(result));
+    expect(result.resolution).toBe('annual');
+    expect(result.chartDataEqual).toBe(true);
+    expect(result.liveRowsEqual).toBe(true);
+    expect(result.len).toBe(21);
+  });
+
+  test('Y2 — narrowing the visible span to <=8 years switches resolution to quarterly', async ({ page }) => {
+    await loadApp(page);
+    const base = await page.evaluate(() => window.__engine.BASE.startYear);
+    // A middle 5-year window (base+5..base+9), well clear of both the sim's
+    // partial first year (BASE.startMonth needn't be January) and its far
+    // horizon edge -- every quarter in this window is a real, complete one.
+    await setRangeSlider(page, 'chart-zoom-from', base + 5);
+    await setRangeSlider(page, 'chart-zoom-to', base + 9);
+    const result = await page.evaluate(() => window.__chartZoom);
+    console.log('  Y2 — resolution=' + result.resolution + ' rows=' + result.displayChartData.length);
+    expect(result.resolution).toBe('quarterly');
+    expect(result.displayChartData.length).toBe(20); // 5 years * 4 quarters
+    await expect(page.getByTestId('chart-zoom-resolution')).toHaveText(/Quarterly/);
+  });
+
+  test('Y3 — quarterly aggregation is consistent with the annual figure for the same year (mean-of-means / snapshot guard)', async ({ page }) => {
+    await loadApp(page);
+    // Reads the always-full, unfiltered chartData/quarterlyChartData exposed
+    // on window.__chartZoom -- no slider interaction needed, this checks the
+    // underlying aggregation math itself, independent of the zoom UI.
+    const result = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      const qcd = (window.__chartZoom && window.__chartZoom.quarterlyChartData) || [];
+      const BASE = window.__engine.BASE;
+      const yr = BASE.startYear + 1; // first fully-simulated calendar year (yr 0 may be a partial first year)
+      const annualRow = cd.find(r => r.year === yr);
+      const qRows = qcd.filter(r => Math.floor(r.year + 1e-9) === yr).sort((a, b) => a.year - b.year);
+      const avg = k => qRows.reduce((s, r) => s + (r[k] || 0), 0) / qRows.length;
+      return {
+        qCount: qRows.length,
+        annualFixed: annualRow?.fixedTotal, avgQuarterlyFixed: avg('fixedTotal'),
+        annualReqWork: annualRow?.reqWork, avgQuarterlyReqWork: avg('reqWork'),
+        annualHiDebt: annualRow?.hiDebt, q1HiDebt: qRows[0]?.hiDebt,
+      };
+    });
+    console.log('  Y3 — ' + JSON.stringify(result));
+    expect(result.qCount).toBe(4);
+    // Flow fields are averages-of-monthly-rates; with 4 equal-sized (3-month)
+    // groups, the mean of the 4 quarterly means equals the annual mean --
+    // small tolerance only for the two independent Math.round passes (once
+    // per quarter, once annually).
+    expect(Math.abs(result.avgQuarterlyFixed - result.annualFixed)).toBeLessThanOrEqual(2);
+    expect(Math.abs(result.avgQuarterlyReqWork - result.annualReqWork)).toBeLessThanOrEqual(2);
+    // hiDebt is a first-of-period SNAPSHOT, not an average -- Q1 of a year
+    // starts the same calendar month the annual row does, so they must match
+    // exactly (not just approximately).
+    expect(result.q1HiDebt).toBe(result.annualHiDebt);
+  });
+
+  test('Y4 — breakdown table columns switch to quarter labels at quarterly resolution, matching the plotted resolution', async ({ page }) => {
+    await loadApp(page);
+    const base = await page.evaluate(() => window.__engine.BASE.startYear);
+    await setRangeSlider(page, 'chart-zoom-from', base + 5);
+    await setRangeSlider(page, 'chart-zoom-to', base + 9);
+    await expect(page.getByTestId('chart-zoom-resolution')).toHaveText(/Quarterly/);
+
+    // ancestor::div[3]: title div -> header-row's left-flex div -> header row
+    // div -> the chart's OUTER card div (the one that also contains the
+    // breakdown table once expanded, several siblings below the header row).
+    const fcfChart = page.locator('div').filter({ hasText: /^Free Cash Flow \/ mo$/ })
+      .locator('xpath=ancestor::div[3]').first();
+    await fcfChart.locator('button', { hasText: 'breakdown' }).click();
+    await page.waitForTimeout(300);
+    const headerTexts = await fcfChart.locator('table thead th').allTextContents();
+    console.log('  Y4 — breakdown headers: ' + JSON.stringify(headerTexts));
+    const dataHeaders = headerTexts.slice(1); // drop the leading "Series" column
+    expect(dataHeaders.length).toBe(20); // FCF's table is annualBreakdown=true -- every quarter, no every-other sampling
+    expect(dataHeaders.every(h => /^Q[1-4]'\d{2}$/.test(h))).toBe(true);
+  });
+
+  test('Y5 — pinned scenario lines respect the same zoom range/resolution as the live line', async ({ page }) => {
+    await loadApp(page);
+    await page.locator('input[placeholder*="Name this scenario"]').fill('Zoom Pin Test');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+
+    const base = await page.evaluate(() => window.__engine.BASE.startYear);
+    await setRangeSlider(page, 'chart-zoom-from', base + 5);
+    await setRangeSlider(page, 'chart-zoom-to', base + 9);
+
+    const result = await page.evaluate(() => {
+      const zoom = window.__chartZoom;
+      const pinKey = Object.keys(zoom.displayChartData[0] || {}).find(k => /^pin_.*_di$/.test(k));
+      return {
+        resolution: zoom.resolution,
+        rows: zoom.displayChartData.length,
+        pinKey,
+        pinValuesDefined: pinKey ? zoom.displayChartData.every(r => typeof r[pinKey] === 'number' && !Number.isNaN(r[pinKey])) : false,
+      };
+    });
+    console.log('  Y5 — ' + JSON.stringify(result));
+    expect(result.resolution).toBe('quarterly');
+    expect(result.rows).toBe(20);
+    expect(result.pinKey).toBeTruthy();
+    expect(result.pinValuesDefined).toBe(true);
+  });
+
+  test('Y6 — "full range" reset restores the default full 21-year annual view', async ({ page }) => {
+    await loadApp(page);
+    const base = await page.evaluate(() => window.__engine.BASE.startYear);
+    await setRangeSlider(page, 'chart-zoom-from', base + 5);
+    await setRangeSlider(page, 'chart-zoom-to', base + 9);
+    expect(await page.evaluate(() => window.__chartZoom.resolution)).toBe('quarterly');
+
+    await page.getByTestId('chart-zoom-reset').click();
+    await page.waitForTimeout(200);
+    const result = await page.evaluate(() => window.__chartZoom);
+    console.log('  Y6 — after reset: resolution=' + result.resolution + ' rows=' + result.displayChartData.length);
+    expect(result.resolution).toBe('annual');
+    expect(result.displayChartData.length).toBe(21);
   });
 
 });

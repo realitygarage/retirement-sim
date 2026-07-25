@@ -1449,7 +1449,7 @@ export function buildMonthlyScenario(p){
     if(calYear===BASE.brendaMedYear && calMonth1to12===BASE.brendaMedMonth) events.push("Brenda -> Medicare");
 
     rows.push({
-      mo, calYear, cal:`${d.toLocaleString('default',{month:'short'})} '${String(calYear).slice(2)}`,
+      mo, calYear, calMonth1to12, cal:`${d.toLocaleString('default',{month:'short'})} '${String(calYear).slice(2)}`,
       totalInc:Math.round(totalInc), tier1:Math.round(tier1), rentalOpCost:Math.round(rentalOpCost),
       fc_mtg:Math.round(mtg), fc_health:Math.round(health), fc_core:Math.round(core),
       fc_famLoan:Math.round(famLoan), fc_hiMins:Math.round(hiMins), fc_rentalOp:Math.round(rentalOpCost),
@@ -1493,29 +1493,48 @@ export function buildMonthlyScenario(p){
   return rows;
 }
 
+// Groups a monthly wfRow into its calendar-year (periodMonths=12) or
+// calendar-quarter (periodMonths=3, Jan-Mar/Apr-Jun/Jul-Sep/Oct-Dec via
+// quarterStartMonth's same quarter->month mapping) period bucket. Quarterly
+// keys are calYear*4+quarterIndex0 (0-3) so they sort chronologically as
+// plain numbers, same as annual keys (bare calYear) already do.
+export function periodKeyOf(r, periodMonths){
+  if(periodMonths===12) return r.calYear;
+  const q = Math.floor(((r.calMonth1to12??1)-1)/3);
+  return r.calYear*4+q;
+}
+
 // =============================================================================
-// ANNUAL AGGREGATION (v5.0.0) -- the Simulator tab's annual view is a pure
-// rollup of buildMonthlyScenario's output: stocks = the value from the FIRST
-// month of the row's period (matching wfData's own pre-decrement-this-month
-// convention, so "row yr's balance" already means "balance as of the START
-// of that period" with no extra snapshot logic needed); flows = summed over
-// the real months in that period (yr=0's partial first period falls out
-// automatically -- wfData's own calendar already starts at BASE.startMonth,
-// there are no fabricated pre-start months to exclude).
+// PERIOD AGGREGATION (v5.0.0 annual; generalized to quarterly in v5.10.0) --
+// the Simulator tab's annual/quarterly views are a pure rollup of
+// buildMonthlyScenario's output: stocks = the value from the FIRST month of
+// the row's period (matching wfData's own pre-decrement-this-month
+// convention, so "row's balance" already means "balance as of the START of
+// that period" with no extra snapshot logic needed); flows = summed over the
+// real months in that period (a partial first period falls out automatically
+// -- wfData's own calendar already starts at BASE.startMonth, there are no
+// fabricated pre-start months to exclude).
 // =============================================================================
-export function aggregateMonthlyToAnnual(wfRows, p){
-  const byYear = {};
+export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
+  const byPeriod = {};
   for(const r of wfRows){
-    (byYear[r.calYear] = byYear[r.calYear]||[]).push(r);
+    const k = periodKeyOf(r, periodMonths);
+    (byPeriod[k] = byPeriod[k]||[]).push(r);
   }
-  const years = Object.keys(byYear).map(Number).sort((a,b)=>a-b);
+  const periodKeys = Object.keys(byPeriod).map(Number).sort((a,b)=>a-b);
   const rows = [];
   let cumInc=0,cumCost=0,cumPension=0,cumWork=0,cumSS=0,cumRental=0,cumDraw=0;
   let cumMtg=0,cumHealth=0,cumCore=0,cumProp=0,cumMaint=0,cumDebt=0,cumTax=0;
 
-  years.forEach((cal,yr)=>{
-    const yrRows = byYear[cal];
+  periodKeys.forEach((pk,yr)=>{
+    const yrRows = byPeriod[pk];
     const first = yrRows[0];
+    // v5.10.0: for periodMonths=12, pk IS the calendar year already (matches
+    // the pre-v5.10.0 `cal` exactly, byte-identical). For periodMonths=3,
+    // pk=calYear*4+quarterIndex0, so pk/4=calYear+quarterIndex0/4 -- a
+    // fractional-year label (2027, 2027.25, 2027.5, 2027.75, ...) that sorts
+    // and diffs against BASE.startYear the same way an integer year does.
+    const cal = periodMonths===12 ? pk : pk/4;
     const last  = yrRows[yrRows.length-1];
     const cnt = yrRows.length;
     const sum = k=>yrRows.reduce((s,r)=>s+(r[k]||0),0);
@@ -1569,11 +1588,20 @@ export function aggregateMonthlyToAnnual(wfRows, p){
 
     // Disposition summary for this calendar year (from computeDispositions,
     // called once via buildMonthlyScenario -- reuse its attached results).
+    // v5.10.0: matches on first.calYear (the group's REAL calendar year, not
+    // the possibly-fractional `cal` label) so this still works at quarterly
+    // granularity; a quarterly group also gates on its own quarter (d.quarter)
+    // so a same-year sale doesn't get double/quadruple-counted into every
+    // quarter of that year -- the pre-existing annual behavior (any quarter
+    // within the year matches) is unchanged since periodMonths===12 skips
+    // the quarter gate entirely.
+    const curQuarter1to4 = Math.floor(((first.calMonth1to12??1)-1)/3)+1;
+    const inThisPeriod = d => d.year===first.calYear && (periodMonths!==3 || (d.quarter||1)===curQuarter1to4);
     const dispoRes = wfRows.dispoResults || {};
-    const dispoTaxYr = Object.values(dispoRes).reduce((s,d)=>s+(d.year===cal ? d.totalTax : 0), 0);
-    const dispoNetYr = Object.values(dispoRes).reduce((s,d)=>s+(d.year===cal ? (d.afterTaxNetProceeds||0) : 0), 0);
+    const dispoTaxYr = Object.values(dispoRes).reduce((s,d)=>s+(inThisPeriod(d) ? d.totalTax : 0), 0);
+    const dispoNetYr = Object.values(dispoRes).reduce((s,d)=>s+(inThisPeriod(d) ? (d.afterTaxNetProceeds||0) : 0), 0);
     const obligation = p.obligation || {};
-    const settlementOutYr = cal === (obligation.year||BASE.startYear) ? (obligation.amount||0) : 0;
+    const settlementOutYr = inThisPeriod({year:obligation.year||BASE.startYear, quarter:obligation.quarter||1}) ? (obligation.amount||0) : 0;
     // ioMode: still inside its contractual IO window on the first day of this
     // period -- same definition (and same field name) the old annual engine used.
     const ioModeYr = Object.values(first.propIoMode||{}).some(Boolean);
@@ -1686,6 +1714,12 @@ export function aggregateMonthlyToAnnual(wfRows, p){
   rows.dispoResults = wfRows.dispoResults;
   rows.dispoResultsNoOffset = wfRows.dispoResultsNoOffset;
   return rows;
+}
+
+// Thin wrapper preserving the pre-v5.10.0 name/signature -- every existing
+// caller (App.jsx, Playwright's window.__engine) keeps working unchanged.
+export function aggregateMonthlyToAnnual(wfRows, p){
+  return aggregateMonthlyToPeriod(wfRows, p, 12);
 }
 
 // =============================================================================
