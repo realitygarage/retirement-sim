@@ -1,0 +1,56 @@
+=== SESSION 42 JOURNAL -- NW breakdown table annual rows (v5.10.1), ONE COMMIT ===
+
+Date: 2026-07-26
+
+Session goal: user reported (via screenshot of the Simulator tab) that the
+Net Worth chart's expanded breakdown table was showing every-other-year
+columns ('26,'28,'30...'46) while the chart's own x-axis above it already
+labels every year. Confirmed with the user that only the TABLE needed to
+change to 1-year increments -- the chart's x-axis ticks were already correct
+and untouched.
+
+--- ROOT CAUSE ---
+
+Chart component (App.jsx) samples its breakdown table to every-other-year by
+default (`bdRows = (annualTicks||annualBreakdown) ? bdSource :
+bdSource.filter((_,i)=>i%2===0||...)`) to keep wide tables from getting too
+wide -- an opt-out per chart via the `annualTicks`/`annualBreakdown` props,
+already used this way for the Work Income Required chart since v5.2.0. The
+Net Worth <Chart> instantiation (App.jsx ~line 3026) never passed either
+prop, so its table fell into the default biennial sampling.
+
+--- FIX ---
+
+Added `annualBreakdown` to the Net Worth <Chart .../> call -- same mechanism,
+no new code path. One-line change plus version bump (v5.10.0 -> v5.10.1):
+App.jsx header comment + on-screen badge, and the two version-string
+Playwright assertions (E5, L1) updated to match.
+
+--- VERIFICATION ---
+
+Full run_tests.ps1 (144 tests, headed, ~12.7min): 143 passed, 1 failed (X2,
+Group X's sticky-horizontal-scrollbar test) -- the SAME pre-existing failure
+flagged in both session40's and session41's journals as unrelated/carried-
+forward (this session never touched the Cash Flow tab either). All other
+tests passed including E5/L1 (now asserting "v5.10.1") and the full Group Y
+chart-zoom suite from last session.
+
+--- FINAL STATE ---
+
+One commit: v5.10.1 -- NW breakdown table shows every year, not every other
+
+Pushed to origin/main per explicit user request.
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+Same pre-existing carried-forward items as session41 (X2 Group X sticky-
+scrollbar test still failing/unconfirmed-flaky across three separate
+sessions' full runs now -- worth a dedicated look, ideally several repeat
+runs, before treating it as a real regression rather than viewport/timing
+flake; segmentClipInfo year-only advisory note; unitSegmentOverlaps'
+hardcoded 2026-2047 scan; properties[].appreciationPct per-property override
+still schema-only/no UI; Nolan-loan grace-period gate still elapsed-months-
+based; no Playwright coverage yet for v5.4.0-v5.6.0 Defaults-tab UI; dead
+diCap_/maintRate_ plumbing; capped reserve-funding display; no saved
+never-sell pin; the "Free Cash Flow -- breakdown" panel's gross-rental-
+without-op-cost gap) remain untouched.

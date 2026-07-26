@@ -1,3 +1,8 @@
+// v5.10.1 -- Net Worth chart's breakdown table now shows every year (was
+// sampling every other year like most breakdown tables default to) --
+// annualBreakdown opted in on the NW <Chart> the same way v5.2.0 did it for
+// Work Income Required, so the table matches the chart's own already-annual
+// x-axis ticks above it instead of skipping alternating years.
 // v5.10.0 -- Shared year-range zoom control for the Simulator tab's chart
 // grid, with resolution that adapts to the visible span: >8 years (the new
 // QUARTERLY_ZOOM_THRESHOLD_YEARS constant) renders/tables at the existing
@@ -2155,7 +2160,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.10.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.10.1</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -3024,6 +3029,7 @@ export default function App(){
               mainName="HI debt" secondaryDataKey="famLoanBal" secondaryColor="#a78bfa" secondaryName="LI loans"
               refLines={[{y:0,stroke:green,strokeDasharray:"3 3"}]}/>
             <Chart title="Net Worth ($M)" dataKey={nwMode==='liq'?'liqNW':'nw'} pinKey={nwMode==='liq'?'liqNW':'nw'} color={blue} chartId="nw"
+              annualBreakdown
               yFmt={v=>`$${v.toFixed(1)}M`}
               refLines={[{y:2,stroke:dim,strokeDasharray:"2 4",label:{value:"$2M",fill:dim,fontSize:8}},{y:3,stroke:dim,strokeDasharray:"2 4",label:{value:"$3M",fill:dim,fontSize:8}}]}
               headerExtra={<div style={{display:"flex",gap:2}}>
