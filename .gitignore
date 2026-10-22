@@ -9,6 +9,8 @@ lerna-debug.log*
 
 node_modules
 dist
+# Playwright output -- rewritten every run
+test-results
 dist-ssr
 *.local
 
