@@ -108,6 +108,46 @@ Ericsson->Medicare switch (offered, not added).
 Tests: E5/L1 -> v5.12.2. Ran E4/E5/L1 only (text-only change): 3/3 pass.
 Build clean.
 
+--- v5.12.3: EXPENSE LINE ON THE ANNUAL INCOME CHART (third commit) ---
+
+Source: annual-income-chart-add-total-expenses.md. Two corrections to the
+doc's assumptions, flagged to Bob: (1) the chart has no stacked bars -- it's
+one bold line + a breakdown table, so "expenses" = a second line via the
+existing secondaryDataKey mechanism; (2) its "larger version" (multi-year
+cost breakdown by category) mostly exists already as the Simulator's Fixed
+Costs / mo chart.
+
+Key decision (Bob approved my recommendation): expenses = tier1 (waterfall
+required-cost tier: mortgages, health, core, LI loans, HI minimums, prop
+tax/ins, income tax, maintenance, IRMAA), NOT totalOut as the doc
+suggested. totalOut = tier1 + debt sweep + extra mortgage principal -- the
+sweep is surplus being deployed, so totalOut rises to absorb income and
+hides the very gap the chart exists to show. tier1 also excludes rental op
+costs, which income already nets out. Trade-off noted in the breakdown note:
+it won't match the Cumulative chart's "Total spent" (totalOut-based).
+
+Bob also asked for per-pin expense lines. buildChartRows' documented rule is
+that pin values come from each pin's own periodRows, so
+aggregateMonthlyToPeriod (engine.js) now also emits tier1 (avgMo, one
+field, no new math); pins read pin_<id>_exp = pr.tier1 x12.
+
+Changes: chart retitled "Annual Income vs Expenses / yr" (mainName Income,
+dashed red Expenses line, per-pin dotted expense lines); breakdown adds
+Total expenses (cost) + Surplus / (shortfall) (bold) rows; shared
+breakdown formatter now renders negative non-cost values as "-$X" (was
+"$-X").
+
+Observed in AA3 output: in 2027, sweep is $0 and tier1 == totalOut
+($239,008) against $241,754 income -- only a $2,746 surplus that year, so
+the two lines nearly touch in 2027 under current defaults regardless.
+
+Tests: E5/L1 -> v5.12.3; AA2 updated for the new title (and ancestor::div[3]
+-- the secondary-line legend beside the title shifted which div the title
+regex matches); new AA3 (expTotal == summed monthly tier1, incSurplus ==
+income - expenses, aggregated tier1 == monthly avg, tier1 <= totalOut).
+Ran Group AA + E5/L1: 5/5 pass. Build clean. Full suite not re-run (the
+engine change is a purely additive aggregated field).
+
 --- OPEN ITEMS CARRIED FORWARD ---
 
 Same list as session43, plus:

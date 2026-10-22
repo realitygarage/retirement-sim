@@ -1,3 +1,17 @@
+// v5.12.3 -- Annual Income chart gains an expense line (see
+// annual-income-chart-add-total-expenses.md): retitled "Annual Income vs
+// Expenses / yr", dashed red "Expenses" secondary line (expTotal) plus
+// per-pin expense lines (pin_<id>_exp). Expenses = tier1 (the waterfall's
+// required-cost tier: mortgages, health, core, LI loans, HI minimums, prop
+// tax/ins, income tax, maintenance, IRMAA), annualized x12 like income --
+// deliberately NOT totalOut, which adds the debt sweep and would rise to
+// absorb surplus, hiding the very gap the chart exists to show. Excludes
+// rental op costs (income is already net of them). Breakdown table adds
+// Total expenses + Surplus / (shortfall) rows. aggregateMonthlyToPeriod
+// (engine.js) now also emits tier1 (one averaged field, no new math) so pins
+// can read it off their own periodRows. Shared breakdown formatter now shows
+// negative non-cost values as "-$X" (was "$-X").
+//
 // v5.12.2 -- Glossary audit (see glossary-audit-and-rental-net.md). Ten new
 // term cards for chart/table labels that had no definition: Rental Gross vs
 // Net (net = gross minus per-segment op costs, NOT mortgage), HI vs LI Debt,
@@ -728,6 +742,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
   // v5.12.0: Annual Income chart -- per-source income sums, same per-period
   // wfData bucketing as fc_* above (so year labels match every other chart).
   const inc_penByKey={}, inc_yssByKey={}, inc_bssByKey={}, inc_rentByKey={}, inc_workByKey={}, inc_drawByKey={}, inc_totByKey={};
+  const expByKey={};   // v5.12.3: required costs (tier1), same bucketing
   (wfRows||[]).forEach(r=>{
     const k=periodKeyOf(r, periodMonths);
     discByKey[k]=(discByKey[k]||0)+(r.disc||0);
@@ -752,6 +767,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     inc_workByKey[k]=(inc_workByKey[k]||0)+(r.workIncome||0);
     inc_drawByKey[k]=(inc_drawByKey[k]||0)+(r.drawInc||0);
     inc_totByKey[k]=(inc_totByKey[k]||0)+(r.totalInc||0);
+    expByKey[k]=(expByKey[k]||0)+(r.tier1||0);
     cntByKey[k]=(cntByKey[k]||0)+1;
     // savingsAcc is a running total — take the last month value per period (end-of-period balance)
     savAccByKey[k]=r.savingsAcc||0;
@@ -802,6 +818,8 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
       inc_pension:annInc(inc_penByKey), inc_yourSs:annInc(inc_yssByKey), inc_brendaSs:annInc(inc_bssByKey),
       inc_rental:annInc(inc_rentByKey), inc_work:annInc(inc_workByKey), inc_draw:annInc(inc_drawByKey),
       incTotal:annInc(inc_totByKey),
+      expTotal:annInc(expByKey),
+      incSurplus:annInc(inc_totByKey)-annInc(expByKey),
       // v5.0.0: r.nw already includes savingsAcc natively (aggregateMonthlyToAnnual,
       // engine.js) -- pre-v5 this was a two-engine hybrid add (annual nw + monthly
       // savAccM tacked on here); adding savAccM again now would double-count it.
@@ -858,6 +876,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
       pt[`pin_${pin.id}_fc`]=Math.abs(pr?.mtg||0)+Math.abs(pr?.health||0)+Math.abs(pr?.core||0)+Math.abs(pr?.famLoan||0)+Math.abs(pr?.minDebt||0);
       pt[`pin_${pin.id}_rw`]=pr?.reqWork;
       pt[`pin_${pin.id}_inc`]=Math.round((pr?.totalInc||0)*12);   // $/yr, same annualization as incTotal
+      pt[`pin_${pin.id}_exp`]=Math.round((pr?.tier1||0)*12);      // $/yr, same annualization as expTotal
       // v5.0.0 (A4): pins run the full monthly engine now (A2) -- `surplus`
       // IS the disc-based FCF figure (aggregateMonthlyToAnnual), same
       // definition live's own `disc` above uses. `pin_id_sweep` mirrors
@@ -1818,7 +1837,7 @@ export default function App(){
       note:"Monthly average fixed costs. Income tax uses the same federal+CO estimator as the annual engine, annualizing each month's income. Prop tax/ins covers all three properties. Free Cash is after all modeled costs.",
     },
     income: {
-      label:"Annual Income -- by source",
+      label:"Annual Income vs Expenses",
       series:[
         {key:"inc_pension",  label:"Pension",        color:"#a78bfa"},
         {key:"inc_work",     label:"Work income",    color:"#fb923c"},
@@ -1827,8 +1846,10 @@ export default function App(){
         {key:"inc_rental",   label:"Rental (net)",   color:"#34d399"},
         {key:"inc_draw",     label:"Lifestyle Draw", color:"#f472b6", hideZero:true},
         {key:"incTotal",     label:"Total income",   color:"#34d399", bold:true},
+        {key:"expTotal",     label:"Total expenses", color:"#f87171", cost:true},
+        {key:"incSurplus",   label:"Surplus / (shortfall)", color:"#fbbf24", bold:true},
       ],
-      note:"Income per year (not cumulative) -- the yearly shape behind the Cumulative Income chart below. Rental is net of rental op costs, so the rows sum to the total. A partial first year is shown annualized. Excludes the one-time sale-year settlement draw.",
+      note:"Income per year (not cumulative) by source -- rental is net of op costs, so sources sum to the total. Total expenses = required costs (mortgages, health, core living, LI loan payments, HI debt minimums, prop tax/ins, income tax, maintenance, IRMAA); it excludes the debt sweep and buffer top-ups, which are funded FROM the surplus -- so it's lower than the Cumulative chart's 'Total spent', which includes the sweep. Partial years are annualized. Excludes one-time sale-year flows.",
     },
     nw: {
       label:"Net Worth -- breakdown ($K)",
@@ -2018,7 +2039,7 @@ export default function App(){
                             ? (s.key==="nw"||s.key.endsWith("_nw")
                                 ? (v>=0?"$"+v.toFixed(1)+"M":"-$"+Math.abs(v).toFixed(1)+"M")  // already $M
                                 : (v>=0?"$"+(v/1000).toFixed(1)+"M":"-$"+(Math.abs(v)/1000).toFixed(1)+"M"))  // $K -> $M
-                            : (isCost?"-$"+Math.abs(v).toLocaleString():"$"+v.toLocaleString());
+                            : ((isCost||v<0)?"-$"+Math.abs(v).toLocaleString():"$"+v.toLocaleString());
                           return (
                             <td key={r.cal} style={{
                               textAlign:"right",padding:"4px 8px",
@@ -2283,7 +2304,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.2</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.3</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -3187,7 +3208,8 @@ export default function App(){
               refLines={[]}/>
             {/* v5.12.0: non-cumulative counterpart to the Cumulative Income
                 panel directly below -- fills the grid's 6th cell. */}
-            <Chart title="Annual Income / yr" dataKey="incTotal" pinKey="inc" color={green} chartId="income"
+            <Chart title="Annual Income vs Expenses / yr" dataKey="incTotal" pinKey="inc" color={green} chartId="income"
+              mainName="Income" secondaryDataKey="expTotal" secondaryColor={red} secondaryName="Expenses" pinSecondaryKey="exp"
               annualBreakdown
               yFmt={v=>`$${Math.round(v/1000)}K`}
               refLines={[]}/>

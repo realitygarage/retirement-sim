@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.12.2"', async ({ page }) => {
+  test('E5 — Version header shows "v5.12.3"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.12.2').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.12.2');
+    await expect(page.locator('text=v5.12.3').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.12.3');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.12.2', async ({ page }) => {
+  test('L1 — Version header shows v5.12.3', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.12.2').first()).toBeVisible();
-    console.log('  L1 — Version v5.12.2 confirmed');
+    await expect(page.locator('text=v5.12.3').first()).toBeVisible();
+    console.log('  L1 — Version v5.12.3 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3488,15 +3488,46 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
 
   test('AA2 — Annual Income chart renders and its breakdown table shows the by-source rows', async ({ page }) => {
     await loadApp(page);
-    const incChart = page.locator('div').filter({ hasText: /^Annual Income \/ yr$/ })
-      .locator('xpath=ancestor::div[2]').first();
+    // v5.12.3: retitled from "Annual Income / yr" when the expense line was
+    // added. The new secondary-line legend sits beside the title, so the regex
+    // now matches the title div itself (not its wrapper) -- one level deeper,
+    // hence ancestor::div[3] to reach the chart card (header + table).
+    const incChart = page.locator('div').filter({ hasText: /^Annual Income vs Expenses \/ yr$/ })
+      .locator('xpath=ancestor::div[3]').first();
     await expect(incChart).toBeVisible();
     await incChart.locator('button', { hasText: 'breakdown' }).click();
     await page.waitForTimeout(300);
-    for (const label of ['Pension', 'Work income', 'Your SS', 'Brenda SS', 'Rental (net)', 'Total income']) {
+    for (const label of ['Pension', 'Work income', 'Your SS', 'Brenda SS', 'Rental (net)', 'Total income', 'Total expenses', 'Surplus / (shortfall)']) {
       await expect(incChart.locator('td', { hasText: label }).first()).toBeVisible();
     }
     console.log('  AA2 — Annual Income breakdown rows visible');
+  });
+
+  test('AA3 — v5.12.3 expTotal equals the true summed calendar-year tier1 (required costs, no sweep), and incSurplus = income - expenses', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      const wf = window.__wfData || [];
+      const lr = window.__liveRows || [];
+      const counts = {};
+      wf.forEach(r => { counts[r.calYear] = (counts[r.calYear] || 0) + 1; });
+      const fullYr = Number(Object.keys(counts).find(y => counts[y] === 12));
+      const row = cd.find(r => r.cal === fullYr);
+      const yrRows = wf.filter(r => r.calYear === fullYr);
+      const sumTier1 = yrRows.reduce((s, r) => s + (r.tier1 || 0), 0);
+      const sumTotalOut = yrRows.reduce((s, r) => s + (r.totalOut || 0), 0);
+      const lrRow = lr.find(r => r.cal === fullYr);
+      return { fullYr, expTotal: row.expTotal, sumTier1, sumTotalOut, incTotal: row.incTotal,
+        incSurplus: row.incSurplus, aggTier1: lrRow?.tier1, sumTier1Avg: Math.round(sumTier1 / 12) };
+    });
+    console.log('  AA3 — ' + JSON.stringify(result));
+    expect(result.expTotal).toBeGreaterThan(0);
+    expect(Math.abs(result.expTotal - result.sumTier1)).toBeLessThanOrEqual(1);
+    expect(result.incSurplus).toBe(result.incTotal - result.expTotal);
+    // aggregateMonthlyToPeriod's new tier1 field (what pins read) is the same monthly average
+    expect(result.aggTier1).toBe(result.sumTier1Avg);
+    // tier1 never exceeds totalOut (totalOut = tier1 + sweep + extra principal)
+    expect(result.sumTier1).toBeLessThanOrEqual(result.sumTotalOut);
   });
 
 });

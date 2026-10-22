@@ -1643,6 +1643,9 @@ export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
       totalDebtPmt: Math.round(avgMo('minPmt')+avgMo('sweep')),
       totalInc: Math.round(avgMo('totalInc')),
       totalOut: Math.round(totalOutAvg),
+      // v5.12.3: required-cost tier (waterfall tier 1) -- read by the Annual
+      // Income chart's expense line, incl. per-pin (pins read periodRows).
+      tier1:    Math.round(avgMo('tier1')),
       reEquity: Math.round((dplxVal+lafVal+primVal-dplxBal-lafBal-primBal)/1000),
       reValue:  Math.round((dplxVal+lafVal+primVal)/1000),
       reMortgage:Math.round((dplxBal+lafBal+primBal)/1000),
