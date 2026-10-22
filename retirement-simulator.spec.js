@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.11.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.12.1"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.11.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.11.0');
+    await expect(page.locator('text=v5.12.1').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.12.1');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.11.0', async ({ page }) => {
+  test('L1 — Version header shows v5.12.1', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.11.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.11.0 confirmed');
+    await expect(page.locator('text=v5.12.1').first()).toBeVisible();
+    console.log('  L1 — Version v5.12.1 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3451,6 +3451,52 @@ test.describe('Group Z — v5.11.0 Nolan Deferment Gate / Work-Curve Epoch Fix',
     // samples it, so Jan 2027 hits $0 exactly.
     expect(result.jan2027Work).toBe(0);
     expect(result.dec2026Work).toBeGreaterThan(0);
+  });
+
+});
+
+// ─── Group AA: v5.12.0 Annual Income chart / v5.12.1 breakdown legibility ───
+// New "Annual Income / yr" chart in the Simulator grid: incTotal and its
+// per-source inc_* fields (chartData) are the period's monthly wfData average
+// x12 -- a full calendar year equals its true summed total. Rental is net of
+// rentalOpCost so the sources sum to the engine's own totalInc.
+
+test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
+
+  test('AA1 — incTotal equals the true summed calendar-year totalInc for a full year, and sources sum to it', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      const wf = window.__wfData || [];
+      // First full calendar year in the horizon
+      const counts = {};
+      wf.forEach(r => { counts[r.calYear] = (counts[r.calYear] || 0) + 1; });
+      const fullYr = Number(Object.keys(counts).find(y => counts[y] === 12));
+      const row = cd.find(r => r.cal === fullYr);
+      const yrRows = wf.filter(r => r.calYear === fullYr);
+      const sumTot = yrRows.reduce((s, r) => s + (r.totalInc || 0), 0);
+      const sources = row.inc_pension + row.inc_work + row.inc_yourSs + row.inc_brendaSs + row.inc_rental + row.inc_draw;
+      return { fullYr, incTotal: row.incTotal, sumTot, sources, hasIncTotal: 'incTotal' in row };
+    });
+    console.log('  AA1 — ' + JSON.stringify(result));
+    expect(result.hasIncTotal).toBe(true);
+    expect(Math.abs(result.incTotal - result.sumTot)).toBeLessThanOrEqual(1);
+    // Each source is rounded independently -- allow a few dollars of rounding drift
+    expect(Math.abs(result.sources - result.incTotal)).toBeLessThanOrEqual(6);
+    expect(result.incTotal).toBeGreaterThan(0);
+  });
+
+  test('AA2 — Annual Income chart renders and its breakdown table shows the by-source rows', async ({ page }) => {
+    await loadApp(page);
+    const incChart = page.locator('div').filter({ hasText: /^Annual Income \/ yr$/ })
+      .locator('xpath=ancestor::div[2]').first();
+    await expect(incChart).toBeVisible();
+    await incChart.locator('button', { hasText: 'breakdown' }).click();
+    await page.waitForTimeout(300);
+    for (const label of ['Pension', 'Work income', 'Your SS', 'Brenda SS', 'Rental (net)', 'Total income']) {
+      await expect(incChart.locator('td', { hasText: label }).first()).toBeVisible();
+    }
+    console.log('  AA2 — Annual Income breakdown rows visible');
   });
 
 });

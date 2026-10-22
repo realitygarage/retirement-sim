@@ -1,3 +1,22 @@
+// v5.12.1 -- breakdown-table legibility (shared by every Simulator chart's
+// "breakdown" panel): plain value cells were `dim` (#7d96ad) at 9px on the
+// near-black panel -- hard to read. Values now `bright`, table font 9->11px,
+// year headers / note / "(cost)" tag bumped from `dim` to `muted`. Bold
+// total rows and red cost cells keep their own colors. Display-only.
+//
+// v5.12.0 -- Annual Income chart (Simulator tab): a non-cumulative,
+// per-year counterpart to the Cumulative Income vs Cost panel, placed in the
+// chart grid's empty 6th cell directly above it. Main line = total income in
+// $/yr (incTotal) with per-pin lines (pin_<id>_inc); the "breakdown" table
+// (BREAKDOWNS.income) splits it by source -- pension, work, Your SS, Brenda
+// SS, rental NET of op costs, lifestyle draws -- so the rows sum to the
+// engine's own totalInc. Data comes from buildChartRows' existing per-period
+// wfData bucketing (same calendar-year/quarter keys as every other chart, no
+// new epoch math). Values are annualized (period monthly avg x12): a full
+// calendar year equals its true total, a partial first year shows its run
+// rate, and quarterly zoom keeps the same $/yr scale. Excludes the one-time
+// settleDraw, matching totalInc/FCF. No engine.js change.
+//
 // v5.11.0 -- HI-debt loan refresh + Nolan deferment-gate + Work Income Curve
 // epoch fix (see claude-code-handoff-2026-10-22.md, both parts):
 // (A4) Defaults-tab "Sophia/Nolan HI Loans" mirror cards reworded -- the old
@@ -693,6 +712,9 @@ function StickyHScroll({ targetRef, trackBg, trackBorder }){
 function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, liveParams, discFloor){
   const discByKey={}, sweepByKey={}, totalSweepByKey={}, cntByKey={}, savAccByKey={}, abByKey={}, floorByKey={};
   const fc_mtgByKey={}, fc_hlthByKey={}, fc_coreByKey={}, fc_famByKey={}, fc_hiMinsByKey={}, fc_ropByKey={}, fc_propByKey={}, fc_taxByKey={};
+  // v5.12.0: Annual Income chart -- per-source income sums, same per-period
+  // wfData bucketing as fc_* above (so year labels match every other chart).
+  const inc_penByKey={}, inc_yssByKey={}, inc_bssByKey={}, inc_rentByKey={}, inc_workByKey={}, inc_drawByKey={}, inc_totByKey={};
   (wfRows||[]).forEach(r=>{
     const k=periodKeyOf(r, periodMonths);
     discByKey[k]=(discByKey[k]||0)+(r.disc||0);
@@ -709,6 +731,14 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     fc_ropByKey[k]=(fc_ropByKey[k]||0)+(r.fc_rentalOp||0);
     fc_propByKey[k]=(fc_propByKey[k]||0)+(r.fc_propCost||0);
     fc_taxByKey[k]=(fc_taxByKey[k]||0)+(r.fc_tax||0);
+    inc_penByKey[k]=(inc_penByKey[k]||0)+(r.pension||0);
+    inc_yssByKey[k]=(inc_yssByKey[k]||0)+(r.yourSs||0);
+    inc_bssByKey[k]=(inc_bssByKey[k]||0)+(r.brendaSs||0);
+    // net of rental opex, matching the engine's own totalInc definition
+    inc_rentByKey[k]=(inc_rentByKey[k]||0)+(r.rental||0)-(r.rentalOpCost||0);
+    inc_workByKey[k]=(inc_workByKey[k]||0)+(r.workIncome||0);
+    inc_drawByKey[k]=(inc_drawByKey[k]||0)+(r.drawInc||0);
+    inc_totByKey[k]=(inc_totByKey[k]||0)+(r.totalInc||0);
     cntByKey[k]=(cntByKey[k]||0)+1;
     // savingsAcc is a running total — take the last month value per period (end-of-period balance)
     savAccByKey[k]=r.savingsAcc||0;
@@ -750,8 +780,15 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     const fc_tax_=Math.round((fc_taxByKey[key]||0)/cnt);
     const fixedTotal=fc_mtg_+fc_hlth_+fc_core_+fc_fam_+fc_hiMins_+fc_rop_+fc_prop_+fc_tax_;
     const combinedSweep=Math.round((totalSweepByKey[key]||0)/cnt);
+    // $/yr, annualized from the period's monthly average (x12) so the scale
+    // is the same at annual and quarterly zoom; a full calendar year equals
+    // its true total.
+    const annInc = m => Math.round((m[key]||0)/cnt*12);
     const pt={year:r.cal, cal:r.cal, reqWork:r.reqWork, surplus:disc, surplusPool, floorLine, hiDebt:r.hiDebt,
       fixedTotal, fc_mtg:fc_mtg_, fc_hlth:fc_hlth_, fc_core:fc_core_, fc_fam:fc_fam_, fc_hiMins:fc_hiMins_, fc_rop:fc_rop_, fc_prop:fc_prop_, fc_tax:fc_tax_,
+      inc_pension:annInc(inc_penByKey), inc_yourSs:annInc(inc_yssByKey), inc_brendaSs:annInc(inc_bssByKey),
+      inc_rental:annInc(inc_rentByKey), inc_work:annInc(inc_workByKey), inc_draw:annInc(inc_drawByKey),
+      incTotal:annInc(inc_totByKey),
       // v5.0.0: r.nw already includes savingsAcc natively (aggregateMonthlyToAnnual,
       // engine.js) -- pre-v5 this was a two-engine hybrid add (annual nw + monthly
       // savAccM tacked on here); adding savAccM again now would double-count it.
@@ -807,6 +844,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
       const pr = pin.periodRows[i];
       pt[`pin_${pin.id}_fc`]=Math.abs(pr?.mtg||0)+Math.abs(pr?.health||0)+Math.abs(pr?.core||0)+Math.abs(pr?.famLoan||0)+Math.abs(pr?.minDebt||0);
       pt[`pin_${pin.id}_rw`]=pr?.reqWork;
+      pt[`pin_${pin.id}_inc`]=Math.round((pr?.totalInc||0)*12);   // $/yr, same annualization as incTotal
       // v5.0.0 (A4): pins run the full monthly engine now (A2) -- `surplus`
       // IS the disc-based FCF figure (aggregateMonthlyToAnnual), same
       // definition live's own `disc` above uses. `pin_id_sweep` mirrors
@@ -1766,6 +1804,19 @@ export default function App(){
       ],
       note:"Monthly average fixed costs. Income tax uses the same federal+CO estimator as the annual engine, annualizing each month's income. Prop tax/ins covers all three properties. Free Cash is after all modeled costs.",
     },
+    income: {
+      label:"Annual Income -- by source",
+      series:[
+        {key:"inc_pension",  label:"Pension",        color:"#a78bfa"},
+        {key:"inc_work",     label:"Work income",    color:"#fb923c"},
+        {key:"inc_yourSs",   label:"Your SS",        color:"#60a5fa"},
+        {key:"inc_brendaSs", label:"Brenda SS",      color:"#38bdf8"},
+        {key:"inc_rental",   label:"Rental (net)",   color:"#34d399"},
+        {key:"inc_draw",     label:"Lifestyle Draw", color:"#f472b6", hideZero:true},
+        {key:"incTotal",     label:"Total income",   color:"#34d399", bold:true},
+      ],
+      note:"Income per year (not cumulative) -- the yearly shape behind the Cumulative Income chart below. Rental is net of rental op costs, so the rows sum to the total. A partial first year is shown annualized. Excludes the one-time sale-year settlement draw.",
+    },
     nw: {
       label:"Net Worth -- breakdown ($K)",
       series:[
@@ -1795,7 +1846,7 @@ export default function App(){
     // v5.10.0: both sides swapped for their range/resolution-aware
     // counterparts, so the table always matches what the chart above it is
     // actually plotting (same zoom range, same annual/quarterly resolution).
-    const bdSource = (chartId==='nw' || chartId==='fixedCosts') ? displayChartData : displayLiveRows;
+    const bdSource = (chartId==='nw' || chartId==='fixedCosts' || chartId==='income') ? displayChartData : displayLiveRows;
     // annualTicks charts (e.g. Work Income Required) show every year; others
     // sample every other year to keep the breakdown table from getting too wide.
     // annualBreakdown opts a chart's TABLE into every-year rows independently
@@ -1919,14 +1970,17 @@ export default function App(){
         {/* Breakdown panel -- only when expanded */}
         {isExpanded&&bd&&(
           <div style={{marginTop:10,borderTop:`1px solid ${bdr}`,paddingTop:10}}>
-            <div style={{fontSize:9,color:dim,marginBottom:8}}>{bd.note}</div>
+            {/* v5.12.1: legibility pass -- shared by every chart's breakdown
+                table. Values were `dim` at 9px against the near-black panel;
+                now `bright` at 11px, year headers/note bumped to `muted`. */}
+            <div style={{fontSize:10,color:muted,marginBottom:8}}>{bd.note}</div>
             <div style={{overflowX:"auto"}}>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:9}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                 <thead>
                   <tr style={{borderBottom:`1px solid ${bdr}`}}>
-                    <th style={{textAlign:"left",padding:"4px 8px",color:dim,fontWeight:"bold",whiteSpace:"nowrap"}}>Series</th>
+                    <th style={{textAlign:"left",padding:"4px 8px",color:muted,fontWeight:"bold",whiteSpace:"nowrap"}}>Series</th>
                     {bdRows.map(r=>(
-                      <th key={r.cal} style={{textAlign:"right",padding:"4px 8px",color:dim,fontWeight:"bold",
+                      <th key={r.cal} style={{textAlign:"right",padding:"4px 8px",color:muted,fontWeight:"bold",
                         fontFamily:mono,whiteSpace:"nowrap"}}>{periodTickFmt(r.cal)}</th>
                     ))}
                   </tr>
@@ -1943,7 +1997,7 @@ export default function App(){
                             background:s.color,marginRight:6,verticalAlign:"middle"}}/>
                           <span style={{color:s.bold?s.color:isCost?"#f87171":muted,
                             fontWeight:s.bold?"bold":"normal"}}>{s.label}</span>
-                          {isCost&&<span style={{color:dim,fontSize:8,marginLeft:4}}>(cost)</span>}
+                          {isCost&&<span style={{color:muted,fontSize:9,marginLeft:4}}>(cost)</span>}
                         </td>
                         {bdRows.map(r=>{
                           const v = r[s.key]??0;
@@ -1955,7 +2009,7 @@ export default function App(){
                           return (
                             <td key={r.cal} style={{
                               textAlign:"right",padding:"4px 8px",
-                              fontFamily:mono,color:s.bold?s.color:isCost?red:dim,
+                              fontFamily:mono,color:s.bold?s.color:isCost?red:bright,
                               fontWeight:s.bold?"bold":"normal",whiteSpace:"nowrap",
                             }}>{disp}</td>
                           );
@@ -2216,7 +2270,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.11.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.1</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -3117,6 +3171,12 @@ export default function App(){
             <Chart title="Fixed Costs / mo" dataKey="fixedTotal" pinKey="fc" color={red} chartId="fixedCosts"
               yFmt={v=>v>=1000?`$${Math.round(v/1000)}K`:`$${Math.round(v)}`}
               yDomain={[0,fixedCostMax]}
+              refLines={[]}/>
+            {/* v5.12.0: non-cumulative counterpart to the Cumulative Income
+                panel directly below -- fills the grid's 6th cell. */}
+            <Chart title="Annual Income / yr" dataKey="incTotal" pinKey="inc" color={green} chartId="income"
+              annualBreakdown
+              yFmt={v=>`$${Math.round(v/1000)}K`}
               refLines={[]}/>
           </div>
 

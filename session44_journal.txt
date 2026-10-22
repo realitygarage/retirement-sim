@@ -1,0 +1,81 @@
+=== SESSION 44 JOURNAL -- Annual Income chart (v5.12.0) + breakdown-table legibility (v5.12.1), ONE COMMIT ===
+
+Date: 2026-10-22
+
+Session goal: implement "Annual income chart feature.md" -- a non-cumulative,
+per-year income chart on the Simulator tab, paired with the existing
+Cumulative Income vs Cost panel.
+
+--- WHAT THE CODE ACTUALLY LOOKED LIKE (vs. the feature doc's assumptions) ---
+
+- The feature doc assumed the cumulative income chart might be a BREAKDOWNS
+  entry (e.g. a `cumInc` key). It isn't -- it's a standalone "Cumulative
+  Income vs Cost" panel (Income/Cost/Gap toggle) directly BELOW the chart
+  grid, reading liveRows directly (not zoom-aware).
+- "Stacked series + bold total line" isn't how BREAKDOWNS works either: the
+  shared <Chart> plots one bold main line (+ one dashed line per pin); the
+  BREAKDOWNS entry drives the per-series TABLE shown under it when
+  "breakdown" is clicked. So "stacked by source" = per-source table rows.
+- The chart grid had 5 charts, leaving an empty 6th cell (bottom right, next
+  to Fixed Costs) -- directly above the cumulative panel. Natural placement.
+
+--- v5.12.0: ANNUAL INCOME CHART ---
+
+- buildChartRows (App.jsx) now sums per-source income from wfData per period
+  (same periodKeyOf bucketing as the fc_* fields, so year/quarter labels match
+  every other chart -- no new epoch math): inc_pension, inc_work,
+  inc_yourSs, inc_brendaSs, inc_rental, inc_draw, incTotal. Plus a
+  pin_<id>_inc per-pin line (pin row totalInc x12).
+- Units: $/yr, ANNUALIZED (period monthly avg x12). Bob approved this over
+  true summed totals: a full calendar year equals its true total exactly; the
+  partial first year (Jul-Dec 2026) shows its annualized run rate; quarterly
+  zoom keeps the same $/yr scale instead of dropping ~4x.
+- Rental shown NET of rentalOpCost, so the sources sum to the engine's own
+  totalInc.
+- One-time settleDraw EXCLUDED (Bob approved), matching totalInc and the FCF
+  chart. Noted to Bob: the existing cumulative panel is internally
+  inconsistent on this -- its stacked cumDraw area includes settleDraw but
+  its cumInc total doesn't. Left untouched.
+- New BREAKDOWNS.income entry; bdSource routes chartId 'income' to
+  displayChartData (where the inc_* fields live). annualBreakdown on, so the
+  table shows every year. Colors match the cumulative panel's incColors
+  (Brenda SS gets its own shade since the cumulative chart lumps SS).
+
+--- v5.12.1: BREAKDOWN-TABLE LEGIBILITY ---
+
+Bob found the breakdown numbers hard to read. Fixed in the SHARED table (all
+six charts' breakdowns, not just income): value cells dim (#7d96ad) ->
+bright (#f0f6fc); table font 9px -> 11px; year headers, "Series" header,
+note line, and "(cost)" tag dim -> muted. Bold total rows and red cost cells
+unchanged. Display-only. Side effect: the every-year tables (FCF, NW, Annual
+Income) are wider and scroll horizontally (already overflowX:auto).
+
+--- TESTS ---
+
+E5 and L1 version-string assertions -> v5.12.1.
+New Group AA (2 tests):
+  AA1 -- for the first full calendar year (2027), chartData incTotal equals
+         the true summed wfData totalInc exactly (241,754 == 241,754), and
+         the six sources sum to it within rounding (241,748, $6 drift from
+         independent per-source rounding).
+  AA2 -- "Annual Income / yr" chart renders; its breakdown table shows the
+         Pension / Work income / Your SS / Brenda SS / Rental (net) / Total
+         income rows.
+
+--- VERIFICATION ---
+
+npm run build: clean.
+npm run lint: 26 errors / 9 warnings (was 25/9). The +1 is one more
+instance of the pre-existing react-hooks/static-components error that fires
+once per <Chart> usage in the grid (Chart is defined inside App's render) --
+a sixth chart = a sixth instance. Not a new kind of problem.
+Full npx playwright test run: 148/148 passed (6.8m).
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+Same list as session43, plus:
+- Cumulative Income panel's settleDraw inconsistency (cumDraw area includes
+  it, cumInc total doesn't) -- noticed this session, not fixed.
+- The Cumulative Income panel still reads liveRows directly, so it ignores
+  the v5.10.0 chart-zoom range while the new Annual Income chart above it
+  honors it.
