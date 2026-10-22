@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.12.4"', async ({ page }) => {
+  test('E5 — Version header shows "v5.13.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.12.4').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.12.4');
+    await expect(page.locator('text=v5.13.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.13.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.12.4', async ({ page }) => {
+  test('L1 — Version header shows v5.13.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.12.4').first()).toBeVisible();
-    console.log('  L1 — Version v5.12.4 confirmed');
+    await expect(page.locator('text=v5.13.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.13.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3536,6 +3536,78 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
     expect(result.aggTier1).toBe(result.sumTier1Avg);
     // tier1 never exceeds totalOut (totalOut = tier1 + sweep + extra principal)
     expect(result.sumTier1).toBeLessThanOrEqual(result.sumTotalOut);
+  });
+
+});
+
+// ─── Group AB: v5.13.0 NW includes LI loans / Cumulative chart consistency + zoom ─
+// (1) book NW subtracts LI loan balances (was omitted); (2) the Cumulative
+// chart's stacked income areas sum to its own cumInc total (cumDraw no
+// longer adds settleDraw; cumRental is net of op costs); (3) the Cumulative
+// chart follows the shared chart zoom range/resolution.
+
+test.describe('Group AB — v5.13.0 NW LI Loans / Cumulative Chart Fixes', () => {
+
+  // Same as Group Y's scoped helper (not visible outside that describe)
+  async function setRangeSlider(page, testId, value) {
+    const slider = page.getByTestId(testId);
+    await slider.evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(value));
+    await page.waitForTimeout(200);
+  }
+
+  test('AB1 — book NW subtracts the LI loan balance (default family loan is outstanding in the first period)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const wf = window.__wfData || [];
+      const lr = window.__liveRows || [];
+      const row = lr[0];
+      const first = wf.find(r => r.calYear === wf[0].calYear);
+      const vals = Object.values(first.propValue || {}).reduce((s, v) => s + v, 0);
+      const mtgs = Object.values(first.propMtgBal || {}).reduce((s, v) => s + v, 0);
+      const hi = (first.ccBalRaw || 0) + (first.sophiaBalRaw || 0) + (first.nolanBalRaw || 0);
+      const expected = Math.round((vals + (first.savingsAcc || 0) - mtgs - hi - (first.loansBal || 0)) / 1000);
+      const withoutLoans = Math.round((vals + (first.savingsAcc || 0) - mtgs - hi) / 1000);
+      return { nw: row.nw, expected, withoutLoans, loansBalRaw: row.loansBalRaw };
+    });
+    console.log('  AB1 — ' + JSON.stringify(result));
+    expect(result.loansBalRaw).toBeGreaterThan(0);
+    expect(result.nw).toBe(result.expected);
+    expect(result.nw).toBeLessThan(result.withoutLoans);
+  });
+
+  test('AB2 — Cumulative chart stacked income bands (pension+work+rental net+SS+draws) sum to cumInc every year', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const lr = window.__liveRows || [];
+      return lr.map(r => ({ cal: r.cal,
+        diff: (r.cumPension + r.cumWork + r.cumRental + r.cumSS + r.cumDraw) - r.cumInc }));
+    });
+    const worst = result.reduce((m, r) => Math.abs(r.diff) > Math.abs(m.diff) ? r : m, { diff: 0 });
+    console.log('  AB2 — rows=' + result.length + ' worst diff ($K)=' + JSON.stringify(worst));
+    // $K units, each band rounded independently -- allow small rounding drift
+    for (const r of result) expect(Math.abs(r.diff)).toBeLessThanOrEqual(4);
+  });
+
+  test('AB3 — Cumulative chart follows the chart zoom (quarterly ticks, only years inside the range)', async ({ page }) => {
+    await loadApp(page);
+    const base = await page.evaluate(() => window.__engine.BASE.startYear);
+    await setRangeSlider(page, 'chart-zoom-from', base + 5);
+    await setRangeSlider(page, 'chart-zoom-to', base + 9);
+    const panel = page.locator('text=Cumulative Income vs Cost').first().locator('xpath=ancestor::div[3]');
+    const ticks = await panel.locator('.recharts-cartesian-axis-tick-value').allTextContents();
+    const qTicks = ticks.filter(t => /^Q[1-4]'\d\d$/.test(t.trim()));
+    const yrs = qTicks.map(t => 2000 + parseInt(t.trim().slice(-2)));
+    console.log('  AB3 — quarterly ticks: ' + JSON.stringify(qTicks));
+    expect(qTicks.length).toBeGreaterThan(0);
+    for (const y of yrs) {
+      expect(y).toBeGreaterThanOrEqual(base + 5);
+      expect(y).toBeLessThanOrEqual(base + 9);
+    }
   });
 
 });

@@ -1,3 +1,21 @@
+// v5.13.0 -- session-44 open items:
+// (1) Net Worth now subtracts LI loan balances (loans[]) -- book NW
+// (aggregateMonthlyToPeriod, engine.js; pins inherit it) and liquidation NW
+// (buildChartRows, live + per-pin, via a new raw loansBalRaw field). Was
+// silently omitted, so an added LI loan never reduced NW. NW breakdown gets
+// an "LI loans" row; Glossary NW entry updated.
+// (2) Cumulative Income chart: the stacked income areas now sum exactly to
+// the cumInc total -- cumDraw no longer adds the one-time sale-proceeds
+// settleDraw (cumInc/totalInc never included it), and cumRental is now NET
+// of rental op costs (was gross, while cumInc is net). Legend "Rental" ->
+// "Rental (net)".
+// (3) Cumulative Income chart follows the shared chart zoom: plots
+// displayLiveRows / new displayPinRows (pins' own rows at the current
+// resolution + range, quarterly via a hoisted pinQuarterlyRows memo that
+// quarterlyChartData now also reuses). periodTickFmt hoisted from <Chart> to
+// App scope so both share it. Values stay running totals from the start
+// date; the "(20yr)" stat strip stays full-horizon.
+//
 // v5.12.4 -- Annual Income chart's breakdown table now itemizes expenses
 // too (was income-only + a single Total expenses row): Mortgages, Health
 // ins, Core living, Loan payments, HI debt minimums, Prop tax/insurance,
@@ -882,7 +900,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
         const lsn=lv*(1-_SCOST);
         lafNet=lsn-lb-Math.max(0,lsn-(_liqPropById.barberry?.hold.basis||0))*_CGRATE;
       }
-      pt.liqNW=(primNet+dplxNet+lafNet+r.invested*1000+savAccRaw-r.hiDebtRaw)/1e6;
+      pt.liqNW=(primNet+dplxNet+lafNet+r.invested*1000+savAccRaw-r.hiDebtRaw-(r.loansBalRaw||0))/1e6;   // v5.13.0: - LI loans
     }
 
     pinsForChart.forEach(pin=>{
@@ -941,7 +959,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
         const pInvested=(pr?.invested??0)*1000;
         const pHiDebtRaw=(pr?.hiDebtRaw??0);
         const pSavAcc=(pr?.savingsAccEnd??0);
-        pt[`pin_${pin.id}_liqNW`]=(pPrimNet+pDplxNet+pLafNet+pInvested+pSavAcc-pHiDebtRaw)/1e6;
+        pt[`pin_${pin.id}_liqNW`]=(pPrimNet+pDplxNet+pLafNet+pInvested+pSavAcc-pHiDebtRaw-(pr?.loansBalRaw||0))/1e6;   // v5.13.0: - LI loans
       }
     });
     return pt;
@@ -1394,10 +1412,14 @@ export default function App(){
   // O(months) cost class as liveRows itself) to always keep current so
   // toggling the range doesn't cause a visible recompute stall.
   const quarterlyLiveRows = useMemo(()=>aggregateMonthlyToPeriod(wfData, liveParams, 3),[wfData, liveParams]);
+  // v5.13.0: per-pin quarterly rows hoisted into their own memo -- shared by
+  // quarterlyChartData and the Cumulative Income panel's zoomed pin lines.
+  const pinQuarterlyRows = useMemo(()=>Object.fromEntries(pins.map(pin=>
+    [pin.id, aggregateMonthlyToPeriod(pin.wfRows||[], pin.paramSnapshot||{}, 3)])),[pins]);
   const quarterlyChartData = useMemo(()=>{
-    const pinsForChart = pins.map(pin=>({...pin, periodRows: aggregateMonthlyToPeriod(pin.wfRows||[], pin.paramSnapshot||{}, 3)}));
+    const pinsForChart = pins.map(pin=>({...pin, periodRows: pinQuarterlyRows[pin.id]||[]}));
     return buildChartRows(quarterlyLiveRows, wfData, 3, pinsForChart, liveParams, discFloor);
-  },[quarterlyLiveRows,pins,wfData,liveParams,discFloor]);
+  },[quarterlyLiveRows,pins,pinQuarterlyRows,wfData,liveParams,discFloor]);
 
   // displayChartData/displayLiveRows: what the chart grid + its breakdown
   // tables actually render -- resolution-appropriate source, filtered to the
@@ -1411,6 +1433,16 @@ export default function App(){
   const displayLiveRows = useMemo(()=>
     (chartResolution==='annual' ? liveRows : quarterlyLiveRows).filter(inChartRange),
   [chartResolution,liveRows,quarterlyLiveRows,effChartRangeStart,effChartRangeEnd]);
+  // v5.13.0: a pin's own rows at the current resolution + zoom range (the
+  // Cumulative Income panel plots pin rows directly, not via chartData).
+  const displayPinRows = pin => (chartResolution==='annual' ? pin.rows : (pinQuarterlyRows[pin.id]||[])).filter(inChartRange);
+  // v5.10.0 (hoisted out of <Chart> in v5.13.0 so the Cumulative panel shares
+  // it): quarterly rows carry a fractional `cal`/`year` (2027, 2027.25, ...)
+  // -- label those as "Q2'27" instead of the annual "'27" so the axis/table
+  // stay readable once zoomed below the quarterly threshold.
+  const periodTickFmt = chartResolution==='quarterly'
+    ? (y)=>{ const yr=Math.floor(y+1e-9); const q=Math.round((y-yr)*4)+1; return `Q${q}'${String(yr).slice(2)}`; }
+    : (y)=>`'${String(y).slice(2)}`;
 
   // NW yr10 from chartData (includes savingsAcc from sweep) — used in stat card
   const liveNwYr10 = useMemo(()=>(chartData[10]?.nw ?? liveStats.nwYr10/1000),
@@ -1883,10 +1915,11 @@ export default function App(){
         {key:"invested",   label:"Invested cash",   color:"#a78bfa"},
         {key:"sweepSavK",  label:"Sweep savings",   color:"#38bdf8", hideZero:true},
         {key:"hiDebtK",    label:"HI debt",         color:"#fb923c", cost:true},
+        {key:"famLoanBal", label:"LI loans",        color:"#a78bfa", cost:true, hideZero:true},   // v5.13.0
         {key:"reEquity",   label:"RE equity",       color:"#34d399"},
         {key:"nw",         label:"Total NW",        color:"#34d399", bold:true},
       ],
-      note:"NW = RE equity + invested cash + sweep savings - HI debt. RE grows at appreciation rate; invested cash and sweep savings at investment return rate.",
+      note:"NW = RE equity + invested cash + sweep savings - HI debt - LI loans. RE grows at appreciation rate; invested cash and sweep savings at investment return rate.",
     },
   };
 
@@ -1913,12 +1946,7 @@ export default function App(){
     // table wants (v5.8.0: Free Cash Flow's line chart keeps its normal
     // tick density; only its breakdown table needed 1-year resolution).
     const bdRows = (annualTicks||annualBreakdown) ? bdSource : bdSource.filter((_,i)=>i%2===0||i===bdSource.length-1);
-    // v5.10.0: quarterly rows carry a fractional `cal`/`year` (2027, 2027.25,
-    // ...) -- label those as "Q2'27" instead of the annual "'27" so the axis/
-    // table stay readable once zoomed below the quarterly threshold.
-    const periodTickFmt = chartResolution==='quarterly'
-      ? (y)=>{ const yr=Math.floor(y+1e-9); const q=Math.round((y-yr)*4)+1; return `Q${q}'${String(yr).slice(2)}`; }
-      : (y)=>`'${String(y).slice(2)}`;
+    // periodTickFmt: App-scope (v5.13.0), shared with the Cumulative panel.
     return (
       <div style={{background:bg1,border:`1px solid ${isExpanded?color:bdr}`,borderRadius:10,
         padding:"14px 10px 8px", gridColumn: isExpanded?"1 / -1":"auto",
@@ -2328,7 +2356,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.4</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.13.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -3258,13 +3286,17 @@ export default function App(){
               </div>);
             };
             const axisProps={tick:{fill:dim,fontSize:9}};
-            const xFmt=v=>`'${String(v).slice(2)}`;
+            // v5.13.0: follows the shared chart zoom (displayLiveRows /
+            // displayPinRows) -- values stay running totals from the model
+            // start, the zoom only windows them. Stat strip below (`last`)
+            // stays full-horizon, as its "(20yr)" labels say.
+            const xFmt=periodTickFmt;
             return(
             <div style={{background:bg1,border:`1px solid ${bdr}`,borderRadius:10,padding:"16px 20px",marginBottom:16}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:cumCollapsed?0:12}}>
                 <div>
                   <span style={{fontSize:14,fontWeight:"bold",color:bright}}>Cumulative Income vs Cost</span>
-                  <span style={{fontSize:10,color:muted,marginLeft:10}}>20-year running totals</span>
+                  <span style={{fontSize:10,color:muted,marginLeft:10}}>running totals from {BASE.startYear} -- follows the chart zoom above</span>
                 </div>
                 <div style={{display:"flex",gap:6,alignItems:"center"}}>
                   {["income","cost","gap"].map(v=>(
@@ -3290,13 +3322,13 @@ export default function App(){
                     <YAxis {...axisProps} tickFormatter={fmtK}/>
                     <Tooltip content={<CumTT/>}/>
                     <Legend wrapperStyle={{fontSize:9,color:muted}}/>
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumPension" name="Pension" stackId="i" stroke={incColors.pension} fill={incColors.pension} fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumWork"    name="Work"    stackId="i" stroke={incColors.work}    fill={incColors.work}    fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumRental"  name="Rental"  stackId="i" stroke={incColors.rental}  fill={incColors.rental}  fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumSS"      name="SS"      stackId="i" stroke={incColors.ss}      fill={incColors.ss}      fillOpacity={0.7}/>}
-                    {showLive&&last&&last.cumDraw>0&&<Area data={liveRows} type="monotone" dataKey="cumDraw" name="Draws" stackId="i" stroke={incColors.draw} fill={incColors.draw} fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumPension" name="Pension" stackId="i" stroke={incColors.pension} fill={incColors.pension} fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumWork"    name="Work"    stackId="i" stroke={incColors.work}    fill={incColors.work}    fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumRental"  name="Rental (net)" stackId="i" stroke={incColors.rental}  fill={incColors.rental}  fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumSS"      name="SS"      stackId="i" stroke={incColors.ss}      fill={incColors.ss}      fillOpacity={0.7}/>}
+                    {showLive&&last&&last.cumDraw>0&&<Area data={displayLiveRows} type="monotone" dataKey="cumDraw" name="Draws" stackId="i" stroke={incColors.draw} fill={incColors.draw} fillOpacity={0.7}/>}
                     {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
-                      <Line key={pin.id} data={pin.rows} type="monotone" dataKey="cumInc"
+                      <Line key={pin.id} data={displayPinRows(pin)} type="monotone" dataKey="cumInc"
                         name={`${pin.name} total`} stroke={pin.color} strokeWidth={2} dot={false} strokeDasharray="5 3"/>
                     ))}
                   </ComposedChart>
@@ -3310,15 +3342,15 @@ export default function App(){
                     <YAxis {...axisProps} tickFormatter={fmtK}/>
                     <Tooltip content={<CumTT/>}/>
                     <Legend wrapperStyle={{fontSize:9,color:muted}}/>
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumTax"    name="Taxes"       stackId="c" stroke="#e879f9"       fill="#e879f9"       fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumMtg"    name="Mortgages"   stackId="c" stroke={costColors.mtg}   fill={costColors.mtg}   fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumHealth"  name="Health Ins"  stackId="c" stroke={costColors.health} fill={costColors.health} fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumCore"    name="Core Living" stackId="c" stroke={costColors.core}   fill={costColors.core}   fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumProp"    name="Prop Tax/Ins"stackId="c" stroke={costColors.prop}   fill={costColors.prop}   fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumMaint"   name="Maintenance" stackId="c" stroke={costColors.maint}  fill={costColors.maint}  fillOpacity={0.7}/>}
-                    {showLive&&<Area data={liveRows} type="monotone" dataKey="cumDebt"    name="HI Debt Pmts"stackId="c" stroke={costColors.debt}   fill={costColors.debt}   fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumTax"    name="Taxes"       stackId="c" stroke="#e879f9"       fill="#e879f9"       fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumMtg"    name="Mortgages"   stackId="c" stroke={costColors.mtg}   fill={costColors.mtg}   fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumHealth"  name="Health Ins"  stackId="c" stroke={costColors.health} fill={costColors.health} fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumCore"    name="Core Living" stackId="c" stroke={costColors.core}   fill={costColors.core}   fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumProp"    name="Prop Tax/Ins"stackId="c" stroke={costColors.prop}   fill={costColors.prop}   fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumMaint"   name="Maintenance" stackId="c" stroke={costColors.maint}  fill={costColors.maint}  fillOpacity={0.7}/>}
+                    {showLive&&<Area data={displayLiveRows} type="monotone" dataKey="cumDebt"    name="HI Debt Pmts"stackId="c" stroke={costColors.debt}   fill={costColors.debt}   fillOpacity={0.7}/>}
                     {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
-                      <Line key={pin.id} data={pin.rows} type="monotone" dataKey="cumCost"
+                      <Line key={pin.id} data={displayPinRows(pin)} type="monotone" dataKey="cumCost"
                         name={`${pin.name} total`} stroke={pin.color} strokeWidth={2} dot={false} strokeDasharray="5 3"/>
                     ))}
                   </ComposedChart>
@@ -3333,11 +3365,11 @@ export default function App(){
                     <Tooltip content={<CumTT/>}/>
                     <Legend wrapperStyle={{fontSize:9,color:muted}}/>
                     <ReferenceLine y={0} stroke={dim} strokeDasharray="3 3"/>
-                    {showLive&&<Line data={liveRows} type="monotone" dataKey="cumInc"  name="Live Income" stroke={green} strokeWidth={2} dot={false}/>}
-                    {showLive&&<Line data={liveRows} type="monotone" dataKey="cumCost" name="Live Cost"   stroke={red}   strokeWidth={2} dot={false}/>}
-                    {showLive&&<Line data={liveRows} type="monotone" dataKey="cumGap"  name="Live Gap"    stroke={amber} strokeWidth={2} dot={false} strokeDasharray="4 2"/>}
+                    {showLive&&<Line data={displayLiveRows} type="monotone" dataKey="cumInc"  name="Live Income" stroke={green} strokeWidth={2} dot={false}/>}
+                    {showLive&&<Line data={displayLiveRows} type="monotone" dataKey="cumCost" name="Live Cost"   stroke={red}   strokeWidth={2} dot={false}/>}
+                    {showLive&&<Line data={displayLiveRows} type="monotone" dataKey="cumGap"  name="Live Gap"    stroke={amber} strokeWidth={2} dot={false} strokeDasharray="4 2"/>}
                     {pins.filter(pin=>visiblePins.has(pin.id)).map(pin=>(
-                      <Line key={pin.id} data={pin.rows} type="monotone" dataKey="cumGap"
+                      <Line key={pin.id} data={displayPinRows(pin)} type="monotone" dataKey="cumGap"
                         name={`${pin.name} gap`} stroke={pin.color} strokeWidth={1.5} dot={false} strokeDasharray="6 2"/>
                     ))}
                   </LineChart>
@@ -4758,7 +4790,7 @@ export default function App(){
               {
                 term:"Net Worth: Book vs Liquidation",
                 short:"Two views, toggled on the Net Worth chart (book / liq)",
-                detail:"Book NW = value of properties still held (appreciated at the RE appreciation rate) + sweep savings, minus mortgage balances and HI debt. It does NOT deduct the cost of selling. Liquidation NW = what you'd actually net selling every property that period: value minus 5% selling costs, minus the mortgage, minus capital-gains tax (28.2% federal + NIIT + Colorado, after the $500K married exclusion on 6th St), plus sweep savings, minus HI debt. On $3-4M of real estate the gap is several hundred thousand dollars. Book is the right number for tracking FI progress, since you aren't planning to sell everything at once; liq is the 'cash-out today' number.",
+                detail:"Book NW = value of properties still held (appreciated at the RE appreciation rate) + sweep savings, minus mortgage balances, HI debt, and LI loan balances. It does NOT deduct the cost of selling. Liquidation NW = what you'd actually net selling every property that period: value minus 5% selling costs, minus the mortgage, minus capital-gains tax (28.2% federal + NIIT + Colorado, after the $500K married exclusion on 6th St), plus sweep savings, minus HI debt and LI loans. On $3-4M of real estate the gap is several hundred thousand dollars. Book is the right number for tracking FI progress, since you aren't planning to sell everything at once; liq is the 'cash-out today' number.",
                 tag:"Output",tagColor:green,
               },
               {

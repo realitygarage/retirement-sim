@@ -1583,7 +1583,11 @@ export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
     // read for the live-vs-pin comparison lines, but the base annual `nw`
     // field is complete and self-contained -- see the cross-cutting note in
     // v5_phase0_findings.md's 0a).
-    const nw = Math.round((dplxVal+lafVal+primVal+(first.savingsAcc||0)+0/*cashAst -- A3: inert, treated as 0*/-dplxBal-lafBal-primBal-hiDebtRaw)/1000);
+    // v5.13.0: LI loan balances (loans[]) now count against NW -- they were
+    // omitted, so any added LI loan never reduced net worth. Read off the
+    // period's first row, same as famLoanBal (the Debt Balances chart's LI line).
+    const loansBalRaw = first.loansBal||0;
+    const nw = Math.round((dplxVal+lafVal+primVal+(first.savingsAcc||0)+0/*cashAst -- A3: inert, treated as 0*/-dplxBal-lafBal-primBal-hiDebtRaw-loansBalRaw)/1000);
 
     // One-time pool-year event, if any (at most one wfRow per year has it)
     const poolRow = yrRows.find(r=>(r.settleDraw||0)>0 || (r.mtgLumpPaydown||0)>0 || (r.oneTimePaydown||0)>0 || (r.oneTimeReserveFill||0)>0);
@@ -1637,6 +1641,7 @@ export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
       maint:    Math.round(avgMo('maintRes')),
       famLoan:  Math.round(avgMo('fc_famLoan')),
       famLoanBal: Math.round((first.loansBal||0)/1000),   // $K, matches the old annual engine's units
+      loansBalRaw: Math.round(loansBalRaw),   // v5.13.0: raw $, for liquidation NW (chartData)
       minDebt:  Math.round(avgMo('minPmt')),
       debtSweep:Math.round(avgMo('sweep')),
       sweepToSavings: Math.round(avgMo('sweepToSavings')),  // ongoing (non-pool-year) monthly sweep-to-savings flow, $/mo avg
@@ -1690,13 +1695,18 @@ export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
     cumPension +=row.pension*_cumMo/1000;
     cumWork    +=row.workInc*_cumMo/1000;
     cumSS      +=(row.yourSs+row.brendaSs)*_cumMo/1000;
-    cumRental  +=row.rental*_cumMo/1000;
-    // cumDraw includes BOTH scheduled lifestyle draws (drawInc, a $/mo rate)
-    // AND the one-time settlement draw (settleDraw, already a period total,
-    // not a rate -- added directly, not *_cumMo) -- matches the old annual
-    // engine's combined drawInc semantics (settleDraw used to be blended
-    // into the SAME drawInc field before being split out as its own field).
-    cumDraw    +=row.drawInc*_cumMo/1000 + (row.settleDraw||0)/1000;
+    // v5.13.0: NET of rental op costs (was gross row.rental) -- cumInc is
+    // built from totalInc, which nets op costs, so a gross band made the
+    // Cumulative chart's stacked areas overshoot its own total line.
+    // passive - pension - SS = rental net (see `passive` above).
+    cumRental  +=(row.passive-row.pension-row.yourSs-row.brendaSs)*_cumMo/1000;
+    // v5.13.0: lifestyle draws only. Used to also add settleDraw (the one-time
+    // draw paid out of sale proceeds, outside the waterfall), which cumInc
+    // never included -- so the Cumulative chart's stacked income areas summed
+    // to MORE than its own cumInc total line. Now excluded, matching
+    // totalInc/cumInc, the Annual Income chart and FCF; the draw still shows
+    // in the events table and the sale-routing readout.
+    cumDraw    +=row.drawInc*_cumMo/1000;
     cumTax     +=row.tax*_cumMo/1000;
     cumMtg     +=row.mtg*_cumMo/1000;
     cumHealth  +=row.health*_cumMo/1000;

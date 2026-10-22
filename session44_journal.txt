@@ -161,14 +161,54 @@ Tests: E5/L1 -> v5.12.4; AA2 also checks expense rows render; AA3 also
 checks the nine items sum to expTotal (2027: 239,012 vs 239,008 -- $4 of
 independent rounding). Group AA + E5/L1: 5/5 pass. Build clean.
 
+--- v5.13.0: OPEN-ITEM FIXES (fifth commit) + HOUSEKEEPING (sixth) ---
+
+Bob asked to fix all the open items. Proposed plan first; he took my
+recommendations on the two judgment calls.
+
+(1) NW now subtracts LI loan balances. aggregateMonthlyToPeriod's nw
+subtracts first.loansBal (pins inherit it); new loansBalRaw row field;
+liquidation NW (buildChartRows, live + per-pin) subtracts it too. NW
+breakdown gets an "LI loans" row; Glossary NW entry updated. Under defaults
+the family loan ($25K, Jun 2026-Jan 2027) lowers 2026 NW by $22K (2,079 ->
+2,057 $K); later years unchanged.
+
+(2) Cumulative chart bands vs. total -- DECISION: exclude settleDraw from
+cumDraw (not add it to cumInc, which would inflate Net gap with no matching
+cost). While in there, found a SECOND cause of the same mismatch: the
+"Rental" band used GROSS cumRental while cumInc is net of op costs. Fixed
+cumRental to net (passive - pension - SS), legend "Rental (net)". Flagged
+to Bob as an in-scope addition (same bug). Bands now sum to cumInc within
+$1K every year.
+
+(3) Cumulative chart follows the zoom: plots displayLiveRows + new
+displayPinRows (quarterly pin rows via a hoisted pinQuarterlyRows memo,
+which quarterlyChartData now reuses). periodTickFmt hoisted from <Chart> to
+App scope. Values stay running totals from start; "(20yr)" stat strip stays
+full-horizon. Subtitle now "running totals from <startYear> -- follows the
+chart zoom above".
+
+(4) Housekeeping commit, Bob approved: committed the four design .md files
+(Annual income chart feature.md, glossary-audit-and-rental-net.md,
+annual-income-chart-add-total-expenses.md, claude-code-handoff-2026-10-22.md)
+as design trail; untracked test-results/ (git rm --cached, files kept
+locally) and added it to .gitignore -- .last-run.json churned every run.
+
+Tests: E5/L1 -> v5.13.0; new Group AB: AB1 (NW == formula incl. LI loans,
+< without), AB2 (stacked bands sum to cumInc every year, <=4 $K), AB3
+(zoomed Cumulative chart shows only in-range quarterly ticks). FULL SUITE:
+152/152 passed (7.2m).
+
+NEW observation (not fixed): the Cumulative chart's COST view has the same
+kind of gap -- its stacked bands (tax, mtg, health, core, prop, maint, HI
+debt pmts) omit LI loan payments, IRMAA, and extra mortgage principal, all
+of which are in cumCost (totalOut). Pin "total" lines use cumCost.
+
 --- OPEN ITEMS CARRIED FORWARD ---
 
 Same list as session43, plus:
-- Cumulative Income panel's settleDraw inconsistency (cumDraw area includes
-  it, cumInc total doesn't) -- noticed this session, not fixed.
-- MODEL QUESTION (found during glossary audit): book NW subtracts mortgages
-  and HI debt but NOT LI loan balances (loansBal) -- any added LI loan isn't
-  counted against net worth. Liq NW has the same omission. Needs Bob's call.
-- The Cumulative Income panel still reads liveRows directly, so it ignores
-  the v5.10.0 chart-zoom range while the new Annual Income chart above it
-  honors it.
+- Cumulative chart COST view: stacked bands omit LI loan payments, IRMAA,
+  and extra mortgage principal, so they don't sum to cumCost (see v5.13.0
+  section). Found this session, not fixed.
+(Resolved this session: settleDraw/cumDraw inconsistency, NW omitting LI
+loans, Cumulative chart ignoring zoom -- all v5.13.0.)
