@@ -148,6 +148,19 @@ income - expenses, aggregated tier1 == monthly avg, tier1 <= totalOut).
 Ran Group AA + E5/L1: 5/5 pass. Build clean. Full suite not re-run (the
 engine change is a purely additive aggregated field).
 
+--- v5.12.4: ITEMIZED EXPENSES IN THE ANNUAL INCOME BREAKDOWN (fourth commit) ---
+
+Bob: the breakdown showed income by source but expenses only as one total.
+Added nine expense rows -- exactly tier1's components (fc_mtg, fc_health,
+fc_core, fc_famLoan, fc_hiMins, fc_propCost, fc_tax, maintRes, fc_irmaa),
+bucketed per period from wfData and annualized x12 in buildChartRows, same
+as income. Labels/colors match the Fixed Costs breakdown. Loan payments / HI
+mins / IRMAA hideZero. Total expenses row now bold. App.jsx only.
+
+Tests: E5/L1 -> v5.12.4; AA2 also checks expense rows render; AA3 also
+checks the nine items sum to expTotal (2027: 239,012 vs 239,008 -- $4 of
+independent rounding). Group AA + E5/L1: 5/5 pass. Build clean.
+
 --- OPEN ITEMS CARRIED FORWARD ---
 
 Same list as session43, plus:

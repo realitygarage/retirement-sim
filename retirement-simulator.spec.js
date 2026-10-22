@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.12.3"', async ({ page }) => {
+  test('E5 — Version header shows "v5.12.4"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.12.3').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.12.3');
+    await expect(page.locator('text=v5.12.4').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.12.4');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.12.3', async ({ page }) => {
+  test('L1 — Version header shows v5.12.4', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.12.3').first()).toBeVisible();
-    console.log('  L1 — Version v5.12.3 confirmed');
+    await expect(page.locator('text=v5.12.4').first()).toBeVisible();
+    console.log('  L1 — Version v5.12.4 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3497,7 +3497,9 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
     await expect(incChart).toBeVisible();
     await incChart.locator('button', { hasText: 'breakdown' }).click();
     await page.waitForTimeout(300);
-    for (const label of ['Pension', 'Work income', 'Your SS', 'Brenda SS', 'Rental (net)', 'Total income', 'Total expenses', 'Surplus / (shortfall)']) {
+    for (const label of ['Pension', 'Work income', 'Your SS', 'Brenda SS', 'Rental (net)', 'Total income',
+      'Mortgages', 'Health ins', 'Core living', 'Prop tax/insurance', 'Income tax (est)', 'Maintenance',   // v5.12.4 expense rows
+      'Total expenses', 'Surplus / (shortfall)']) {
       await expect(incChart.locator('td', { hasText: label }).first()).toBeVisible();
     }
     console.log('  AA2 — Annual Income breakdown rows visible');
@@ -3517,10 +3519,16 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
       const sumTier1 = yrRows.reduce((s, r) => s + (r.tier1 || 0), 0);
       const sumTotalOut = yrRows.reduce((s, r) => s + (r.totalOut || 0), 0);
       const lrRow = lr.find(r => r.cal === fullYr);
+      // v5.12.4: the nine itemized expense rows
+      const parts = ['fc_mtg','fc_health','fc_core','fc_famLoan','fc_hiMins','fc_propCost','fc_tax','maintRes','fc_irmaa']
+        .reduce((s, f) => s + (row['exp_' + f] || 0), 0);
       return { fullYr, expTotal: row.expTotal, sumTier1, sumTotalOut, incTotal: row.incTotal,
-        incSurplus: row.incSurplus, aggTier1: lrRow?.tier1, sumTier1Avg: Math.round(sumTier1 / 12) };
+        incSurplus: row.incSurplus, aggTier1: lrRow?.tier1, sumTier1Avg: Math.round(sumTier1 / 12), parts };
     });
     console.log('  AA3 — ' + JSON.stringify(result));
+    // Each item is rounded independently (and the engine rounds tier1 and its
+    // components separately) -- allow a little rounding drift
+    expect(Math.abs(result.parts - result.expTotal)).toBeLessThanOrEqual(15);
     expect(result.expTotal).toBeGreaterThan(0);
     expect(Math.abs(result.expTotal - result.sumTier1)).toBeLessThanOrEqual(1);
     expect(result.incSurplus).toBe(result.incTotal - result.expTotal);

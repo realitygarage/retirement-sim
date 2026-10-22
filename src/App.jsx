@@ -1,3 +1,11 @@
+// v5.12.4 -- Annual Income chart's breakdown table now itemizes expenses
+// too (was income-only + a single Total expenses row): Mortgages, Health
+// ins, Core living, Loan payments, HI debt minimums, Prop tax/insurance,
+// Income tax (est), Maintenance, IRMAA surcharge -- exactly tier1's nine
+// components, bucketed/annualized in buildChartRows the same way as
+// income ($/yr). Total expenses row now bold. Loans/HI mins/IRMAA hide
+// when zero across the visible range.
+//
 // v5.12.3 -- Annual Income chart gains an expense line (see
 // annual-income-chart-add-total-expenses.md): retitled "Annual Income vs
 // Expenses / yr", dashed red "Expenses" secondary line (expTotal) plus
@@ -743,6 +751,10 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
   // wfData bucketing as fc_* above (so year labels match every other chart).
   const inc_penByKey={}, inc_yssByKey={}, inc_bssByKey={}, inc_rentByKey={}, inc_workByKey={}, inc_drawByKey={}, inc_totByKey={};
   const expByKey={};   // v5.12.3: required costs (tier1), same bucketing
+  // v5.12.4: tier1's components, for the Annual Income chart's expense
+  // breakdown rows -- exactly the nine terms engine.js sums into tier1.
+  const EXP_FIELDS = ['fc_mtg','fc_health','fc_core','fc_famLoan','fc_hiMins','fc_propCost','fc_tax','maintRes','fc_irmaa'];
+  const expPartByKey = Object.fromEntries(EXP_FIELDS.map(f=>[f,{}]));
   (wfRows||[]).forEach(r=>{
     const k=periodKeyOf(r, periodMonths);
     discByKey[k]=(discByKey[k]||0)+(r.disc||0);
@@ -768,6 +780,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     inc_drawByKey[k]=(inc_drawByKey[k]||0)+(r.drawInc||0);
     inc_totByKey[k]=(inc_totByKey[k]||0)+(r.totalInc||0);
     expByKey[k]=(expByKey[k]||0)+(r.tier1||0);
+    EXP_FIELDS.forEach(f=>{ expPartByKey[f][k]=(expPartByKey[f][k]||0)+(r[f]||0); });
     cntByKey[k]=(cntByKey[k]||0)+1;
     // savingsAcc is a running total — take the last month value per period (end-of-period balance)
     savAccByKey[k]=r.savingsAcc||0;
@@ -819,6 +832,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
       inc_rental:annInc(inc_rentByKey), inc_work:annInc(inc_workByKey), inc_draw:annInc(inc_drawByKey),
       incTotal:annInc(inc_totByKey),
       expTotal:annInc(expByKey),
+      ...Object.fromEntries(EXP_FIELDS.map(f=>['exp_'+f, annInc(expPartByKey[f])])),
       incSurplus:annInc(inc_totByKey)-annInc(expByKey),
       // v5.0.0: r.nw already includes savingsAcc natively (aggregateMonthlyToAnnual,
       // engine.js) -- pre-v5 this was a two-engine hybrid add (annual nw + monthly
@@ -1846,10 +1860,20 @@ export default function App(){
         {key:"inc_rental",   label:"Rental (net)",   color:"#34d399"},
         {key:"inc_draw",     label:"Lifestyle Draw", color:"#f472b6", hideZero:true},
         {key:"incTotal",     label:"Total income",   color:"#34d399", bold:true},
-        {key:"expTotal",     label:"Total expenses", color:"#f87171", cost:true},
+        // v5.12.4: expense breakdown -- tier1's nine components ($/yr)
+        {key:"exp_fc_mtg",      label:"Mortgages",          color:"#f87171", cost:true},
+        {key:"exp_fc_health",   label:"Health ins",         color:"#c084fc", cost:true},
+        {key:"exp_fc_core",     label:"Core living",        color:"#60a5fa", cost:true},
+        {key:"exp_fc_famLoan",  label:"Loan payments",      color:"#f59e0b", cost:true, hideZero:true},
+        {key:"exp_fc_hiMins",   label:"HI debt minimums",   color:"#fb923c", cost:true, hideZero:true},
+        {key:"exp_fc_propCost", label:"Prop tax/insurance", color:"#e879f9", cost:true},
+        {key:"exp_fc_tax",      label:"Income tax (est)",   color:"#facc15", cost:true},
+        {key:"exp_maintRes",    label:"Maintenance",        color:"#ef4444", cost:true},
+        {key:"exp_fc_irmaa",    label:"IRMAA surcharge",    color:"#a3e635", cost:true, hideZero:true},
+        {key:"expTotal",     label:"Total expenses", color:"#f87171", cost:true, bold:true},
         {key:"incSurplus",   label:"Surplus / (shortfall)", color:"#fbbf24", bold:true},
       ],
-      note:"Income per year (not cumulative) by source -- rental is net of op costs, so sources sum to the total. Total expenses = required costs (mortgages, health, core living, LI loan payments, HI debt minimums, prop tax/ins, income tax, maintenance, IRMAA); it excludes the debt sweep and buffer top-ups, which are funded FROM the surplus -- so it's lower than the Cumulative chart's 'Total spent', which includes the sweep. Partial years are annualized. Excludes one-time sale-year flows.",
+      note:"Income per year (not cumulative) by source -- rental is net of op costs, so sources sum to the total. Total expenses = required costs, itemized above it; it excludes the debt sweep and buffer top-ups, which are funded FROM the surplus -- so it's lower than the Cumulative chart's 'Total spent', which includes the sweep. Partial years are annualized. Excludes one-time sale-year flows.",
     },
     nw: {
       label:"Net Worth -- breakdown ($K)",
@@ -2304,7 +2328,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.3</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.4</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
