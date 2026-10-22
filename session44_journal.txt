@@ -71,11 +71,51 @@ once per <Chart> usage in the grid (Chart is defined inside App's render) --
 a sixth chart = a sixth instance. Not a new kind of problem.
 Full npx playwright test run: 148/148 passed (6.8m).
 
+--- v5.12.2: GLOSSARY AUDIT (second commit) ---
+
+Source: glossary-audit-and-rental-net.md. First answered its question:
+"Rental (net)" on the Annual Income chart = gross rent minus per-segment
+rental op costs (unitSegmentNet: STR platform+cleaning+mgr %, MTR flat
+cleaning per block + mgr %, LTR vacancy + mgr %) -- the doc's option #1.
+NOT the estimateTax-internal rentalNet (gross minus mortgage interest),
+which is tax-only and on no chart.
+
+Proposed audit to Bob, he approved as-is. Added 10 Glossary cards: Rental
+Gross vs Net, HI vs LI Debt, Sweep Savings, Lifestyle Draw, One-Time
+Obligation & Sale Proceeds, Income Tax (est), Core Living, Social Security
+Claim Age, Chart Units ($/mo vs $/yr), Scenario Comparison Metrics.
+
+Corrected entries that contradicted the code:
+- IO vs P&I: said IO lasts "while HI debt exists" -- wrong; IO is
+  contractual per-loan ioYears from origination (10 for 6th/15th, 0 for
+  Lafayette), then recast on actual remaining balance.
+- Net Worth -> "Net Worth: Book vs Liquidation" (chart has had a book/liq
+  toggle; NW includes sweep savings).
+- DI Cap: dropped reference to the retired annual engine.
+- HI Debt Sweep / Avalanche / waterfall step 5: removed hardcoded rates
+  (Nolan's is 8.32% now, all editable); sweepable LI loans join.
+- Waterfall step 1: "family loan" -> "LI loan payments".
+
+Caught during writing: proposal said quarterly zoom kicks in at <=5 years;
+QUARTERLY_ZOOM_THRESHOLD_YEARS is actually 8 -- card says 8.
+
+Skipped as self-explanatory (reported to Bob): pension/SS amounts, health,
+mortgage, prop tax/ins, HOA, maintenance (has entry), CC/Sophia/Nolan
+balances, RE value/equity, invested cash, totals, cumulative stats, passive
+income (in Work Earned vs Required), floor schedule, IRMAA (has entry),
+Ericsson->Medicare switch (offered, not added).
+
+Tests: E5/L1 -> v5.12.2. Ran E4/E5/L1 only (text-only change): 3/3 pass.
+Build clean.
+
 --- OPEN ITEMS CARRIED FORWARD ---
 
 Same list as session43, plus:
 - Cumulative Income panel's settleDraw inconsistency (cumDraw area includes
   it, cumInc total doesn't) -- noticed this session, not fixed.
+- MODEL QUESTION (found during glossary audit): book NW subtracts mortgages
+  and HI debt but NOT LI loan balances (loansBal) -- any added LI loan isn't
+  counted against net worth. Liq NW has the same omission. Needs Bob's call.
 - The Cumulative Income panel still reads liveRows directly, so it ignores
   the v5.10.0 chart-zoom range while the new Annual Income chart above it
   honors it.

@@ -1,3 +1,16 @@
+// v5.12.2 -- Glossary audit (see glossary-audit-and-rental-net.md). Ten new
+// term cards for chart/table labels that had no definition: Rental Gross vs
+// Net (net = gross minus per-segment op costs, NOT mortgage), HI vs LI Debt,
+// Sweep Savings, Lifestyle Draw, One-Time Obligation & Sale Proceeds, Income
+// Tax (est), Core Living, Social Security Claim Age, Chart Units ($/mo vs
+// $/yr), Scenario Comparison Metrics. Corrected stale entries: IO vs P&I (IO
+// is contractual per-loan ioYears from origination, not tied to HI debt),
+// Net Worth (now Book vs Liquidation, matching the chart toggle; includes
+// sweep savings), DI Cap (dropped retired "annual engine" reference), HI
+// Debt Sweep / Avalanche / waterfall step 5 (no hardcoded loan rates; LI
+// sweepable loans join), waterfall step 1 ("family loan" -> "LI loan
+// payments"). Text-only.
+//
 // v5.12.1 -- breakdown-table legibility (shared by every Simulator chart's
 // "breakdown" panel): plain value cells were `dim` (#7d96ad) at 9px on the
 // near-black panel -- hard to read. Values now `bright`, table font 9->11px,
@@ -2270,7 +2283,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.1</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.12.2</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -4608,11 +4621,11 @@ export default function App(){
             <div style={{fontSize:10,color:dim,fontWeight:"bold",letterSpacing:1,textTransform:"uppercase",marginBottom:12}}>The Monthly Waterfall -- Priority Order</div>
             <div style={{display:"flex",flexDirection:"column",gap:3,maxWidth:480}}>
               {[
-                {n:"1",label:"Fixed Obligations",detail:"Mortgage PITI, health insurance, core living, family loan, HI minimums",color:red},
+                {n:"1",label:"Fixed Obligations",detail:"Mortgage PITI, health insurance, core living, LI loan payments, HI minimums",color:red},
                 {n:"2",label:"Maintenance Reserves",detail:"Per-property, capped at 5 yrs -- excess redirects to sweep",color:"#fb923c"},
                 {n:"3",label:"Rainy Day Top-up",detail:"Until cap -- then redirects to sweep",color:"#fbbf24"},
                 {n:"4",label:"Operating Buffer Top-up",detail:"Until cap -- then redirects to sweep",color:amber},
-                {n:"5",label:"HI Debt Sweep (Avalanche)",detail:"CC 14% first, then Sophia ~8.8%, then Nolan ~8-9%",color:"#a78bfa"},
+                {n:"5",label:"HI Debt Sweep (Avalanche)",detail:"Highest rate first, as entered in HI Debt Balances (+ any sweepable LI loans)",color:"#a78bfa"},
                 {n:"6",label:"Free Cash Flow",detail:"What remains -- genuinely unallocated",color:green},
               ].map((row,i)=>(
                 <div key={i} style={{display:"flex",alignItems:"stretch",gap:0}}>
@@ -4663,7 +4676,7 @@ export default function App(){
               {
                 term:"HI Debt Sweep",
                 short:"Accelerated paydown of high-interest debt",
-                detail:"Everything above the Min FCF floor (after rainy day and buffer top-ups) is swept to HI debt in avalanche order: CC at 14% first, then Sophia loans at ~8.8%, then Nolan loans at ~8-9%. The sweep stops when all HI debt is cleared, at which point that monthly cash flow permanently promotes to Free Cash Flow or long-term savings.",
+                detail:"Everything above the Min FCF floor (after rainy day and buffer top-ups) is swept to debt in avalanche order -- highest rate first, using the rates entered in the HI Debt Balances panel. Any LI loan marked Sweepable joins the same avalanche by its rate. The sweep stops when all HI debt is cleared, at which point that monthly cash flow goes to Sweep Savings (after the grace period).",
                 tag:"Computed",tagColor:"#a78bfa",
               },
               {
@@ -4675,13 +4688,13 @@ export default function App(){
               {
                 term:"DI Cap (Effective)",
                 short:"Total monthly amount protected from the HI sweep",
-                detail:"Derived automatically: Min FCF + Rainy Day top-up + Operating Buffer top-up. This is the number the annual simulation engine uses to determine how aggressively debt is attacked each year. The Cash Flow tab is the source of truth -- there is no separate DI Cap slider anymore.",
+                detail:"Derived automatically: Min FCF + Rainy Day top-up + Operating Buffer top-up -- the total monthly amount held back before anything is swept to debt. The Cash Flow tab is the source of truth -- there is no separate DI Cap slider anymore.",
                 tag:"Derived",tagColor:blue,
               },
               {
                 term:"Avalanche Method",
                 short:"Debt paydown: highest interest rate first",
-                detail:"After minimums are paid on all debts, extra sweep money attacks the highest-rate balance first: CC at 14% before Sophia (~8.8%) before Nolan (~8-9%). This minimizes total interest paid. The snowball method (smallest balance first) feels faster psychologically but costs more in interest over time.",
+                detail:"After minimums are paid on all debts, extra sweep money attacks the highest-rate balance first (rates as entered in the HI Debt Balances panel -- typically the credit card, then whichever of Sophia's or Nolan's loans carries the higher rate). This minimizes total interest paid. The snowball method (smallest balance first) feels faster psychologically but costs more in interest over time.",
                 tag:"Method",tagColor:dim,
               },
               {
@@ -4692,14 +4705,74 @@ export default function App(){
               },
               {
                 term:"IO vs P&I Mortgage",
-                short:"Interest-only payments while HI debt exists",
-                detail:"While HI debt is outstanding, the duplex and primary mortgages are on interest-only (IO) payments -- lower monthly obligation, maximizing sweep capacity. Once all HI debt is cleared, the mortgages convert to full principal & interest (P&I) payments. This causes a visible bump in fixed costs but is offset by the sweep cash freed up.",
+                short:"Interest-only for a contractual period, then recast to P&I",
+                detail:"Each mortgage has its own interest-only (IO) period, counted from its origination date (10 years for 6th St and 15th St; 0 for Lafayette, which amortizes from the start). During IO the payment is interest only and the balance stays flat. When the IO period ends, the payment recasts to full principal & interest (P&I), amortized over the remaining term on the actual remaining balance -- a visible step up in Fixed Costs. The switch is set by the loan terms, not by HI debt being paid off.",
                 tag:"Model Logic",tagColor:dim,
               },
               {
-                term:"Net Worth",
-                short:"Gross asset value minus outstanding debt -- before selling costs",
-                detail:"Net Worth = (duplex value + Lafayette value + 6th St value + invested cash) minus (all mortgage balances + HI debt). Important caveat: this does NOT deduct the cost of selling properties. If you liquidated everything, you would net roughly 5% less per property in commissions and closing costs -- on $3-4M of real estate that is a $150-200K overstatement. Think of the chart as 'book net worth' rather than 'liquidation net worth.' It is still the right number to track for FI progress since you are not planning to sell everything at once.",
+                term:"Net Worth: Book vs Liquidation",
+                short:"Two views, toggled on the Net Worth chart (book / liq)",
+                detail:"Book NW = value of properties still held (appreciated at the RE appreciation rate) + sweep savings, minus mortgage balances and HI debt. It does NOT deduct the cost of selling. Liquidation NW = what you'd actually net selling every property that period: value minus 5% selling costs, minus the mortgage, minus capital-gains tax (28.2% federal + NIIT + Colorado, after the $500K married exclusion on 6th St), plus sweep savings, minus HI debt. On $3-4M of real estate the gap is several hundred thousand dollars. Book is the right number for tracking FI progress, since you aren't planning to sell everything at once; liq is the 'cash-out today' number.",
+                tag:"Output",tagColor:green,
+              },
+              {
+                term:"Rental: Gross vs Net",
+                short:"Net = gross rent minus operating costs -- not minus the mortgage",
+                detail:"Rental (gross) is what tenants/guests pay. Rental op costs are subtracted per segment type: STR = platform % + cleaning % + manager %; MTR = a flat cleaning fee per rental block + manager %; LTR = vacancy % + manager %. Rental (net) = gross minus those op costs. Mortgage payments are NOT netted here -- they're their own Mortgages line in Fixed Costs, so nothing is counted twice. The Cash Flow tab shows gross with op costs as a separate cost column; the Annual Income chart shows net so its sources add up to total income. (Separately, the income-tax estimate uses gross rent minus mortgage interest -- a tax concept, not shown on any chart.)",
+                tag:"Key Distinction",tagColor:blue,
+              },
+              {
+                term:"HI vs LI Debt",
+                short:"Two debt tiers -- which set a loan is in decides its tier, not its rate",
+                detail:"HI (high-interest) debt is the named trio: credit card, Sophia's loans, Nolan's loans -- always swept by the avalanche and always paid down from a property-sale lump sum. LI (low-interest) loans are anything added in the Loans panel: simple scheduled amortizing payments (Fixed Costs' 'Loan payments'). Each can opt in as Sweepable (joins the ongoing avalanche by rate) and/or Closing-eligible (paid off from sale proceeds alongside HI debt). Rate decides payoff ORDER only.",
+                tag:"Key Distinction",tagColor:blue,
+              },
+              {
+                term:"Sweep Savings",
+                short:"Where the monthly sweep goes once HI debt is gone",
+                detail:"After all HI debt is cleared and the grace-period slider has elapsed, the cash that was sweeping debt goes into a savings balance that grows at the investment-return rate. The Free Cash Flow chart marks both moments ('debt clear' and 'sweep → savings') -- they differ by exactly the grace period. Sweep savings counts toward Net Worth (both book and liq).",
+                tag:"Computed",tagColor:"#a78bfa",
+              },
+              {
+                term:"Lifestyle Draw",
+                short:"A planned one-time lump of spending money in a chosen year",
+                detail:"Each draw (up to 5) adds its full amount as income in the first month of its year -- a spike in that month's Total In, and in the Lifestyle Draw rows of the breakdowns. It's separate from the one-time draw out of sale proceeds (see One-Time Obligation & Sale Proceeds).",
+                tag:"Your Decision",tagColor:amber,
+              },
+              {
+                term:"One-Time Obligation & Sale Proceeds",
+                short:"Lump sums are routed debt-first -- unlike the monthly waterfall",
+                detail:"When a property sells or the One-Time Obligation comes due, the money is applied in that event's own quarter: the obligation/draw comes out first, then the remainder pays down HI debt (and closing-eligible LI loans) highest-rate-first, then tops up reserves and buffers, and anything left joins the normal sweep. This debt-first order applies ONLY to these one-time lump sums -- the ordinary monthly waterfall still fills buffers before sweeping debt. The one-time draw is reported separately so it doesn't spike the Free Cash Flow chart.",
+                tag:"Model Logic",tagColor:dim,
+              },
+              {
+                term:"Income Tax (est)",
+                short:"A federal + Colorado estimate of ordinary income tax",
+                detail:"Each month's income is annualized and run through the federal brackets (married filing jointly, standard deduction) plus Colorado's flat rate -- all figures editable on the Defaults tab. Taxable SS uses the IRS provisional-income test (0% / 50% / 85% of SS taxable). Rental counts as gross rent minus mortgage interest. Capital gains on property sales are taxed separately in the sale math, not here. An estimate, not a tax return.",
+                tag:"Model Logic",tagColor:dim,
+              },
+              {
+                term:"Core Living",
+                short:"Everyday household spending, inflated over time",
+                detail:"Car lease + other insurance + food + utilities + personal (each editable on the Defaults tab), compounded by the core CPI rate (or general inflation if unset) from the model start date. Excludes housing, health insurance, debt, and property costs -- those have their own lines.",
+                tag:"Derived",tagColor:blue,
+              },
+              {
+                term:"Social Security Claim Age",
+                short:"Your SS amount depends on when you claim; Brenda's is flat",
+                detail:"Both SS start dates are a calendar month + year, switched on month by month (like Medicare). Your benefit is interpolated continuously between the early-claim and Full Retirement Age (67) amounts, based on your exact claiming age from your birth date. Brenda's stays at her FRA amount regardless of start date -- no early-claim figure is modeled for her yet.",
+                tag:"Model Logic",tagColor:dim,
+              },
+              {
+                term:"Chart Units: $/mo vs $/yr",
+                short:"Most charts are monthly averages -- Annual Income is per year",
+                detail:"Work Required, Free Cash Flow, and Fixed Costs show the average $/month within each year. Annual Income shows $/year: a full calendar year is its true total, while a partial year (like the start year) shows its annualized rate. Debt and Net Worth are start-of-year balances. Zooming the chart range to 8 years or fewer switches to quarterly points (Q2'27), same units.",
+                tag:"Key Distinction",tagColor:blue,
+              },
+              {
+                term:"Scenario Comparison Metrics",
+                short:"The headline numbers on pin cards and the comparison table",
+                detail:"Launch work needed = Work Required in the first year. Work-free year = first year Work Required averages $0. HI debt clear = first year starting with zero HI debt. NW at yr 10 = book Net Worth 10 years out. Sweep savings (final) = sweep-savings balance at the end of the horizon. Green = meets a rough target (e.g. work-free within 8 years, debt clear within 5).",
                 tag:"Output",tagColor:green,
               },
               {
