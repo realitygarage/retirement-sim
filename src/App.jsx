@@ -1,3 +1,37 @@
+// v5.11.0 -- HI-debt loan refresh + Nolan deferment-gate + Work Income Curve
+// epoch fix (see claude-code-handoff-2026-10-22.md, both parts):
+// (A4) Defaults-tab "Sophia/Nolan HI Loans" mirror cards reworded -- the old
+// "not editable -- historical fact" caption read as "this data can't be
+// edited," with no pointer to the actual live/editable balance (the HI Debt
+// Balances panel, Simulator tab). Captions and titles now say so explicitly.
+// (A2) NOLAN_LOANS (engine.js) refreshed to Nolan's Sept 2026 Edfinancial
+// statement ($147,223 total, was $141,117 Feb 2026); nolanMin/nolanRate
+// refreshed to match (1856/mo, 8.32% blended). sophiaBal bumped to a current
+// round total ($55K) -- now a direct override in defaults.js rather than
+// derived from SOPHIA_LOANS, since only a round total (not a fresh per-loan
+// breakdown) is available this round; SOPHIA_LOANS stays the frozen Feb 2026
+// audit snapshot.
+// (A3) Nolan's deferred->active loan-payment gate was `mo>=5`, elapsed
+// months since the sim's launch date -- couldn't represent "deferment ends
+// Dec 2026" as a fact independent of the launch date, and would silently
+// drift if the launch date ever changed. Replaced with calendar-pegged
+// nolanDefermentEndYear/Month (default Dec 2026, confirmed as the first
+// real payment month), gated the same absolute-month way Medicare/SS/FRA
+// already are, editable in the HI Debt Balances panel. Only one gate to fix
+// (not two) -- the v5.0.0 single-engine collapse already retired the
+// separate wfData implementation this used to need duplicating into.
+// (Part B) Work Income Curve: WorkCurveEditor's composeYr/qOf/wholeYrOf
+// anchored each point's quarter fraction to Jan 1 of its calendar year,
+// while engine.js's workFromCurve(mo/12,...) call anchors its zero point to
+// BASE.startMonth (July by default) -- the two conventions only agreed for
+// the hard-locked point 0. Every other point fed the engine a position
+// ~0.5yr (2 quarters) later than its on-screen label, which is why a point
+// set to "2027 Q1 = $0" didn't actually zero out the Cash Flow tab's Work
+// column until July 2027. Fixed by converting (calendar year, quarter) ->
+// curve offset in absolute-month space anchored at BASE.startYear/startMonth,
+// matching how buildMonthlyScenario derives mo from calYear/calMonth. No
+// engine.js change, no SAVE_SCHEMA_VERSION bump -- existing saved workPts
+// values are unchanged, only their calendar-label display corrects itself.
 // v5.10.1 -- Net Worth chart's breakdown table now shows every year (was
 // sampling every other year like most breakdown tables default to) --
 // annualBreakdown opted in on the NW <Chart> the same way v5.2.0 did it for
@@ -876,6 +910,9 @@ export default function App(){
     workPts, lifestyleSplit,
     reApp, rentGr, cpi, healthCpi, propCpi, taxEnabled, investRet, lifestyleDraws,
     ccBal, ccRate, ccMin, sophiaBal, sophiaRate, sophiaMin, nolanBal, nolanRate, nolanMin,
+    // v5.11.0: new field -- default here too (matches defaults.js) so a pin/
+    // save made before this change doesn't destructure to undefined.
+    nolanDefermentEndYear=2026, nolanDefermentEndMonth=12,
     // v5.0.5: per-debt closing-eligibility, same flag shape LI loans[] carry.
     ccClosingEligible=true, sophiaClosingEligible=true, nolanClosingEligible=true,
     loans=DEFAULT_LOANS_SC,
@@ -952,6 +989,8 @@ export default function App(){
   const setNolanBal       = v=>setSc(s=>({...s,nolanBal:v}));
   const setNolanRate      = v=>setSc(s=>({...s,nolanRate:v}));
   const setNolanMin       = v=>setSc(s=>({...s,nolanMin:v}));
+  const setNolanDefermentEndYear  = v=>setSc(s=>({...s,nolanDefermentEndYear:v}));
+  const setNolanDefermentEndMonth = v=>setSc(s=>({...s,nolanDefermentEndMonth:v}));
   const setCcClosingEligible     = v=>setSc(s=>({...s,ccClosingEligible:v}));
   const setSophiaClosingEligible = v=>setSc(s=>({...s,sophiaClosingEligible:v}));
   const setNolanClosingEligible  = v=>setSc(s=>({...s,nolanClosingEligible:v}));
@@ -1949,12 +1988,29 @@ export default function App(){
     // multiple of YR_STEP (0.25 is exactly representable in binary floating
     // point, so repeated +/-YR_STEP edits don't drift).
     const YR_STEP = 0.25;
-    const wholeYrOf = yr => Math.floor(yr + 1e-9);
-    const qOf       = yr => Math.round((yr - wholeYrOf(yr)) * 4) + 1;   // 1..4
-    const composeYr = (wholeYr, q) => wholeYr + (q-1)/4;
+    // v5.11.0: yr is elapsed time from BASE.startYear/startMonth -- the SAME
+    // zero point engine.js's workFromCurve(mo/12,...) caller uses -- not
+    // elapsed time from Jan 1 of a calendar year. The old wholeYrOf/qOf/
+    // composeYr anchored each point's quarter fraction to Jan 1 ((q-1)/4),
+    // which only agreed with the engine's BASE.startMonth-anchored zero when
+    // startMonth===1. With the real default startMonth=7 (July), every point
+    // except the hard-locked point 0 fed the engine a position ~0.5yr later
+    // than its on-screen label -- e.g. a point dragged to "2027 Q1" actually
+    // sampled the curve at July 2027, not January (see
+    // claude-code-handoff-2026-10-22.md Part B). Fixed by converting in
+    // absolute-month space, anchored at BASE.startYear/startMonth -- exactly
+    // how buildMonthlyScenario derives mo from calYear/calMonth.
+    const START_ABS  = BASE.startYear*12 + BASE.startMonth;
+    const absMonthOf = yr => START_ABS + Math.round(yr*12);
+    const calYearOf  = yr => Math.floor((absMonthOf(yr)-1)/12);
+    const calMonthOf = yr => absMonthOf(yr) - calYearOf(yr)*12;      // 1..12
+    const wholeYrOf  = yr => calYearOf(yr) - START;
+    const qOf        = yr => Math.ceil(calMonthOf(yr)/3);            // 1..4
+    const composeYr  = (calYrOffset, q) =>
+      ((START+calYrOffset)*12 + quarterStartMonth(q) - START_ABS) / 12;
     // Point 0 is locked at yr:0 (exactly "now", BASE.startYear/startMonth) --
-    // its TRUE calendar quarter depends on startMonth, not on qOf(0) (which
-    // would always read Q1). Display-only; point 0's quarter isn't editable.
+    // qOf(0) now correctly derives its true calendar quarter from startMonth
+    // too, matching START_Q below. Display-only; point 0's quarter isn't editable.
     const START_Q = Math.ceil((BASE.startMonth||1)/3);
 
     const toX = yr  => PAD.l + (yr-YR_MIN)/(YR_MAX-YR_MIN)*iW;
@@ -2160,7 +2216,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.10.1</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.11.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2563,8 +2619,8 @@ export default function App(){
                 {[
                   {label:"Credit Card", bal:ccBal, setBal:setCcBal, rate:ccRate, setRate:setCcRate, min:ccMin, setMin:setCcMin, balMax:120000, rateMax:29, closingEligible:ccClosingEligible, setClosingEligible:setCcClosingEligible, testId:"cc"},
                   {label:"Sophia Loans", bal:sophiaBal, setBal:setSophiaBal, rate:sophiaRate, setRate:setSophiaRate, min:sophiaMin, setMin:setSophiaMin, balMax:150000, rateMax:15, closingEligible:sophiaClosingEligible, setClosingEligible:setSophiaClosingEligible, testId:"sophia"},
-                  {label:"Nolan Loans", bal:nolanBal, setBal:setNolanBal, rate:nolanRate, setRate:setNolanRate, min:nolanMin, setMin:setNolanMin, balMax:300000, rateMax:15, closingEligible:nolanClosingEligible, setClosingEligible:setNolanClosingEligible, testId:"nolan"},
-                ].map(({label,bal,setBal,rate,setRate,min,setMin,balMax,rateMax,closingEligible,setClosingEligible,testId})=>(
+                  {label:"Nolan Loans", bal:nolanBal, setBal:setNolanBal, rate:nolanRate, setRate:setNolanRate, min:nolanMin, setMin:setNolanMin, balMax:300000, rateMax:15, closingEligible:nolanClosingEligible, setClosingEligible:setNolanClosingEligible, testId:"nolan", defermentEndYear:nolanDefermentEndYear, defermentEndMonth:nolanDefermentEndMonth},
+                ].map(({label,bal,setBal,rate,setRate,min,setMin,balMax,rateMax,closingEligible,setClosingEligible,testId,defermentEndYear})=>(
                   <div key={label} style={{marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${bdr}44`}}>
                     <div style={{fontSize:9,color:amber,fontWeight:"bold",marginBottom:5}}>{label}</div>
                     <div style={{marginBottom:4}}>
@@ -2602,6 +2658,22 @@ export default function App(){
                         {v:false,l:"Sweep over time"},{v:true,l:"Closing-eligible",c:amber}
                       ])}
                     </div>
+                    {/* v5.11.0: Nolan-only -- calendar-based deferment-end gate
+                        (was a hardcoded mo>=5 elapsed-months check in engine.js).
+                        First calendar month a payment is actually due. */}
+                    {defermentEndYear!=null && (
+                      <div style={{marginTop:8}} data-testid="nolan-deferment-end">
+                        <div style={{fontSize:8,color:dim,marginBottom:3}}>Deferment ends -- first payment due</div>
+                        <div style={{display:"flex",gap:8}}>
+                          <div style={{flex:1}}>
+                            {slider("Year",nolanDefermentEndYear,setNolanDefermentEndYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`)}
+                          </div>
+                          <div style={{flex:1}}>
+                            {slider("Month",nolanDefermentEndMonth,setNolanDefermentEndMonth,1,12,1,v=>MONTH_ABBR[v-1])}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
                 <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:dim,marginTop:2}}>
@@ -4162,14 +4234,16 @@ export default function App(){
           mirrorGroups.push({ group: `Disposition Facts — ${prop.label}`, editHint: "property card (Simulator tab)", items });
         }
         mirrorGroups.push({
-          group: "Sophia HI Loans (Feb 2026)", editHint: "not editable -- historical fact, see engine.js SOPHIA_LOANS",
+          group: "Sophia HI Loans -- Original Breakdown (Feb 2026, historical)",
+          editHint: 'this per-loan breakdown is a frozen Feb 2026 snapshot for audit only -- to change the working balance, rate, or minimum payment, edit "Sophia Loans" in the HI Debt Balances panel on the Simulator tab',
           items: [
             ...SOPHIA_LOANS.map((l,i)=>[`Loan ${i+1}`, fmtUsd2(l.bal)+" @ "+(l.rate*100).toFixed(2)+"%"]),
-            ["Sum (drives sophiaBal default)", fmtUsd2(SOPHIA_LOANS.reduce((s,l)=>s+l.bal,0))],
+            ["Sum (Feb 2026, historical only -- no longer drives the live default, see sophiaBal note in defaults.js)", fmtUsd2(SOPHIA_LOANS.reduce((s,l)=>s+l.bal,0))],
           ],
         });
         mirrorGroups.push({
-          group: "Nolan HI Loans (Feb 2026)", editHint: "not editable -- historical fact, see engine.js NOLAN_LOANS",
+          group: "Nolan HI Loans -- Original Breakdown (Sept 2026, historical)",
+          editHint: 'this per-loan breakdown is a frozen Sept 2026 snapshot for audit only -- to change the working balance, rate, or minimum payment, edit "Nolan Loans" in the HI Debt Balances panel on the Simulator tab',
           items: [
             ...NOLAN_LOANS.map((l,i)=>[`Loan ${i+1}`, fmtUsd2(l.bal)+" @ "+(l.rate*100).toFixed(2)+"%"]),
             ["Sum (drives nolanBal default)", fmtUsd2(NOLAN_LOANS.reduce((s,l)=>s+l.bal,0))],

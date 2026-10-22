@@ -4,7 +4,7 @@
 //           dispositions/sixthIncomeSegments/topUnit/lafRental model.
 //           NO backward compatibility -- fresh schema, no migration.
 // =============================================================================
-import { BASE, DISPO_DEFAULTS, SOPHIA_BAL, NOLAN_BAL } from "./engine.js";
+import { BASE, DISPO_DEFAULTS, NOLAN_BAL } from "./engine.js";
 
 // -----------------------------------------------------------------------------
 // PROPERTIES_DEFAULTS (v4.0.0-A) -- one entry per property; units array length
@@ -163,11 +163,21 @@ export const DEFAULTS = {
   taxEnabled:    true,
   investReturn:  0.055,
   maintRate:     0.01,
-  // v5.5.0: sophiaBal/nolanBal derived from engine.js's SOPHIA_LOANS/
-  // NOLAN_LOANS (single source of truth) -- see the comment there.
+  // v5.5.0: nolanBal still derives from engine.js's NOLAN_LOANS (single
+  // source of truth). v5.11.0: sophiaBal is now a direct override instead --
+  // Bob has only a current ROUND total ($55K, Oct 2026) from Edfinancial, not
+  // a fresh per-loan breakdown to re-derive from, so SOPHIA_LOANS stays the
+  // frozen Feb 2026 historical snapshot (Defaults-tab audit card only) while
+  // this tracks the real balance by hand until a full statement is pulled.
   ccBal:         60_000,     ccRate:    0.14,  ccMin:   1200,
-  sophiaBal:     SOPHIA_BAL, sophiaRate:0.0814,sophiaMin: 737,
-  nolanBal:      NOLAN_BAL,  nolanRate: 0.084, nolanMin: 1787,
+  sophiaBal:     55_000,     sophiaRate:0.0814,sophiaMin: 737,
+  nolanBal:      NOLAN_BAL,  nolanRate: 0.0832,nolanMin: 1856,
+  // v5.11.0: calendar-pegged Nolan deferment-end gate (was `mo>=5`, elapsed
+  // months since sim start -- see buildMonthlyScenario, engine.js). First
+  // payment actually due Dec 2026 per Edfinancial. Editable in the HI Debt
+  // Balances panel.
+  nolanDefermentEndYear:  2026,
+  nolanDefermentEndMonth: 12,
   // v5.0.5: per-debt closing-eligibility (was a global payOffHI toggle,
   // retired in v5.0.3) -- same flag LI loans[] already carry, default true
   // (matches the old global toggle's typical setting, so no configuration
@@ -270,11 +280,13 @@ export const SC_DEFAULTS = {
   taxEnabled:    true,
   investRet:     5.5,
   lifestyleDraws:[],
-  // v5.5.0: sophiaBal/nolanBal derived from engine.js's SOPHIA_LOANS/
-  // NOLAN_LOANS (single source of truth) -- see the comment there.
+  // v5.5.0/v5.11.0: see the identical note in DEFAULTS above -- nolanBal
+  // still derives from NOLAN_LOANS, sophiaBal is now a direct override.
   ccBal:         60000,      ccRate:14.0,  ccMin:1200,
-  sophiaBal:     SOPHIA_BAL, sophiaRate:8.14, sophiaMin:737,
-  nolanBal:      NOLAN_BAL,  nolanRate:8.40,  nolanMin:1787,
+  sophiaBal:     55000,      sophiaRate:8.14, sophiaMin:737,
+  nolanBal:      NOLAN_BAL,  nolanRate:8.32,  nolanMin:1856,
+  nolanDefermentEndYear:  2026,
+  nolanDefermentEndMonth: 12,
   // v5.0.5: per-debt closing-eligibility -- see the identical note in DEFAULTS above.
   ccClosingEligible: true, sophiaClosingEligible: true, nolanClosingEligible: true,
   loans:         DEFAULT_LOANS_SC,   // rate as %

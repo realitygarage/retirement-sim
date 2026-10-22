@@ -1,0 +1,137 @@
+=== SESSION 43 JOURNAL -- HI-debt refresh + Nolan deferment-gate fix + Work Income Curve epoch fix (v5.11.0), ONE COMMIT ===
+
+Date: 2026-10-22
+
+Session goal: work through claude-code-handoff-2026-10-22.md, a consolidated
+handoff doc carried over from a prior claude.ai project session (originally
+captured 2026-09-28) plus a newly-spotted Cash Flow tab bug. Two parts:
+
+  Part A -- Nolan's HI loan balances are stale (Feb 2026 statement data vs. a
+  fresh Sept 2026 Edfinancial screenshot), the Nolan deferred->active gate is
+  elapsed-months-based instead of calendar-based, and the Defaults-tab
+  "Sophia/Nolan HI Loans" mirror-card caption reads as "can't be edited" when
+  only the per-loan breakdown is frozen.
+
+  Part B -- Bob set a Work Income Curve point to $0 at 2027 Q1; the
+  Simulator tab's own curve looked right, but the Cash Flow tab's monthly
+  Work column didn't actually reach $0 until Jul 2027 -- a ~2-quarter lag.
+
+--- PART A: ROOT CAUSES & FIXES ---
+
+A1 (no-op, confirmed only): loan balance/rate/min were already live/editable
+via the "HI Debt Balances" panel (Simulator tab) -- SOPHIA_LOANS/NOLAN_LOANS
+in engine.js only seed the default, they're not read by the live sim. The
+confusing caption (A4) is what made this look hardcoded.
+
+A2 (data refresh): NOLAN_LOANS (engine.js) updated to the Sept 2026
+Edfinancial statement -- 4 loans summing to $147,223 (was $141,117 Feb 2026).
+nolanMin 1787->1856 (Edfinancial's own computed repayment figure), nolanRate
+0.084->0.0832 (balance-weighted avg of the refreshed per-loan rates).
+sophiaBal bumped to $55,000 -- Bob only had a round current total, not a
+fresh per-loan breakdown, so this is now a direct override in defaults.js
+rather than derived from SOPHIA_LOANS (which stays the frozen Feb 2026 audit
+snapshot). Removed the now-unused SOPHIA_BAL import from defaults.js.
+
+A3 (behavior fix): Nolan's deferred->active gate was `if(mo>=5) nolanOn=true`
+-- elapsed months since the sim's launch date, so "deferment ends Dec 2026"
+wasn't representable as a fact independent of when the model happens to
+start. Replaced with calendar-pegged nolanDefermentEndYear/Month (default
+2026/12 -- Bob confirmed Dec 2026 IS the first repayment month, not the last
+deferred one), gated the same absolute-month way Medicare/SS/FRA already
+are. Added Year/Month sliders under the Nolan Loans card in the HI Debt
+Balances panel. Notably only ONE gate needed fixing, not two as the original
+handoff assumed -- it was written assuming the pre-v5.0.0 two-engine
+architecture (buildScenario + wfData), which the v5.0.0 single-engine
+collapse already retired. Flagged this discrepancy to Bob before touching
+anything.
+
+A4 (caption fix): reworded the Sophia/Nolan HI Loans mirror-card captions and
+titles to point at the HI Debt Balances panel as the actual live edit
+location, instead of the old "not editable -- historical fact" wording.
+
+--- PART B: ROOT CAUSE (corrected the handoff's own diagnosis) ---
+
+The handoff's diagnosis assumed a two-engine drift (annual buildScenario vs.
+monthly wfData) -- stale, per the same v5.0.0 single-engine collapse noted
+above. Both the Simulator tab and Cash Flow tab read the same
+buildMonthlyScenario output now, so there was never a cross-engine bug here.
+
+Actual root cause, traced by hand through the Hermite spline math:
+engine.js samples the curve as workFromCurve(mo/12, p.workPts), where mo=0 is
+BASE.startMonth (July) -- the curve's zero point is anchored to July 1. But
+WorkCurveEditor's composeYr (App.jsx) converted a user-picked (calendar
+year, quarter) into a point's yr field as `wholeYr + (q-1)/4` -- anchored to
+January 1 of that calendar year. The two zero-points only agree when
+BASE.startMonth===1; with the real default of July, every point except the
+hard-locked point 0 landed ~0.5yr (2 quarters) later than its on-screen
+label. A point labeled "2027 Q1" was actually feeding the engine the
+fractional position of July 2027. The Work Income Curve chart on the
+Simulator tab "looked right" because it's drawn by replotting workFromCurve
+using that same mislabeled yr -- it was self-consistently wrong, not an
+independent check.
+
+Fix: rewrote wholeYrOf/qOf/composeYr to convert in absolute-month space,
+anchored at BASE.startYear/startMonth (the same way buildMonthlyScenario
+derives mo from calYear/calMonth) instead of Jan 1. Confined entirely to
+WorkCurveEditor -- no engine.js change, no SAVE_SCHEMA_VERSION bump (existing
+saved workPts numeric values are untouched; only their calendar-label
+display corrects itself -- verified a default point like {yr:2,...} now
+correctly displays "2028 Q3" instead of the old mislabeled "2028 Q1").
+
+--- VERSION BUMP ---
+
+v5.10.1 -> v5.11.0, one combined changelog entry covering all four A/B
+sub-fixes (App.jsx header comment + on-screen badge), plus the two
+version-string Playwright assertions (E5, L1).
+
+--- NEW/UPDATED TESTS ---
+
+Added Group Z (2 new tests):
+  Z1 -- Nolan gate flips exactly at nolanDefermentEndYear/Month regardless of
+        elapsed months (pushed the override to 2028/01, confirmed mo=5 and
+        Dec 2027 both still show $0 HI mins, Jan 2028 shows the full $1,856).
+  Z2 -- a Work Income Curve point edited via the real UI to "2027 Q1 = $0"
+        reaches exactly $0 in the Jan 2027 monthly row (not Jul 2027),
+        matching Bob's real repro.
+
+Updated Group W's W2 (pre-existing test, not new): it clicked point 1's Q3
+button expecting a change, but point 1's default yr (2, a whole-year offset)
+now correctly DISPLAYS as its true quarter (Q3, matching BASE.startMonth=7)
+instead of the old always-wrong-Q1 reading -- so clicking the
+already-active Q3 was now correctly a no-op. Updated it to click Q1 instead
+(which does move the point). This was the fix's intended side effect
+surfacing as a test failure, not a regression.
+
+--- VERIFICATION ---
+
+npm run lint: 34 pre-existing problems (25 errors, 9 warnings), unchanged
+before/after (confirmed via git stash) -- nothing new introduced.
+
+Full npx playwright test run (146 tests, ~7.8min): 145 passed, 1 failed on
+first pass (W2, see above) -- fixed, re-ran Group W + Group Z (5 tests): all
+passed. Full suite is green.
+
+--- FINAL STATE ---
+
+One commit: v5.11.0 -- Nolan HI-loan refresh + calendar deferment gate +
+Work Income Curve epoch fix
+
+Pushed to origin/main per explicit user request.
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+Same carried-forward list as session42, MINUS "Nolan-loan grace-period gate
+still elapsed-months-based" (resolved this session, A3 above): X2 Group X
+sticky-horizontal-scrollbar test (passed cleanly in this session's full run,
+for whatever that's worth -- still worth a dedicated flakiness look before
+trusting it); segmentClipInfo year-only advisory note; unitSegmentOverlaps'
+hardcoded 2026-2047 scan; properties[].appreciationPct per-property override
+still schema-only/no UI; no Playwright coverage yet for v5.4.0-v5.6.0
+Defaults-tab UI; dead diCap_/maintRate_ plumbing; capped reserve-funding
+display; no saved never-sell pin; the "Free Cash Flow -- breakdown" panel's
+gross-rental-without-op-cost gap.
+
+New follow-up noted this session: Sophia's HI loan balance ($55,000) is now
+a round-number manual entry, not derived from a fresh per-loan breakdown the
+way Nolan's is -- worth replacing with a real per-loan refresh (mirroring
+A2's NOLAN_LOANS treatment) once Bob has her current statement in hand.

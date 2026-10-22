@@ -3,7 +3,8 @@
 // =============================================================================
 
 // =============================================================================
-// LOAN DATA (actual balances Feb 2026)
+// LOAN DATA (Sophia: actual balances Feb 2026; Nolan: refreshed from Edfinancial
+// Sept 2026 statement, was Feb 2026 -- see claude-code-handoff-2026-10-22.md A2)
 // =============================================================================
 export const SOPHIA_LOANS = [
   { bal: 29260.99, rate: 0.0883 },
@@ -11,10 +12,10 @@ export const SOPHIA_LOANS = [
   { bal: 14605.68, rate: 0.0780 },
 ];
 export const NOLAN_LOANS = [
-  { bal: 40187.28, rate: 0.0894 },
-  { bal: 20764.53, rate: 0.0908 },
-  { bal: 42144.30, rate: 0.0805 },
-  { bal: 38020.96, rate: 0.0754 },
+  { bal: 42224.46, rate: 0.0894 },
+  { bal: 21735.07, rate: 0.0908 },
+  { bal: 43811.23, rate: 0.0805 },
+  { bal: 39452.57, rate: 0.0754 },
 ];
 export const CC_BAL   = 60_000;
 export const CC_RATE  = 0.14;
@@ -1272,7 +1273,14 @@ export function buildMonthlyScenario(p){
       if(L.started && !L.startAnnounced){ L.startAnnounced=true; loanStartLabels.push(L.label); }
       if(L.started && L.bal<=0 && !L.payoffAnnounced){ L.payoffAnnounced=true; loanPayoffLabels.push(L.label); }
     }
-    if(mo>=5) nolanOn=true;   // v4.3.0 follow-up: still an elapsed-months gate, unchanged from pre-v5
+    // v5.11.0: calendar-based gate (was `mo>=5`, an elapsed-months-since-
+    // sim-start check whose real-world meaning silently drifted whenever
+    // BASE.startMonth/Year changed -- see A3 in claude-code-handoff-2026-10-22.md).
+    // nolanDefermentEndYear/Month is the first calendar month a payment is
+    // actually due (HI Debt Balances panel) -- deferment accrues interest
+    // only through the month before this.
+    const _nolanGateAbs = (p.nolanDefermentEndYear??BASE.startYear)*12 + (p.nolanDefermentEndMonth??1);
+    if(calYear*12+calMonth1to12 >= _nolanGateAbs) nolanOn=true;
     const minCC  = ccBal>0?ccMin_:0;
     const minSoph= sophiaBal>0?sophiaMin_:0;
     const minNol = nolanOn&&nolanBal>0?nolanMin_:0;

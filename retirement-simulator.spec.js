@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.10.1"', async ({ page }) => {
+  test('E5 — Version header shows "v5.11.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.10.1').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.10.1');
+    await expect(page.locator('text=v5.11.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.11.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.10.1', async ({ page }) => {
+  test('L1 — Version header shows v5.11.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.10.1').first()).toBeVisible();
-    console.log('  L1 — Version v5.10.1 confirmed');
+    await expect(page.locator('text=v5.11.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.11.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3108,8 +3108,12 @@ test.describe('Group W — v4.6.0 Work Income Curve Quarter Granularity', () => 
       return { y2029: rows.find(r => r.cal === 2029).workInc };
     });
     const section = page.locator('text=Work Income Curve').locator('xpath=ancestor::div[3]');
-    // Point 0's quarter buttons are disabled but present -- nth(1) is point 1's Q3 button.
-    await section.locator('button', { hasText: /^3$/ }).nth(1).click();
+    // Point 0's quarter buttons are disabled but present -- nth(1) is point 1's Q1 button.
+    // v5.11.0: point 1's default yr (2, i.e. whole-year offset) now correctly
+    // DISPLAYS as its true quarter (Q3, matching BASE.startMonth=7) instead
+    // of the old (buggy) always-Q1 reading -- so clicking Q3 here would now
+    // be a same-quarter no-op. Click Q1 instead, which actually moves it.
+    await section.locator('button', { hasText: /^1$/ }).nth(1).click();
     await page.waitForTimeout(400);
     const after = await page.evaluate(() => {
       const rows = window.__liveRows;
@@ -3380,6 +3384,73 @@ test.describe('Group Y — v5.10.0 Chart Zoom / Quarterly Resolution', () => {
     console.log('  Y6 — after reset: resolution=' + result.resolution + ' rows=' + result.displayChartData.length);
     expect(result.resolution).toBe('annual');
     expect(result.displayChartData.length).toBe(21);
+  });
+
+});
+
+// ─── Group Z: v5.11.0 Nolan Deferment Gate / Work-Curve Epoch Fix ───────────
+// See claude-code-handoff-2026-10-22.md (Part A3 and Part B). A3: the old
+// `mo>=5` elapsed-months-since-sim-start gate for Nolan's deferred->active
+// loan transition is replaced by calendar-pegged nolanDefermentEndYear/Month.
+// Part B: the Work Income Curve editor's point-placement math was anchored
+// to Jan 1 of a calendar year, while the engine's workFromCurve(mo/12,...)
+// call is anchored to BASE.startMonth -- the two conventions only agreed for
+// the hard-locked point 0, so every other point fed the engine a position
+// ~0.5yr (2 quarters) later than its on-screen label under the real
+// July-start default.
+
+test.describe('Group Z — v5.11.0 Nolan Deferment Gate / Work-Curve Epoch Fix', () => {
+
+  test('Z1 — Nolan deferred->active gate is calendar-pegged to nolanDefermentEndYear/Month, not elapsed months since sim start', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      // Push deferment well past the OLD hardcoded mo>=5 threshold (~Dec
+      // 2026 for the real July-2026 default start) -- if the gate were
+      // still elapsed-months-based, Nolan's minimum would already be active
+      // by month 5 regardless of this override.
+      const p = makeParams({ ccBal: 0, sophiaBal: 0, nolanBal: 100000, nolanMin: 1856, nolanDefermentEndYear: 2028, nolanDefermentEndMonth: 1 });
+      const rows = buildMonthlyScenario(p);
+      const mo5 = rows.find(r => r.mo === 5);
+      const dec2027 = rows.find(r => r.calYear === 2027 && r.calMonth1to12 === 12);
+      const jan2028 = rows.find(r => r.calYear === 2028 && r.calMonth1to12 === 1);
+      return { mo5HiMins: mo5.fc_hiMins, dec2027HiMins: dec2027.fc_hiMins, jan2028HiMins: jan2028.fc_hiMins };
+    });
+    console.log('  Z1 — ' + JSON.stringify(result));
+    expect(result.mo5HiMins).toBe(0);
+    expect(result.dec2027HiMins).toBe(0);
+    expect(result.jan2028HiMins).toBe(1856);
+  });
+
+  test('Z2 — Work Income Curve point edited via the UI to a specific calendar year+quarter reaches that value starting in that EXACT calendar month (was lagging ~2 quarters under the real July-start default)', async ({ page }) => {
+    await loadApp(page);
+    const section = page.locator('text=Work Income Curve').locator('xpath=ancestor::div[3]');
+    const textInputs = section.locator('input[type="text"]');
+    // Point 1 (2nd control box: [year input, value input]) -- move it to
+    // 2027 Q1 and drop its value to $0.
+    await textInputs.nth(2).fill('2027');
+    await textInputs.nth(2).blur();
+    await page.waitForTimeout(200);
+    await section.locator('button', { hasText: /^1$/ }).nth(1).click();
+    await page.waitForTimeout(200);
+    await textInputs.nth(3).fill('0');
+    await textInputs.nth(3).blur();
+    await page.waitForTimeout(300);
+
+    const result = await page.evaluate(() => {
+      const rows = window.__wfData;
+      const dec2026 = rows.find(r => r.calYear === 2026 && r.calMonth1to12 === 12);
+      const jan2027 = rows.find(r => r.calYear === 2027 && r.calMonth1to12 === 1);
+      return { dec2026Work: dec2026?.workIncome, jan2027Work: jan2027?.workIncome };
+    });
+    console.log('  Z2 — ' + JSON.stringify(result));
+    // Pre-fix, "2027 Q1" actually sampled the curve at the offset matching
+    // July 2027 (BASE.startMonth), so Jan 2027 was still ~6 months of decay
+    // away from $0 (Bob's real repro: Work column didn't hit $0 until Jul
+    // 2027). Fixed: the point's offset is anchored the same way the engine
+    // samples it, so Jan 2027 hits $0 exactly.
+    expect(result.jan2027Work).toBe(0);
+    expect(result.dec2026Work).toBeGreaterThan(0);
   });
 
 });
