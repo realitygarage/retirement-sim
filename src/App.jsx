@@ -1,3 +1,16 @@
+// v5.17.0 -- Typed number fields replace every slider. New module-level
+// NumberField: types in display units (scale/offset convert to stored units:
+// % stored as decimals, structure values stored in $K, lifestyle-draw year
+// stored as an offset), commits on Enter/blur only (Esc reverts, intermediate
+// keystrokes never re-run the sim), Up/Down nudge by the old slider step
+// (Shift = 10x), clamps to the old min/max on commit with a brief hint,
+// invalid input reverts. slider() keeps its signature (+ optional opts) and
+// renders it; sliderTypeIn/propValueEdit retired (Property value now typed in
+// full dollars). The 16 raw range inputs (segments, HI debt, lifestyle draws,
+// FCF phases, chart zoom) use numField(). Month pickers (Nolan deferment, LI
+// loan start, both SS starts) are Jan..Dec button rows, like sale month. The
+// property mortgage grid moved onto NumberField too (was committing every
+// keystroke). Pure UI: no engine, default or range changes.
 // v5.16.0 -- Month-level sale dates. Property sales (hold) and the One-Time
 // Obligation are dated Year + Month (effective the 1st) instead of Year +
 // Quarter; UI toggles are now Jan..Dec. engine.js's new saleMonthOf() is the
@@ -599,6 +612,84 @@ const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct",
 // years or fewer -- named so the threshold isn't a magic number scattered
 // across the resolution memo, the tick formatter, and the range slider.
 const QUARTERLY_ZOOM_THRESHOLD_YEARS = 8;
+// v5.17.0: typed number field -- replaces every range slider. Module-level
+// (not inside App) so an App re-render doesn't remount it and drop focus
+// mid-typing. Edits a local draft only; commits on Enter/blur (Esc reverts),
+// so intermediate keystrokes never re-run the sim. Typed in DISPLAY units:
+// disp = raw*scale + offset (% stored as decimal -> scale 100; $K-stored ->
+// scale 1000; year-offset -> offset BASE.startYear). min/max/step stay in RAW
+// units, same as the old sliders. Up/Down nudge by step (Shift = 10x) and
+// commit; out-of-range commits clamp and flash a hint; empty/non-numeric
+// input reverts (never writes NaN). Typed values aren't snapped to step --
+// only rounded to the step's decimal places.
+const stepDecimals = s => { const t=String(s); return t.includes('.') ? t.split('.')[1].length : 0; };
+function NumberField({value,onCommit,min=-Infinity,max=Infinity,step=1,scale=1,offset=0,
+    prefix="",suffix="",decimals,plain=false,testId,color,theme,fontSize=10,width=100,showRange=true}){
+  const dp = Math.max(stepDecimals(+(step*scale).toFixed(6)), decimals ?? 0);
+  const rawDp = dp + Math.max(0, Math.ceil(Math.log10(scale)));
+  const toDisp = r => +(((r||0)*scale+offset).toFixed(dp));
+  const fromDisp = d => +(((d-offset)/scale).toFixed(rawDp));
+  const fmtDisp = r => prefix + toDisp(r).toLocaleString(undefined,{maximumFractionDigits:dp,useGrouping:!plain}) + suffix;
+  const [draft,setDraft] = useState(null);        // string while focused, null otherwise
+  const [hint,setHint] = useState(null);
+  const hintTimer = useRef(null), skipBlur = useRef(false);
+  // Text shown when focus/last commit happened -- committing it unchanged is a
+  // no-op, so focusing+leaving never rounds a value stored with more precision
+  // than the field displays (e.g. a 0.04375 mortgage rate).
+  const cleanText = useRef(null);
+  useEffect(()=>()=>clearTimeout(hintTimer.current),[]);
+  const flash = msg => { setHint(msg); clearTimeout(hintTimer.current); hintTimer.current=setTimeout(()=>setHint(null),1500); };
+  const parse = text => {
+    const t = String(text??'').replace(/[$,%\s]/g,'');
+    if(!/^-?(\d+\.?\d*|\.\d+)$/.test(t)) return null;
+    return parseFloat(t);
+  };
+  const commitRaw = raw => {
+    let r = raw;
+    if(r>max){ r=max; flash("max "+fmtDisp(max)); }
+    else if(r<min){ r=min; flash("min "+fmtDisp(min)); }
+    if(r!==value) onCommit(r);
+    return r;
+  };
+  const commitText = text => {
+    if(text===cleanText.current) return value;
+    const d=parse(text); return d==null ? value : commitRaw(fromDisp(+d.toFixed(dp)));
+  };
+  const showCommitted = r => { const t=String(toDisp(r)); cleanText.current=t; setDraft(t); return t; };
+  const onKeyDown = e => {
+    if(e.key==='Enter') showCommitted(commitText(draft));
+    else if(e.key==='Escape'){ skipBlur.current=true; e.target.blur(); }
+    else if(e.key==='ArrowUp'||e.key==='ArrowDown'){
+      e.preventDefault();
+      const base = parse(draft) ?? toDisp(value);
+      const d = base + (e.key==='ArrowUp'?1:-1)*step*scale*(e.shiftKey?10:1);
+      showCommitted(commitRaw(fromDisp(+d.toFixed(dp))));
+    }
+  };
+  const bounded = isFinite(min) && isFinite(max);
+  const rangeText = bounded ? `${fmtDisp(min)} – ${fmtDisp(max)}` : "";
+  return (
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
+      {showRange && <span data-testid={testId?`${testId}-hint`:undefined} style={{fontSize:fontSize-2,color:hint?color:theme.dim,fontFamily:theme.mono}}>{hint||rangeText}</span>}
+      <input type="text" inputMode="decimal" data-testid={testId} title={hint||rangeText||undefined}
+        value={draft ?? fmtDisp(value)}
+        onFocus={e=>{
+          // Swap formatted -> raw in the DOM synchronously: React applies the
+          // draft re-render a beat later, and resetting .value then moves the
+          // caret to the end -- a select-all-and-type (or paste) right after
+          // focus would APPEND to the raw text instead of replacing it.
+          const el=e.target; el.value=showCommitted(value); el.select();
+          requestAnimationFrame(()=>{ if(document.activeElement===el && el.value===cleanText.current) el.select(); });
+        }}
+        onChange={e=>setDraft(e.target.value)}
+        onBlur={()=>{ if(!skipBlur.current) commitText(draft); skipBlur.current=false; setDraft(null); }}
+        onKeyDown={onKeyDown}
+        style={{width:showRange?width:"100%",fontSize,color,fontFamily:theme.mono,background:theme.bg,textAlign:"right",
+          border:`1px solid ${hint?color:theme.bdr}`,borderRadius:3,padding:"2px 5px",outline:"none",
+          transition:"border-color 0.2s",boxSizing:"border-box"}}/>
+    </div>
+  );
+}
 // v4.4.0: Bob's SS $ formula, generalized from the old stepped ssAge (65/66/67)
 // toggle to a continuous derived age (see ssClaimAge, engine.js). Same two-piece
 // rule as before: flat FRA at/after 67, linear Early->FRA interpolation below --
@@ -1291,7 +1382,6 @@ export default function App(){
   const [chartRangeStart, setChartRangeStart] = useState(BASE.startYear);
   const [chartRangeEnd,   setChartRangeEnd]   = useState(BASE.startYear+20);
   const [propCardOpen,  setPropCardOpen]  = useState({});     // v4.0.0-B per-property collapse (default open)
-  const [propValueEdit, setPropValueEdit] = useState(null);   // {id,text} | null -- click-to-type property value
   const [loansDebtOpen, setLoansDebtOpen] = useState(true);   // v4.0.0-B Loans & Debt group collapse
   const [costProfilesOpen, setCostProfilesOpen] = useState(true); // v4.2.4 Cost Profiles group collapse
   const [dispoBreakdownOpen, setDispoBreakdownOpen] = useState({}); // v4.2.6 per-property itemized disposition breakdown (default collapsed)
@@ -1742,62 +1832,31 @@ export default function App(){
     </div>
   );
 
-  const slider=(label,val,setVal,min,max,step,fmt)=>(
-    <div style={{marginBottom:10}}>
-      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-        <span style={{fontSize:10,color:muted}}>{label}</span>
-        <span style={{fontSize:10,color:amber,fontFamily:mono}}>{fmt(val)}</span>
-      </div>
-      <input type="range" min={min} max={max} step={step} value={val}
-        onChange={e=>setVal(parseFloat(e.target.value))}
-        style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
-    </div>
-  );
-
-  // v4.2.1 slider variant with a click-to-type value: clicking the numeric display swaps it for
-  // a plain text input (Enter/blur commits, Escape cancels) so an exact value can be typed instead
-  // of dragged. Typed values are clamped to [min,max] on commit. toText/fromText convert between
-  // the slider's raw units and the typed display units (e.g. raw dollars <-> $K) -- pass identity
-  // functions if no conversion is needed. Plain text (not type="number") so there's no native
-  // spinner UI to clean up.
-  const commitTypedSlider=(setVal,fromText,min,max)=>{
-    if(!propValueEdit) return;
-    const n=fromText(propValueEdit.text);
-    if(!isNaN(n)) setVal(Math.min(max,Math.max(min,n)));
-    setPropValueEdit(null);
-  };
-  const sliderTypeIn=(label,val,setVal,min,max,step,fmt,toText,fromText,testId,color=amber,fontSize=10)=>{
-    const isEditing = propValueEdit && propValueEdit.id===testId;
+  // v5.17.0: renders a typed NumberField (was <input type=range>); same
+  // signature + optional opts {scale,offset,prefix,suffix,decimals,plain,testId,
+  // color,fontSize}. v4.2.1's click-to-type sliderTypeIn variant folded in here.
+  const nfTheme={bg:bg1,bdr,dim,mono};
+  const slider=(label,val,setVal,min,max,step,fmt,opts={})=>{
+    const {color=amber,fontSize=10,...nf}=opts;
     return (
       <div style={{marginBottom:10}}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
           <span style={{fontSize,color:muted}}>{label}</span>
-          {isEditing ? (
-            <input type="text" inputMode="decimal" autoFocus data-testid={`${testId}-input`}
-              value={propValueEdit.text}
-              onChange={e=>{
-                const v=e.target.value;
-                if(/^-?\d*\.?\d*$/.test(v)) setPropValueEdit({id:testId,text:v});
-              }}
-              onBlur={()=>commitTypedSlider(setVal,fromText,min,max)}
-              onKeyDown={e=>{
-                if(e.key==='Enter') commitTypedSlider(setVal,fromText,min,max);
-                if(e.key==='Escape') setPropValueEdit(null);
-              }}
-              style={{fontSize,color,fontFamily:mono,background:bg1,border:`1px solid ${color}`,
-                borderRadius:3,width:70,textAlign:"right",padding:"1px 4px",outline:"none"}}/>
-          ) : (
-            <span data-testid={`${testId}-display`} onClick={()=>setPropValueEdit({id:testId,text:toText(val)})}
-              style={{fontSize,color,fontFamily:mono,cursor:"pointer"}}
-              title="Click to type an exact value">{fmt(val)}</span>
-          )}
+          <span style={{fontSize,color,fontFamily:mono}}>{fmt(val)}</span>
         </div>
-        <input type="range" min={min} max={max} step={step} value={val}
-          onChange={e=>setVal(parseFloat(e.target.value))}
-          style={{width:"100%",accentColor:color,cursor:"pointer",height:4}}/>
+        <NumberField value={val} onCommit={setVal} min={min} max={max} step={step}
+          color={color} fontSize={fontSize} theme={nfTheme} {...nf}/>
       </div>
     );
   };
+  // v5.17.0: bare field for the grid sites that had a raw <input type=range>
+  // (segments, HI debt, lifestyle draws, phase rows, zoom) -- no label row,
+  // range hint in the tooltip unless showRange is passed.
+  const numField=(val,onCommit,min,max,step,opts={})=>(
+    <NumberField value={val} onCommit={onCommit} min={min} max={max} step={step}
+      color={amber} theme={nfTheme} showRange={false} {...opts}/>
+  );
+  const monthToggle=(val,setVal)=>toggle(val,setVal,MONTH_ABBR.map((l,i)=>({v:i+1,l})));
 
   // v4.2.6 itemized Disposition breakdown -- display-only. Every dollar value below is
   // pulled straight off the disposeAsset return object (`d`, i.e. liveRows.dispoResults[id])
@@ -2459,7 +2518,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.16.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.17.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2560,12 +2619,11 @@ export default function App(){
                   {/* Value + mortgage -- basic property attributes. Range is anchored to this
                       property's *default* value (not its live value) so it stays fixed while
                       dragging -- top end capped at 5x default per user request (v4.2.1/v4.2.2). */}
-                  {sliderTypeIn("Property value",prop.value||0,v=>setProperty(prop.id,{value:v}),
+                  {slider("Property value",prop.value||0,v=>setProperty(prop.id,{value:v}),
                     Math.round((defaultPropValueById[prop.id]||prop.value||500000)*0.5),
                     Math.round((defaultPropValueById[prop.id]||prop.value||500000)*5),
                     5000,v=>"$"+Math.round(v/1000)+"K",
-                    v=>String(Math.round(v/1000)),t=>Math.round(parseFloat(t)*1000),
-                    `prop-value-${prop.id}`)}
+                    {prefix:"$",testId:`prop-value-${prop.id}`})}
                   {/* v5.15.0: Personal Income vs Expenses chart split only -- no effect on the waterfall */}
                   {prop.isPrimary ? (
                     <div data-testid={`personal-use-${prop.id}`} style={{fontSize:8,color:dim,marginBottom:8}}>
@@ -2574,28 +2632,28 @@ export default function App(){
                   ) : (
                     <div data-testid={`personal-use-${prop.id}`}>
                       {slider("Personal-use share",prop.personalUseShare ?? defaultPersonalShareById[prop.id] ?? 0,
-                        v=>setProperty(prop.id,{personalUseShare:Math.round(v*100)/100}),0,1,0.05,v=>Math.round(v*100)+"%")}
+                        v=>setProperty(prop.id,{personalUseShare:Math.round(v*100)/100}),0,1,0.05,v=>Math.round(v*100)+"%",
+                        {scale:100,suffix:"%",testId:`personal-use-field-${prop.id}`})}
                       <div style={{fontSize:8,color:dim,marginTop:-6,marginBottom:8}}>share of mortgage, tax, insurance &amp; maintenance that is your own housing; the rest is rental business.</div>
                     </div>
                   )}
                   <div style={{marginBottom:8}}>
                     <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6}}>Mortgage</div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                      {/* v5.17.0: NumberField (was type=number committing every keystroke);
+                          same units, no bounds -- step only drives the arrow-key nudge. */}
                       {[
-                        ["Balance $","balance",v=>parseFloat(v)],
-                        ["Rate (decimal)","rate",v=>parseFloat(v)],
-                        ["Origin year","originYear",v=>parseInt(v)],
-                        ["Origin month","originMonth",v=>parseInt(v)],
-                        ["Term (yrs)","termYears",v=>parseInt(v)],
-                        ["IO years","ioYears",v=>parseInt(v)],
-                      ].map(([label,field,parse])=>(
+                        ["Balance $","balance",1000,{prefix:"$"}],
+                        ["Rate (decimal)","rate",0.0025,{decimals:5}],
+                        ["Origin year","originYear",1,{plain:true}],
+                        ["Origin month","originMonth",1,{}],
+                        ["Term (yrs)","termYears",1,{}],
+                        ["IO years","ioYears",1,{}],
+                      ].map(([label,field,step,opts])=>(
                         <div key={field}>
                           <div style={{fontSize:8,color:dim,marginBottom:2}}>{label}</div>
-                          <input data-testid={`mtg-${prop.id}-${field}`} type="number" step="any"
-                            value={prop.mortgage?.[field] ?? 0}
-                            onChange={e=>setPropertyMortgage(prop.id,{[field]:parse(e.target.value)})}
-                            style={{width:"100%",background:bg1,border:`1px solid ${bdr}`,borderRadius:4,
-                              color:bright,fontFamily:mono,fontSize:10,padding:"3px 6px",outline:"none"}}/>
+                          {numField(prop.mortgage?.[field] ?? 0,v=>setPropertyMortgage(prop.id,{[field]:v}),
+                            -Infinity,Infinity,step,{color:bright,testId:`mtg-${prop.id}-${field}`,...opts})}
                         </div>
                       ))}
                     </div>
@@ -2610,7 +2668,7 @@ export default function App(){
                       <div data-testid={`sale-year-slider-${prop.id}`}>
                         {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) -- can't schedule a
                             sale before the model's own start date, and the horizon is BASE.startYear+20. */}
-                        {slider("Sale year",hold.year||BASE.startYear,v=>setPropertyHold(prop.id,{year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
+                        {slider("Sale year",hold.year||BASE.startYear,v=>setPropertyHold(prop.id,{year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"",{plain:true})}
                       </div>
                       <div>
                         {/* v5.16.0: month granularity (was Q1-Q4) -- sale effective the 1st of the month */}
@@ -2672,16 +2730,13 @@ export default function App(){
                                 <div style={{display:"flex",gap:8,marginBottom:6}}>
                                   <div style={{flex:1}}>
                                     <div style={{fontSize:8,color:dim,marginBottom:2}}>From {seg.yrFrom} Q{seg.qFrom??1}</div>
-                                    <input type="range" min={BASE.startYear} max={BASE.startYear+20} step={1} value={seg.yrFrom}
-                                      onChange={e=>{
-                                        const v=parseInt(e.target.value);
+                                    {numField(seg.yrFrom,v=>{
                                         const yrTo=Math.max(v,seg.yrTo);
                                         const patch={yrFrom:v,yrTo};
                                         // v5.9.0: years collapsing to one -- keep qFrom<=qTo valid
                                         if(v===yrTo && (seg.qFrom??1)>(seg.qTo??4)) patch.qTo=seg.qFrom??1;
                                         updSeg(ei,patch);
-                                      }}
-                                      style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                                      },BASE.startYear,BASE.startYear+20,1,{plain:true,color:kColor,fontSize:9,testId:`seg-yrfrom-${unit.id}-${ei}`})}
                                     <div data-testid={`seg-qfrom-${unit.id}-${ei}`} style={{marginTop:3}}>
                                       {toggle(seg.qFrom??1, q=>{
                                         const patch={qFrom:q};
@@ -2692,15 +2747,12 @@ export default function App(){
                                   </div>
                                   <div style={{flex:1}}>
                                     <div style={{fontSize:8,color:dim,marginBottom:2}}>To {seg.yrTo} Q{seg.qTo??4}</div>
-                                    <input type="range" min={BASE.startYear} max={BASE.startYear+20} step={1} value={seg.yrTo}
-                                      onChange={e=>{
-                                        const v=parseInt(e.target.value);
+                                    {numField(seg.yrTo,v=>{
                                         const yrFrom=Math.min(seg.yrFrom,v);
                                         const patch={yrTo:v,yrFrom};
                                         if(yrFrom===v && (seg.qTo??4)<(seg.qFrom??1)) patch.qFrom=seg.qTo??4;
                                         updSeg(ei,patch);
-                                      }}
-                                      style={{width:"100%",accentColor:kColor,cursor:"pointer",height:4}}/>
+                                      },BASE.startYear,BASE.startYear+20,1,{plain:true,color:kColor,fontSize:9,testId:`seg-yrto-${unit.id}-${ei}`})}
                                     <div data-testid={`seg-qto-${unit.id}-${ei}`} style={{marginTop:3}}>
                                       {toggle(seg.qTo??4, q=>{
                                         const patch={qTo:q};
@@ -2722,16 +2774,14 @@ export default function App(){
                                       <span style={{fontSize:8,color:muted}}>Days</span>
                                       <span style={{fontSize:8,color:amber,fontFamily:mono}}>{g.days}d</span>
                                     </div>
-                                    <input type="range" min={0} max={365} step={5} value={g.days}
-                                      onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,days:parseInt(e.target.value)}:x)})}
-                                      style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                                    {numField(g.days,v=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,days:v}:x)}),
+                                      0,365,5,{suffix:" d",fontSize:9,showRange:true})}
                                     <div style={{display:"flex",justifyContent:"space-between"}}>
                                       <span style={{fontSize:8,color:muted}}>Rate/night</span>
                                       <span style={{fontSize:8,color:amber,fontFamily:mono}}>${g.rate}</span>
                                     </div>
-                                    <input type="range" min={100} max={1200} step={10} value={g.rate}
-                                      onChange={e=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
-                                      style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                                    {numField(g.rate,v=>updSeg(ei,{str:seg.str.map((x,k)=>k===si?{...x,rate:v}:x)}),
+                                      100,1200,10,{prefix:"$",fontSize:9,showRange:true})}
                                   </div>
                                 ))}
                                 {seg.kind==='mtr' && (seg.mtr||[]).map((g,si)=>(
@@ -2740,23 +2790,20 @@ export default function App(){
                                       <span style={{fontSize:8,color:muted}}>Months</span>
                                       <span style={{fontSize:8,color:blue,fontFamily:mono}}>{g.months}mo</span>
                                     </div>
-                                    <input type="range" min={1} max={12} step={1} value={g.months}
-                                      onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,months:parseInt(e.target.value)}:x)})}
-                                      style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
+                                    {numField(g.months,v=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,months:v}:x)}),
+                                      1,12,1,{suffix:" mo",color:blue,fontSize:9,showRange:true})}
                                     <div style={{display:"flex",justifyContent:"space-between"}}>
                                       <span style={{fontSize:8,color:muted}}>Rate/mo</span>
                                       <span style={{fontSize:8,color:blue,fontFamily:mono}}>${g.rate}</span>
                                     </div>
-                                    <input type="range" min={2000} max={12000} step={250} value={g.rate}
-                                      onChange={e=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,rate:parseInt(e.target.value)}:x)})}
-                                      style={{width:"100%",accentColor:blue,cursor:"pointer",height:4}}/>
+                                    {numField(g.rate,v=>updSeg(ei,{mtr:seg.mtr.map((x,k)=>k===si?{...x,rate:v}:x)}),
+                                      2000,12000,250,{prefix:"$",color:blue,fontSize:9,showRange:true})}
                                   </div>
                                 ))}
-                                {seg.kind==='ltr' && sliderTypeIn("Monthly rent",seg.ltr?.monthlyRent||0,
+                                {seg.kind==='ltr' && slider("Monthly rent",seg.ltr?.monthlyRent||0,
                                   v=>updSeg(ei,{ltr:{...(seg.ltr||{}),monthlyRent:v}}),
                                   1000,12000,50,v=>"$"+v.toLocaleString()+"/mo",
-                                  v=>String(v),t=>parseFloat(t),
-                                  `ltr-rent-${unit.id}-${ei}`,green,8)}
+                                  {prefix:"$",testId:`ltr-rent-${unit.id}-${ei}`,color:green,fontSize:8})}
                                 {clip && clip.truncated && (
                                   <div style={{fontSize:8,color:blue,fontStyle:"italic"}}>ⓘ truncated at {MONTH_ABBR[saleMonthOf(hold)-1]} {hold.year} sale</div>
                                 )}
@@ -2795,15 +2842,17 @@ export default function App(){
                           escrow/title/recording $ -- both feed disposeAsset's netSale. */}
                       {slider("Commission & concessions (%)",hold.sellingCostsPct ?? DISPO_DEFAULTS.sellingCostsPct,
                         v=>setPropertyHold(prop.id,{sellingCostsPct:Math.round(v*10000)/10000}),0,0.10,0.0025,
-                        v=>(v*100).toFixed(2).replace(/\.?0+$/,"")+"%"+(hold.sellingCostsPct!=null?"":" (global)"))}
+                        v=>(v*100).toFixed(2).replace(/\.?0+$/,"")+"%"+(hold.sellingCostsPct!=null?"":" (global)"),
+                        {scale:100,suffix:"%",testId:`commission-pct-${prop.id}`})}
                       {slider("Escrow / title / recording ($)",hold.closingCostFlat ?? defaultClosingFlatById[prop.id] ?? 0,
-                        v=>setPropertyHold(prop.id,{closingCostFlat:v}),0,25000,500,v=>"$"+Math.round(v).toLocaleString())}
+                        v=>setPropertyHold(prop.id,{closingCostFlat:v}),0,25000,500,v=>"$"+Math.round(v).toLocaleString(),
+                        {prefix:"$",testId:`closing-flat-${prop.id}`})}
                       {slider("Adjusted basis",hold.basis||0,v=>setPropertyHold(prop.id,{basis:v}),
-                        Math.round((hold.basis||400000)*0.5),Math.round((hold.basis||400000)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
-                      {prop.isPrimary && slider("§121 exclusion",hold.sec121Exclusion||0,v=>setPropertyHold(prop.id,{sec121Exclusion:v}),0,500000,10000,v=>"$"+Math.round(v/1000)+"K")}
-                      {!prop.isPrimary && slider("CA-source deferred gain",hold.caSourceDeferredGain||0,v=>setPropertyHold(prop.id,{caSourceDeferredGain:v}),0,Math.max(10000,(hold.caSourceDeferredGain||0)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
-                      {!prop.isPrimary && slider("Depreciation recapture $",hold.depreciationRecapture||0,v=>setPropertyHold(prop.id,{depreciationRecapture:v}),0,Math.max(60000,(hold.depreciationRecapture||0)*1.5),1000,v=>"$"+Math.round(v/1000)+"K")}
-                      {hold.mode==='partial_1031' && slider("Cash boot",hold.cashBoot||0,v=>setPropertyHold(prop.id,{cashBoot:v}),0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+                        Math.round((hold.basis||400000)*0.5),Math.round((hold.basis||400000)*1.5),5000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$"})}
+                      {prop.isPrimary && slider("§121 exclusion",hold.sec121Exclusion||0,v=>setPropertyHold(prop.id,{sec121Exclusion:v}),0,500000,10000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$"})}
+                      {!prop.isPrimary && slider("CA-source deferred gain",hold.caSourceDeferredGain||0,v=>setPropertyHold(prop.id,{caSourceDeferredGain:v}),0,Math.max(10000,(hold.caSourceDeferredGain||0)*1.5),5000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$"})}
+                      {!prop.isPrimary && slider("Depreciation recapture $",hold.depreciationRecapture||0,v=>setPropertyHold(prop.id,{depreciationRecapture:v}),0,Math.max(60000,(hold.depreciationRecapture||0)*1.5),1000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$"})}
+                      {hold.mode==='partial_1031' && slider("Cash boot",hold.cashBoot||0,v=>setPropertyHold(prop.id,{cashBoot:v}),0,500000,5000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$"})}
                     </div>
                   )}
 
@@ -2838,19 +2887,19 @@ export default function App(){
             {collapsibleSect("Cost Profiles", costProfilesOpen, ()=>setCostProfilesOpen(o=>!o))}
             {costProfilesOpen && (<>
             <div style={{fontSize:8,color:dim,marginBottom:8}}>Applied automatically by segment kind: STR = platform% + cleaning%; MTR = flat $/block cleaning; LTR = vacancy%. Mgmt fee applies to all three.</div>
-            {slider("STR platform fee",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%")}
-            {slider("STR cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%")}
-            {slider("MTR cleaning (flat $/block)",mtrCleaningFlat,setMtrCleaningFlat,0,1000,25,v=>"$"+v)}
-            {slider("LTR vacancy/collection loss",ltrVacancyPct,setLtrVacancyPct,0,15,0.5,v=>v+"%")}
-            {slider("Mgmt fee (all kinds)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross")}
+            {slider("STR platform fee",strPlatformPct,setStrPlatformPct,0,10,0.5,v=>v+"%",{suffix:"%"})}
+            {slider("STR cleaning (% of gross)",strCleanPct,setStrCleanPct,0,10,0.5,v=>v+"%",{suffix:"%"})}
+            {slider("MTR cleaning (flat $/block)",mtrCleaningFlat,setMtrCleaningFlat,0,1000,25,v=>"$"+v,{prefix:"$"})}
+            {slider("LTR vacancy/collection loss",ltrVacancyPct,setLtrVacancyPct,0,15,0.5,v=>v+"%",{suffix:"%"})}
+            {slider("Mgmt fee (all kinds)",mgrPct,setMgrPct,0,12,0.5,v=>v===0?"Self-managed":v+"% of gross",{suffix:"%"})}
             </>)}
 
             {/* One-Time Obligation (was Settlement) */}
             {sect("One-Time Obligation")}
             <div style={{fontSize:8,color:dim,marginBottom:8}}>When on, the obligation amount reduces that year's recognized capital gains (capped at the gains pool) -- the Kimbell/Arrowsmith position, now assumed fully applied.</div>
-            {slider("Amount",obligation.amount||0,v=>setObligation({amount:v}),262500,787500,5000,v=>"$"+Math.round(v/1000)+"K")}
+            {slider("Amount",obligation.amount||0,v=>setObligation({amount:v}),262500,787500,5000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$",testId:"obligation-amount"})}
             {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) */}
-            {slider("Year",obligation.year||BASE.startYear,v=>setObligation({year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
+            {slider("Year",obligation.year||BASE.startYear,v=>setObligation({year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"",{plain:true,testId:"obligation-year"})}
             <div style={{marginBottom:8}}>
               {/* v5.16.0: month (was quarter) -- paid the 1st of the month */}
               <div style={{fontSize:9,color:muted,marginBottom:3}}>Month</div>
@@ -2871,7 +2920,7 @@ export default function App(){
               ])}
               {/* v5.6.0: the $ amount itself had no slider -- only the on/off
                   toggle was editable, the figure was view-only. */}
-              {sameYearSaleTaxBumpOn && slider("Amount",sameYearSaleTaxBump,setSameYearSaleTaxBump,0,150000,5000,v=>"$"+Math.round(v/1000)+"K")}
+              {sameYearSaleTaxBumpOn && slider("Amount",sameYearSaleTaxBump,setSameYearSaleTaxBump,0,150000,5000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$"})}
             </div>
 
             {/* Loans & Debt (collapsible): HI debts + generalized loan segments (v3.2) */}
@@ -2895,9 +2944,7 @@ export default function App(){
                         <span style={{fontSize:9,color:muted}}>Balance</span>
                         <span style={{fontSize:9,color:amber,fontFamily:mono}}>${bal.toLocaleString()}</span>
                       </div>
-                      <input type="range" min={0} max={balMax} step={500} value={bal}
-                        onChange={e=>setBal(parseInt(e.target.value))}
-                        style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                      {numField(bal,setBal,0,balMax,500,{prefix:"$",fontSize:9,showRange:true,testId:`hi-bal-${testId}`})}
                     </div>
                     <div style={{display:"flex",gap:8}}>
                       <div style={{flex:1}}>
@@ -2905,18 +2952,14 @@ export default function App(){
                           <span style={{fontSize:8,color:dim}}>Rate</span>
                           <span style={{fontSize:8,color:dim,fontFamily:mono}}>{rate.toFixed(1)}%</span>
                         </div>
-                        <input type="range" min={3} max={rateMax} step={0.25} value={rate}
-                          onChange={e=>setRate(parseFloat(e.target.value))}
-                          style={{width:"100%",accentColor:amber,cursor:"pointer",height:3}}/>
+                        {numField(rate,setRate,3,rateMax,0.25,{suffix:"%",fontSize:8,testId:`hi-rate-${testId}`})}
                       </div>
                       <div style={{flex:1}}>
                         <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
                           <span style={{fontSize:8,color:dim}}>Min/mo</span>
                           <span style={{fontSize:8,color:dim,fontFamily:mono}}>${min}</span>
                         </div>
-                        <input type="range" min={0} max={3000} step={25} value={min}
-                          onChange={e=>setMin(parseInt(e.target.value))}
-                          style={{width:"100%",accentColor:amber,cursor:"pointer",height:3}}/>
+                        {numField(min,setMin,0,3000,25,{prefix:"$",fontSize:8,testId:`hi-min-${testId}`})}
                       </div>
                     </div>
                     <div style={{marginTop:6}} data-testid={`hi-closing-${testId}`}>
@@ -2931,14 +2974,9 @@ export default function App(){
                     {defermentEndYear!=null && (
                       <div style={{marginTop:8}} data-testid="nolan-deferment-end">
                         <div style={{fontSize:8,color:dim,marginBottom:3}}>Deferment ends -- first payment due</div>
-                        <div style={{display:"flex",gap:8}}>
-                          <div style={{flex:1}}>
-                            {slider("Year",nolanDefermentEndYear,setNolanDefermentEndYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`)}
-                          </div>
-                          <div style={{flex:1}}>
-                            {slider("Month",nolanDefermentEndMonth,setNolanDefermentEndMonth,1,12,1,v=>MONTH_ABBR[v-1])}
-                          </div>
-                        </div>
+                        {/* v5.17.0: Year field stacked over a Jan-Dec button row (was two side-by-side sliders) */}
+                        {slider("Year",nolanDefermentEndYear,setNolanDefermentEndYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`,{plain:true})}
+                        <div data-testid="nolan-deferment-month">{monthToggle(nolanDefermentEndMonth,setNolanDefermentEndMonth)}</div>
                       </div>
                     )}
                   </div>
@@ -2987,17 +3025,15 @@ export default function App(){
                             background:"transparent",border:`1px solid ${bdr}`,color:dim}}>remove</button>
                       </div>
                     </div>
-                    {slider("Amount",L.amount||0,v=>updL({amount:v}),0,300000,1000,v=>"$"+v.toLocaleString())}
-                    {slider("Rate",L.rate||0,v=>updL({rate:v}),0,30,0.25,v=>v.toFixed(2)+"%")}
-                    {slider("Term (months)",L.months||1,v=>updL({months:v}),1,120,1,v=>v+" mo")}
-                    <div style={{display:"flex",gap:8}}>
-                      <div style={{flex:1}}>
-                        {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) */}
-                        {slider("Start year",L.startYear||BASE.startYear,v=>updL({startYear:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
-                      </div>
-                      <div style={{flex:1}}>
-                        {slider("Start month",L.startMonth||BASE.startMonth,v=>updL({startMonth:v}),1,12,1,v=>new Date(2000,v-1).toLocaleString('default',{month:'short'}))}
-                      </div>
+                    {slider("Amount",L.amount||0,v=>updL({amount:v}),0,300000,1000,v=>"$"+v.toLocaleString(),{prefix:"$"})}
+                    {slider("Rate",L.rate||0,v=>updL({rate:v}),0,30,0.25,v=>v.toFixed(2)+"%",{suffix:"%"})}
+                    {slider("Term (months)",L.months||1,v=>updL({months:v}),1,120,1,v=>v+" mo",{suffix:" mo"})}
+                    {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) */}
+                    {/* v5.17.0: Start year field stacked over a Jan-Dec button row (was two side-by-side sliders) */}
+                    {slider("Start year",L.startYear||BASE.startYear,v=>updL({startYear:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"",{plain:true})}
+                    <div data-testid={`loan-start-month-${li}`} style={{marginBottom:8}}>
+                      <div style={{fontSize:10,color:muted,marginBottom:3}}>Start month</div>
+                      {monthToggle(L.startMonth||BASE.startMonth,v=>updL({startMonth:v}))}
                     </div>
                     <div style={{marginTop:2}} data-testid={`loan-sweepable-${li}`}>
                       <div style={{fontSize:9,color:muted,marginBottom:3}}>Join ongoing debt-sweep avalanche (pay off early)</div>
@@ -3020,7 +3056,7 @@ export default function App(){
             {/* Cash-Flow Engine: pooled proceeds routing chain + lifestyle draws */}
             {sect("Cash-Flow Engine")}
             <div style={{fontSize:8,color:dim,marginBottom:8}}>All same-year dispositions feed ONE pool: proceeds → obligation → one-time draw → mortgage principal paydown → the dispersement waterfall (HI debt first, then reserves/buffers, then savings).</div>
-            {slider("One-time draw ($, at sale)",settleLifestyleDraw,setSettleLifestyleDraw,0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+            {slider("One-time draw ($, at sale)",settleLifestyleDraw,setSettleLifestyleDraw,0,500000,5000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$",testId:"settle-draw-amount"})}
             <div style={{marginBottom:8}}>
               <div style={{fontSize:9,color:muted,marginBottom:3}}>Draw label (optional -- lifestyle vs. other use)</div>
               <input type="text" data-testid="settle-draw-label" value={settleDrawLabel} onChange={e=>setSettleDrawLabel(e.target.value)}
@@ -3034,7 +3070,7 @@ export default function App(){
                 convention as the draw slider above) -- the engine caps it at
                 what's actually left in the pool that pass, see the routing
                 result readout below for the amount that really applied. */}
-            {slider("Mortgage principal paydown ($, at sale)",settleMtgPaydown,setSettleMtgPaydown,0,500000,5000,v=>"$"+Math.round(v/1000)+"K")}
+            {slider("Mortgage principal paydown ($, at sale)",settleMtgPaydown,setSettleMtgPaydown,0,500000,5000,v=>"$"+Math.round(v/1000)+"K",{prefix:"$"})}
             <div style={{marginBottom:8}}>
               <div style={{fontSize:9,color:muted,marginBottom:3}}>Target mortgage</div>
               <select value={effectiveMtgPaydownTarget} data-testid="settle-mtg-paydown-target"
@@ -3103,9 +3139,9 @@ export default function App(){
                       {/* v4.3.0: BASE.startYear (was hardcoded 2026) -- d.yr is an offset from the model's start */}
                       <span style={{fontSize:10,color:amber,fontFamily:mono}}>{BASE.startYear+d.yr} (age {65+d.yr})</span>
                     </div>
-                    <input type="range" min={0} max={20} step={1} value={d.yr}
-                      onChange={e=>setLifestyleDraws(ds=>ds.map((x,j)=>j===i?{...x,yr:parseInt(e.target.value)}:x))}
-                      style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                    {/* v5.17.0: typed as a calendar year; stored as the offset from BASE.startYear */}
+                    {numField(d.yr,v=>setLifestyleDraws(ds=>ds.map((x,j)=>j===i?{...x,yr:v}:x)),
+                      0,20,1,{offset:BASE.startYear,plain:true,showRange:true})}
                     {(()=>{
                       const cashAtYr = liveRows[d.yr]?.cashAst ?? 0;
                       const ok = cashAtYr >= d.amount;
@@ -3120,9 +3156,8 @@ export default function App(){
                       <span style={{fontSize:10,color:muted}}>Amount</span>
                       <span style={{fontSize:10,color:amber,fontFamily:mono}}>${d.amount.toLocaleString()} (~${Math.round(d.amount/12).toLocaleString()}/mo)</span>
                     </div>
-                    <input type="range" min={5000} max={150000} step={5000} value={d.amount}
-                      onChange={e=>setLifestyleDraws(ds=>ds.map((x,j)=>j===i?{...x,amount:parseInt(e.target.value)}:x))}
-                      style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                    {numField(d.amount,v=>setLifestyleDraws(ds=>ds.map((x,j)=>j===i?{...x,amount:v}:x)),
+                      5000,150000,5000,{prefix:"$",showRange:true})}
                   </div>
                   <div style={{fontSize:8,color:dim,marginTop:3,textAlign:"right"}}>
                     <span style={{color:amber}}>${d.amount.toLocaleString()}</span> in <span style={{color:muted}}>{BASE.startYear+d.yr}</span>
@@ -3134,12 +3169,12 @@ export default function App(){
             {/* ECONOMY */}
             {sect("Economy")}
 
-            {slider("RE Appreciation",reApp,setReApp,2,6,0.25,v=>`${v.toFixed(2)}%/yr`)}
-            {slider("Rent Growth",rentGr,setRentGr,1.5,4.5,0.25,v=>`${v.toFixed(2)}%/yr`)}
+            {slider("RE Appreciation",reApp,setReApp,2,6,0.25,v=>`${v.toFixed(2)}%/yr`,{suffix:"%",decimals:2})}
+            {slider("Rent Growth",rentGr,setRentGr,1.5,4.5,0.25,v=>`${v.toFixed(2)}%/yr`,{suffix:"%",decimals:2})}
             <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6,marginTop:8}}>Inflation Rates</div>
-            {slider("Core CPI (living costs)",cpi,setCpi,1.4,4.2,0.2,v=>`${v.toFixed(1)}%/yr`)}
-            {slider("Health ins inflation",healthCpi,setHealthCpi,2.0,8.0,0.5,v=>`${v.toFixed(1)}%/yr`)}
-            {slider("Prop tax/ins inflation",propCpi,setPropCpi,1.5,5.0,0.5,v=>`${v.toFixed(1)}%/yr`)}
+            {slider("Core CPI (living costs)",cpi,setCpi,1.4,4.2,0.2,v=>`${v.toFixed(1)}%/yr`,{suffix:"%",decimals:2})}
+            {slider("Health ins inflation",healthCpi,setHealthCpi,2.0,8.0,0.5,v=>`${v.toFixed(1)}%/yr`,{suffix:"%",decimals:2})}
+            {slider("Prop tax/ins inflation",propCpi,setPropCpi,1.5,5.0,0.5,v=>`${v.toFixed(1)}%/yr`,{suffix:"%",decimals:2})}
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:8,marginBottom:4}}>
               <span style={{fontSize:10,color:muted}}>Income tax estimate</span>
               <button onClick={()=>setTaxEnabled(v=>!v)} style={{
@@ -3153,7 +3188,7 @@ export default function App(){
               {/* v4.3.0: BASE.startYear (was hardcoded "2026"/"2030") */}
               Est. {liveRows[0]?`$${Math.round(liveRows[0].tax/100)*100}/mo`:"..."} in {BASE.startYear}, {liveRows[4]?`$${Math.round(liveRows[4].tax/100)*100}/mo`:"..."} in {BASE.startYear+4}
             </div>}
-            {slider("Investment Return",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`)}
+            {slider("Investment Return",investRet,setInvestRet,2.75,8.25,0.25,v=>`${v.toFixed(2)}%/yr`,{suffix:"%",decimals:2})}
 
             {/* Restored v4.0.0-A: unrelated to the 5-group IA above -- SS timing,
                 work curve, and the liq-NW basis note stay here at the end. */}
@@ -3163,8 +3198,9 @@ export default function App(){
                 not the input. */}
             <div style={{marginBottom:10,marginTop:14}}>
               <div style={{fontSize:10,color:muted,marginBottom:5}}>Your SS Start</div>
-              {slider("Your SS Start Year",ssStartYear,setSsStartYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`)}
-              {slider("Your SS Start Month",ssStartMonth,setSsStartMonth,1,12,1,v=>MONTH_ABBR[v-1])}
+              {slider("Your SS Start Year",ssStartYear,setSsStartYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`,{plain:true})}
+              {/* v5.17.0: Jan-Dec button row (was a 1-12 slider) */}
+              <div data-testid="ss-start-month" style={{marginBottom:8}}>{monthToggle(ssStartMonth,setSsStartMonth)}</div>
               <div style={{fontSize:9,color:dim,marginTop:-4,marginBottom:4}}>
                 {ssStartYear} &middot; {MONTH_ABBR[ssStartMonth-1]} &rarr; age {yourSsAge.toFixed(1)}
                 {" -- "}${Math.round(yourSsAmountFromAge(yourSsAge)).toLocaleString()}/mo
@@ -3174,8 +3210,8 @@ export default function App(){
 
             <div style={{marginBottom:10}}>
               <div style={{fontSize:10,color:muted,marginBottom:5}}>Brenda SS Start</div>
-              {slider("Brenda SS Start Year",ssBrendaStartYear,setSsBrendaStartYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`)}
-              {slider("Brenda SS Start Month",ssBrendaStartMonth,setSsBrendaStartMonth,1,12,1,v=>MONTH_ABBR[v-1])}
+              {slider("Brenda SS Start Year",ssBrendaStartYear,setSsBrendaStartYear,BASE.startYear,BASE.startYear+20,1,v=>`${v}`,{plain:true})}
+              <div data-testid="ss-brenda-start-month" style={{marginBottom:8}}>{monthToggle(ssBrendaStartMonth,setSsBrendaStartMonth)}</div>
               <div style={{fontSize:9,color:dim,marginTop:-4,marginBottom:4}}>
                 {ssBrendaStartYear} &middot; {MONTH_ABBR[ssBrendaStartMonth-1]} &rarr; age {brendaSsAge.toFixed(1)}
                 {" -- "}${BASE.brendaSsFRA.toLocaleString()}/mo (flat, doesn't vary by claim age)
@@ -3297,26 +3333,20 @@ export default function App(){
                   <span style={{fontSize:9,color:muted}}>From</span>
                   <span style={{fontSize:9,color:amber,fontFamily:mono}}>{effChartRangeStart}</span>
                 </div>
-                <input type="range" data-testid="chart-zoom-from" min={chartRangeBoundMin} max={chartRangeBoundMax} step={1} value={effChartRangeStart}
-                  onChange={e=>{
-                    const v=parseInt(e.target.value);
+                {numField(effChartRangeStart,v=>{
                     setChartRangeStart(v);
                     if(v>effChartRangeEnd) setChartRangeEnd(v);
-                  }}
-                  style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                  },chartRangeBoundMin,chartRangeBoundMax,1,{plain:true,fontSize:9,testId:"chart-zoom-from"})}
               </div>
               <div style={{flex:1}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
                   <span style={{fontSize:9,color:muted}}>To</span>
                   <span style={{fontSize:9,color:amber,fontFamily:mono}}>{effChartRangeEnd}</span>
                 </div>
-                <input type="range" data-testid="chart-zoom-to" min={chartRangeBoundMin} max={chartRangeBoundMax} step={1} value={effChartRangeEnd}
-                  onChange={e=>{
-                    const v=parseInt(e.target.value);
+                {numField(effChartRangeEnd,v=>{
                     setChartRangeEnd(v);
                     if(v<effChartRangeStart) setChartRangeStart(v);
-                  }}
-                  style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                  },chartRangeBoundMin,chartRangeBoundMax,1,{plain:true,fontSize:9,testId:"chart-zoom-to"})}
               </div>
               <button onClick={()=>{setChartRangeStart(chartRangeBoundMin);setChartRangeEnd(chartRangeBoundMax);}}
                 data-testid="chart-zoom-reset"
@@ -3940,10 +3970,11 @@ export default function App(){
 
             {/* Tier 1: Fixed costs / Maintenance */}
             {sect("Tier 1 -- Maintenance Reserves")}
-            {slider("Rate (% of structure/yr)",maintStr,setMaintStr,0.25,1.5,0.25,v=>v+"%")}
-            {uiKeepPrimary&&slider("6th St structure value",struct6,setStruct6,300,900,50,v=>"$"+v+"K  ($"+Math.round(struct6*1000*maintStr/100/12).toLocaleString()+"/mo)")}
-            {slider("15th St structure value",struct15,setStruct15,250,750,50,v=>"$"+v+"K  ($"+Math.round(struct15*1000*maintStr/100/12).toLocaleString()+"/mo)")}
-            {slider("Lafayette structure value",structLaf,setStructLaf,125,500,25,v=>"$"+v+"K  ($"+Math.round(structLaf*1000*maintStr/100/12).toLocaleString()+"/mo)")}
+            {slider("Rate (% of structure/yr)",maintStr,setMaintStr,0.25,1.5,0.25,v=>v+"%",{suffix:"%"})}
+            {/* v5.17.0: structure values are stored in $K but typed in full dollars (scale 1000) */}
+            {uiKeepPrimary&&slider("6th St structure value",struct6,setStruct6,300,900,50,v=>"$"+v+"K  ($"+Math.round(struct6*1000*maintStr/100/12).toLocaleString()+"/mo)",{scale:1000,prefix:"$"})}
+            {slider("15th St structure value",struct15,setStruct15,250,750,50,v=>"$"+v+"K  ($"+Math.round(struct15*1000*maintStr/100/12).toLocaleString()+"/mo)",{scale:1000,prefix:"$"})}
+            {slider("Lafayette structure value",structLaf,setStructLaf,125,500,25,v=>"$"+v+"K  ($"+Math.round(structLaf*1000*maintStr/100/12).toLocaleString()+"/mo)",{scale:1000,prefix:"$"})}
             <div style={{fontSize:9,color:dim,marginBottom:4}}>
               Cap = 5 yrs of reserves per property. Once full, monthly amount redirects to HI sweep.
             </div>
@@ -3953,8 +3984,8 @@ export default function App(){
 
             {/* Tier 2: Rainy day */}
             {sect("Tier 2 -- Rainy Day Fund")}
-            {slider("Monthly top-up",rdTopUp,setRdTopUp,0,1000,50,v=>v===0?"Off":"$"+v.toLocaleString()+"/mo")}
-            {slider("Target cap",rdCap,setRdCap,5000,20000,1000,v=>"$"+v.toLocaleString())}
+            {slider("Monthly top-up",rdTopUp,setRdTopUp,0,1000,50,v=>v===0?"Off":"$"+v.toLocaleString()+"/mo",{prefix:"$"})}
+            {slider("Target cap",rdCap,setRdCap,5000,20000,1000,v=>"$"+v.toLocaleString(),{prefix:"$"})}
             <div style={{fontSize:9,color:dim,marginBottom:10}}>
               {wfData[0]&&rdTopUp>0
                 ?`Fills in ~${Math.ceil(rdCap/rdTopUp)} months if no draws`
@@ -3963,8 +3994,8 @@ export default function App(){
 
             {/* Tier 3: Op buffer */}
             {sect("Tier 3 -- Operating Buffer")}
-            {slider("Monthly top-up",obTopUp,setObTopUp,0,1500,100,v=>v===0?"Off":"$"+v.toLocaleString()+"/mo")}
-            {slider("Target cap",obCap,setObCap,15000,50000,5000,v=>"$"+v.toLocaleString())}
+            {slider("Monthly top-up",obTopUp,setObTopUp,0,1500,100,v=>v===0?"Off":"$"+v.toLocaleString()+"/mo",{prefix:"$"})}
+            {slider("Target cap",obCap,setObCap,15000,50000,5000,v=>"$"+v.toLocaleString(),{prefix:"$"})}
             <div style={{marginBottom:10}}>
               <div style={{fontSize:10,color:muted,marginBottom:5}}>Funding order</div>
               {toggle(bufferMode,setBufferMode,[
@@ -4010,7 +4041,7 @@ export default function App(){
                   {v:false,l:"Capped",c:amber},{v:true,l:"Uncapped",c:red}
                 ])}
               </div>
-              {!mtgPrincipalUncapped&&slider("Monthly cap",mtgPrincipalCap,setMtgPrincipalCap,250,10000,250,v=>"$"+v.toLocaleString()+"/mo")}
+              {!mtgPrincipalUncapped&&slider("Monthly cap",mtgPrincipalCap,setMtgPrincipalCap,250,10000,250,v=>"$"+v.toLocaleString()+"/mo",{prefix:"$"})}
               {(()=>{
                 const totalExtra = wfData.reduce((s,r)=>s+(r.mtgExtra||0),0);
                 const last = wfData[wfData.length-1]||{};
@@ -4029,7 +4060,7 @@ export default function App(){
             <div style={{fontSize:8,color:dim,marginBottom:8,lineHeight:1.6}}>
               This is your guaranteed monthly spend — protected before any debt sweep. Set it by life phase below, or use the fallback for all years.
             </div>
-            {slider("Fallback floor (unscheduled years)",discFloor,setDiscFloor,300,4000,100,v=>"$"+v.toLocaleString()+"/mo")}
+            {slider("Fallback floor (unscheduled years)",discFloor,setDiscFloor,300,4000,100,v=>"$"+v.toLocaleString()+"/mo",{prefix:"$"})}
 
             {/* FCF Phase Schedule */}
             <div style={{marginTop:8,marginBottom:4}}>
@@ -4077,18 +4108,16 @@ export default function App(){
                           <span style={{fontSize:8,color:muted}}>From</span>
                           <span style={{fontSize:8,color:amber,fontFamily:mono}}>{entry.yrFrom} (age {ageFrom})</span>
                         </div>
-                        <input type="range" min={BASE.startYear} max={2055} step={1} value={entry.yrFrom}
-                          onChange={e=>{const v=parseInt(e.target.value);setFcfSchedule(s=>s.map((x,j)=>j===ei?{...x,yrFrom:v,yrTo:Math.max(v,x.yrTo)}:x));}}
-                          style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                        {numField(entry.yrFrom,v=>setFcfSchedule(s=>s.map((x,j)=>j===ei?{...x,yrFrom:v,yrTo:Math.max(v,x.yrTo)}:x)),
+                          BASE.startYear,2055,1,{plain:true,fontSize:9})}
                       </div>
                       <div style={{flex:1}}>
                         <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
                           <span style={{fontSize:8,color:muted}}>To</span>
                           <span style={{fontSize:8,color:amber,fontFamily:mono}}>{entry.yrTo} (age {ageTo})</span>
                         </div>
-                        <input type="range" min={BASE.startYear} max={2055} step={1} value={entry.yrTo}
-                          onChange={e=>{const v=parseInt(e.target.value);setFcfSchedule(s=>s.map((x,j)=>j===ei?{...x,yrTo:v,yrFrom:Math.min(x.yrFrom,v)}:x));}}
-                          style={{width:"100%",accentColor:amber,cursor:"pointer",height:4}}/>
+                        {numField(entry.yrTo,v=>setFcfSchedule(s=>s.map((x,j)=>j===ei?{...x,yrTo:v,yrFrom:Math.min(x.yrFrom,v)}:x)),
+                          BASE.startYear,2055,1,{plain:true,fontSize:9})}
                       </div>
                     </div>
                     <div>
@@ -4096,9 +4125,8 @@ export default function App(){
                         <span style={{fontSize:8,color:muted}}>Floor</span>
                         <span style={{fontSize:8,color:green,fontFamily:mono}}>${entry.floor.toLocaleString()}/mo</span>
                       </div>
-                      <input type="range" min={300} max={5000} step={100} value={entry.floor}
-                        onChange={e=>setFcfSchedule(s=>s.map((x,j)=>j===ei?{...x,floor:parseInt(e.target.value)}:x))}
-                        style={{width:"100%",accentColor:green,cursor:"pointer",height:4}}/>
+                      {numField(entry.floor,v=>setFcfSchedule(s=>s.map((x,j)=>j===ei?{...x,floor:v}:x)),
+                        300,5000,100,{prefix:"$",color:green,fontSize:9,showRange:true})}
                       <div style={{display:"flex",justifyContent:"space-between",fontSize:7,color:dim,marginTop:2}}>
                         <span>lean</span>
                         <span style={{color:entry.floor>=3000?amber:dim}}>{entry.floor>=3000?"🎉 whooping it up":entry.floor>=1500?"comfortable":"lean"}</span>
@@ -4124,7 +4152,7 @@ export default function App(){
                 <span style={{fontSize:9,color:dim}}>Keep as extra lifestyle vs. sweep</span>
                 <span style={{fontSize:9,color:dim}}>{lifestyleSplit}% keep / {100-lifestyleSplit}% sweep</span>
               </div>
-              {slider("% of surplus above floor to keep",lifestyleSplit,setLifestyleSplit,0,100,5,v=>`${v}% extra lifestyle / ${100-v}% sweep`)}
+              {slider("% of surplus above floor to keep",lifestyleSplit,setLifestyleSplit,0,100,5,v=>`${v}% extra lifestyle / ${100-v}% sweep`,{suffix:"%",testId:"lifestyle-split"})}
               <div style={{fontSize:9,color:dim,marginTop:4,display:"flex",justifyContent:"space-between"}}>
                 <span style={{color:lifestyleSplit<=20?red:dim}}>0% = max sweep</span>
                 <span style={{color:lifestyleSplit>=80?amber:dim}}>100% = keep it all</span>
@@ -4135,12 +4163,12 @@ export default function App(){
               <div style={{fontSize:8,color:dim,marginBottom:6}}>
                 Sweep redirects to long-term savings. Same dial — now controls save-aggressively vs. live-more.
               </div>
-              {slider("Grace period (whoop it up first)",sweepDelay||0,setSweepDelay,0,24,1,v=>v===0?"Redirect immediately":v===1?"1 month":""+v+" months")}
+              {slider("Grace period (whoop it up first)",sweepDelay||0,setSweepDelay,0,24,1,v=>v===0?"Redirect immediately":v===1?"1 month":""+v+" months",{suffix:" mo",testId:"sweep-grace"})}
             </div>
 
             {/* Table range */}
             {sect("Table View")}
-            {slider("Months to show",wfMonths,setWfMonths,12,120,6,v=>v+" months ("+(v/12).toFixed(1)+" yrs)")}
+            {slider("Months to show",wfMonths,setWfMonths,12,120,6,v=>v+" months ("+(v/12).toFixed(1)+" yrs)",{suffix:" mo"})}
           </div>
 
           {/* RIGHT: Charts + table */}

@@ -20,35 +20,32 @@ async function clickTab(page, label) {
   await page.waitForTimeout(300);
 }
 
+// v5.17.0: sliders are typed NumberFields now -- type the DISPLAY value
+// (same as the raw value for every field these helpers are used on), then
+// Enter to commit (fields commit on Enter/blur only, never per keystroke).
+async function typeInField(input, value) {
+  await input.scrollIntoViewIfNeeded();
+  await input.fill(String(value));
+  await input.press('Enter');
+  await input.blur();
+}
+
+// Field by label: label span -> the slider() helper's outer wrapper
+// (ancestor::div[2]) -> its one text input. (Was a range input located by a
+// fuzzy `near` heuristic, which could grab the wrong control far down a long
+// sidebar -- see the v4.2.0 journal.)
+function fieldByLabel(page, labelText) {
+  return page.locator('span', { hasText: labelText }).first()
+    .locator('xpath=ancestor::div[2]').locator('input[type="text"]').first();
+}
+
 async function setSlider(page, labelText, value) {
-  const slider = page.locator(`input[type="range"]`)
-    .filter({ near: page.getByText(labelText, { exact: false }) }).first();
-  await slider.evaluate((el, val) => {
-    el.value = val;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }, String(value));
+  await typeInField(fieldByLabel(page, labelText), value);
   await page.waitForTimeout(200);
 }
 
-// setSlider's `near` heuristic can grab the wrong slider when several sit
-// close together on a long scrollable tab (confirmed empirically -- see
-// v4.2.0 journal). This walks the DOM structure explicitly instead: exact
-// label span -> its row div's parent (the slider() helper's outer wrapper)
-// -> the one input[type=range] inside it. Also uses the native value-setter
-// bypass so the dispatched 'input' event isn't swallowed by React's
-// controlled-input value tracker (a plain `el.value=val` primes the
-// tracker to think nothing changed, so the following dispatched event is a
-// no-op).
 async function setSliderExact(page, exactLabelText, value) {
-  const label = page.locator('span', { hasText: exactLabelText }).first();
-  const slider = label.locator('xpath=ancestor::div[2]').locator('input[type="range"]').first();
-  await slider.evaluate((el, val) => {
-    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
-    desc.set.call(el, val);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }, String(value));
+  await typeInField(fieldByLabel(page, exactLabelText), value);
   await page.waitForTimeout(200);
 }
 
@@ -57,26 +54,46 @@ async function setSliderExact(page, exactLabelText, value) {
 test.describe('Group A — Core Engine Correctness', () => {
 
   test('A1 — Sweep 0% keep: debt clears earlier, avg sweep UP, interest DOWN', async ({ page }) => {
+    // v5.17.0 rewrite: under the current defaults there's almost no surplus
+    // above the floor (keep 0% vs 100% moves total sweep by ~$437 over the
+    // whole horizon -- the badges round it to $0), so the old single-setting
+    // check only ever passed because the fuzzy `near` slider helper moved some
+    // OTHER slider. Now: create real surplus first (every Work Income Curve
+    // point at $8,000/mo), then compare 0% keep against 100% keep.
     await loadApp(page);
+    const section = page.locator('text=Work Income Curve').locator('xpath=ancestor::div[3]');
+    const textInputs = section.locator('input[type="text"]');
+    const n = await textInputs.count();
+    for (let i = 1; i < n; i += 2) {           // [year, value] per point -- value inputs are the odd ones
+      await textInputs.nth(i).fill('8000');
+      await textInputs.nth(i).blur();
+      await page.waitForTimeout(100);
+    }
 
-    const baselineClear = await page.locator('div').filter({ hasText: /^HI debt clear$/ })
+    const badge = re => page.locator('div').filter({ hasText: re })
       .locator('xpath=following-sibling::div').first().textContent();
+    const parseNum = s => parseFloat((s || '').replace(/[^0-9.]/g, '')) || 0;
+    const readAt = async keep => {
+      await clickTab(page, 'Cash Flow');
+      await page.waitForSelector('text=Waterfall Buckets');
+      await setSlider(page, '% of surplus above floor to keep', keep);
+      await page.waitForTimeout(400);
+      const sweep = await badge(/^Avg sweep yr1$/);
+      const interest = await badge(/^Total interest paid$/);
+      await clickTab(page, 'Simulator');
+      const clear = await badge(/^HI debt clear$/);
+      return { sweep, interest, clear };
+    };
 
-    await clickTab(page, 'Cash Flow');
-    await page.waitForSelector('text=Waterfall Buckets');
-    await setSlider(page, '% of surplus above floor to keep', 0);
-    await page.waitForTimeout(400);
+    const keep100 = await readAt(100);
+    const keep0 = await readAt(0);
+    console.log(`  keep 100%: ${JSON.stringify(keep100)}`);
+    console.log(`  keep   0%: ${JSON.stringify(keep0)}`);
 
-    const sweepBadge = await page.locator('div').filter({ hasText: /^Avg sweep yr1$/ })
-      .locator('xpath=following-sibling::div').first().textContent();
-    const interestBadge = await page.locator('div').filter({ hasText: /^Total interest paid$/ })
-      .locator('xpath=following-sibling::div').first().textContent();
-
-    console.log(`  Baseline clear: ${baselineClear}`);
-    console.log(`  Avg sweep yr1: ${sweepBadge} | Total interest: ${interestBadge}`);
-
-    expect(sweepBadge).not.toBe('$0/mo');
-    expect(interestBadge).toMatch(/\$\d/);
+    expect(keep0.sweep).not.toBe('$0/mo');                                  // avg sweep UP
+    expect(parseNum(keep0.sweep)).toBeGreaterThan(parseNum(keep100.sweep));
+    expect(parseNum(keep0.interest)).toBeLessThan(parseNum(keep100.interest)); // interest DOWN
+    expect(parseNum(keep0.clear)).toBeLessThan(parseNum(keep100.clear));       // debt clears earlier
   });
 
   test('A2 — FCF chart at 0% keep: green line flat at floor, blue dashed high', async ({ page }) => {
@@ -97,16 +114,8 @@ test.describe('Group A — Core Engine Correctness', () => {
     await clickTab(page, 'Cash Flow');
     await page.waitForSelector('text=Waterfall Buckets');
 
-    // Move slider to 100 via JS evaluate directly on the correct input
-    const splitSlider = page.locator('input[type="range"]').filter({
-      near: page.getByText('% of surplus above floor to keep', { exact: false })
-    }).first();
-    await splitSlider.evaluate(el => {
-      el.value = 100;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    await page.waitForTimeout(600);
+    await setSlider(page, '% of surplus above floor to keep', 100);
+    await page.waitForTimeout(400);
 
     // Read the sweep badge — at 100% keep, avg sweep should drop significantly
     const sweepBadge = await page.locator('div').filter({ hasText: /^Avg sweep yr1$/ })
@@ -319,13 +328,7 @@ test.describe('Group B — Chart Display', () => {
     await card.scrollIntoViewIfNeeded();
     await card.locator('[data-testid="mode-toggle-fifteenth"]').getByRole('button', { name: 'Sell', exact: true }).click();
     await page.waitForTimeout(200);
-    const yearSlider = page.locator('[data-testid="sale-year-slider-fifteenth"] input[type="range"]');
-    await yearSlider.evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, '2028');
+    await typeInField(page.locator('[data-testid="sale-year-slider-fifteenth"] input'), 2028);
     await page.waitForTimeout(150);
     // v5.16.0: month toggle (was Q2 -- same April date)
     await page.locator('[data-testid="sale-month-toggle-fifteenth"]').getByRole('button', { name: 'Apr', exact: true }).click();
@@ -687,10 +690,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.16.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.17.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.16.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.16.0');
+    await expect(page.locator('text=v5.17.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.17.0');
   });
 
 });
@@ -708,13 +711,7 @@ test.describe('Group F — v2.9.1 Features', () => {
 
     await clickTab(page, 'Cash Flow');
     // Set lifestyle split to 0% keep (all swept)
-    const splitSlider = page.locator('input[type="range"]').nth(9);
-    await splitSlider.evaluate(el => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(el, '0');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    await typeInField(page.getByTestId('lifestyle-split'), 0);
     await page.waitForTimeout(400);
     await clickTab(page, 'Simulator');
     const nwAt0 = await page.locator('div').filter({ hasText: /^Net worth yr 10$/ })
@@ -1076,7 +1073,9 @@ test.describe('Group J — Liquidation NW Toggle', () => {
     await loadApp(page);
     // Slider label: "15th St (duplex) basis"
     await expect(page.locator('text=/15th St.*basis/i')).toBeVisible();
-    await setSlider(page, '15th St', 400000);
+    // v5.17.0: was setSlider(page, '15th St', ...) -- a fuzzy `near` match with no real
+    // basis slider behind it; now targets the 15th St property-value field explicitly.
+    await typeInField(page.getByTestId('prop-value-fifteenth'), 400000);
     await page.waitForTimeout(300);
     // Liq NW should change after basis change
     await page.locator('button', { hasText: 'liq' }).first().click();
@@ -1147,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.16.0', async ({ page }) => {
+  test('L1 — Version header shows v5.17.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.16.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.16.0 confirmed');
+    await expect(page.locator('text=v5.17.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.17.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1205,13 +1204,9 @@ test.describe('Group L — Regression', () => {
 
 test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
 
+  // v5.17.0: typed field (was a range input) -- type + Enter
   async function setRange(locator, value) {
-    await locator.evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, String(value));
+    await typeInField(locator, value);
   }
 
   async function addSegment(page, propId, unitId) {
@@ -1226,7 +1221,7 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     await card.scrollIntoViewIfNeeded();
     await card.locator(`[data-testid="mode-toggle-${propId}"]`).getByRole('button', { name: 'Sell', exact: true }).click();
     await page.waitForTimeout(200);
-    await setRange(page.locator(`[data-testid="sale-year-slider-${propId}"] input[type="range"]`), year);
+    await setRange(page.locator(`[data-testid="sale-year-slider-${propId}"] input`), year);
     await page.waitForTimeout(150);
     if (quarter) {
       // v5.16.0: month toggle -- the quarter arg maps to its first month (same date as before)
@@ -2207,13 +2202,9 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
   ];
 
   // Local copies -- Group R's sellProperty/setRange are scoped to that describe block.
+  // v5.17.0: typed field (was a range input) -- type + Enter
   async function setRange(locator, value) {
-    await locator.evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, String(value));
+    await typeInField(locator, value);
   }
 
   async function sellProperty(page, propId, year, quarter) {
@@ -2221,7 +2212,7 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     await card.scrollIntoViewIfNeeded();
     await card.locator(`[data-testid="mode-toggle-${propId}"]`).getByRole('button', { name: 'Sell', exact: true }).click();
     await page.waitForTimeout(200);
-    await setRange(page.locator(`[data-testid="sale-year-slider-${propId}"] input[type="range"]`), year);
+    await setRange(page.locator(`[data-testid="sale-year-slider-${propId}"] input`), year);
     await page.waitForTimeout(150);
     if (quarter) {
       // v5.16.0: month toggle -- the quarter arg maps to its first month (same date as before)
@@ -2236,7 +2227,11 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     await page.locator('input[placeholder*="Name this scenario"]').fill('Alpha Scenario');
     await page.locator('button', { hasText: 'Pin' }).click();
     await page.waitForTimeout(300);
+    // v5.17.0: this field lives on the Cash Flow tab -- the old fuzzy `near`
+    // range lookup silently moved some other Simulator-tab slider instead.
+    await clickTab(page, 'Cash Flow');
     await setSlider(page, '% of surplus above floor to keep', 100);
+    await clickTab(page, 'Simulator');
     await page.waitForTimeout(300);
     await page.locator('input[placeholder*="Name this scenario"]').fill('Beta Scenario');
     await page.locator('button', { hasText: 'Pin' }).click();
@@ -2288,15 +2283,7 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     // setSlider's proximity-based lookup can grab the wrong control this far down a long
     // sidebar (it once matched a property-value slider instead) -- walk the DOM structure
     // (label span -> row div -> sibling input) for a control that's guaranteed correct.
-    const drawSlider = page.locator('span', { hasText: 'One-time draw ($, at sale)' }).first()
-      .locator('xpath=ancestor::div[2]/input[@type="range"]');
-    await drawSlider.scrollIntoViewIfNeeded();
-    await drawSlider.evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, '100000');
+    await typeInField(page.getByTestId('settle-draw-amount'), 100000);
     await page.waitForTimeout(300);
 
     const result = await page.evaluate(() => {
@@ -2373,15 +2360,7 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
 
     // Bump the grace period and re-check the same contract holds either way.
     await clickTab(page, 'Cash Flow');
-    const graceLabel = page.getByText('Grace period', { exact: false }).first();
-    await graceLabel.scrollIntoViewIfNeeded();
-    const graceSlider = graceLabel.locator('xpath=ancestor::div[2]//input[@type="range"]').first();
-    await graceSlider.evaluate((el) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, '18');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    await typeInField(page.getByTestId('sweep-grace'), 18);
     await page.waitForTimeout(300);
 
     const check2 = await page.evaluate(() => window.__chartMarkers);
@@ -2402,15 +2381,7 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     // further changes, so the pin's paramSnapshot/rows are for the identical
     // scenario S3 already proved is leak-free on the live path.
     await sellProperty(page, 'fifteenth', 2026, 2);
-    const drawSlider = page.locator('span', { hasText: 'One-time draw ($, at sale)' }).first()
-      .locator('xpath=ancestor::div[2]/input[@type="range"]');
-    await drawSlider.scrollIntoViewIfNeeded();
-    await drawSlider.evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, '100000');
+    await typeInField(page.getByTestId('settle-draw-amount'), 100000);
     await page.waitForTimeout(300);
 
     await page.locator('input[placeholder*="Name this scenario"]').fill('Draw Parity Test');
@@ -3250,14 +3221,9 @@ test.describe('Group X — v5.3.0 Sticky Horizontal Scrollbar', () => {
 
 test.describe('Group Y — v5.10.0 Chart Zoom / Quarterly Resolution', () => {
 
+  // v5.17.0: zoom From/To are typed fields (were range inputs) -- type + Enter
   async function setRangeSlider(page, testId, value) {
-    const slider = page.getByTestId(testId);
-    await slider.evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, String(value));
+    await typeInField(page.getByTestId(testId), value);
     await page.waitForTimeout(200);
   }
 
@@ -3566,14 +3532,9 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
 test.describe('Group AB — v5.13.0 NW LI Loans / Cumulative Chart Fixes', () => {
 
   // Same as Group Y's scoped helper (not visible outside that describe)
+  // v5.17.0: zoom From/To are typed fields (were range inputs) -- type + Enter
   async function setRangeSlider(page, testId, value) {
-    const slider = page.getByTestId(testId);
-    await slider.evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, String(value));
+    await typeInField(page.getByTestId(testId), value);
     await page.waitForTimeout(200);
   }
 
@@ -3815,12 +3776,7 @@ test.describe('Group AE — v5.16.0 Month-Level Sale Dates', () => {
     await card.scrollIntoViewIfNeeded();
     await card.locator('[data-testid="mode-toggle-sixth"]').getByRole('button', { name: 'Sell', exact: true }).click();
     await page.waitForTimeout(200);
-    await page.locator('[data-testid="sale-year-slider-sixth"] input[type="range"]').evaluate((el, val) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, '2026');
+    await typeInField(page.locator('[data-testid="sale-year-slider-sixth"] input'), 2026);
     await page.waitForTimeout(150);
     await page.locator('[data-testid="sale-month-toggle-sixth"]').getByRole('button', { name: 'Dec', exact: true }).click();
     await page.waitForTimeout(400);
@@ -3908,6 +3864,129 @@ test.describe('Group AE — v5.16.0 Month-Level Sale Dates', () => {
     console.log('  AE2 pins — ' + JSON.stringify(pins));
     expect(pins.fields).toBeGreaterThan(50);
     expect(pins.diffs).toBe(0);
+  });
+
+});
+
+// ─── Group AF: v5.17.0 Typed number fields (sliders retired) ────────────────
+// NumberField commits on Enter/blur only (Esc reverts), clamps to the old
+// slider min/max with a brief hint, nudges by the old step on Up/Down (Shift
+// = 10x), and never re-runs the sim on intermediate keystrokes. Driven via
+// the One-Time Obligation Amount field (default $525,000, range $262,500 -
+// $787,500, step $5,000) -- window.__wfData's identity changes only when the
+// engine re-runs.
+test.describe('Group AF — v5.17.0 Typed Number Fields', () => {
+
+  const amount = page => page.getByTestId('obligation-amount');
+  const markWf = page => page.evaluate(() => { window.__wfMark = window.__wfData; });
+  const wfChanged = page => page.evaluate(() => window.__wfMark !== window.__wfData);
+
+  test('AF1 — typing a value + Enter commits it (formatted display, readout, sim re-runs)', async ({ page }) => {
+    await loadApp(page);
+    await expect(page.locator('input[type="range"]')).toHaveCount(0);   // no sliders left
+    await markWf(page);
+    await amount(page).scrollIntoViewIfNeeded();
+    await amount(page).fill('600000');
+    await amount(page).press('Enter');
+    await page.waitForTimeout(200);
+    expect(await wfChanged(page)).toBe(true);
+    await amount(page).blur();
+    await expect(amount(page)).toHaveValue('$600,000');
+    // slider() wrapper = field's NumberField div's parent; its label row keeps the old readout
+    await expect(amount(page).locator('xpath=ancestor::div[2]')).toContainText('$600K');
+  });
+
+  test('AF2 — Esc reverts to the last committed value without re-running the sim', async ({ page }) => {
+    await loadApp(page);
+    await amount(page).scrollIntoViewIfNeeded();
+    await markWf(page);
+    await amount(page).fill('700000');
+    await amount(page).press('Escape');
+    await page.waitForTimeout(200);
+    await expect(amount(page)).toHaveValue('$525,000');
+    expect(await wfChanged(page)).toBe(false);
+  });
+
+  test('AF3 — out-of-range input clamps to the old slider bounds and shows a hint', async ({ page }) => {
+    await loadApp(page);
+    await amount(page).scrollIntoViewIfNeeded();
+    await amount(page).fill('9999999');
+    await amount(page).press('Enter');
+    await expect(page.getByTestId('obligation-amount-hint')).toContainText('max $787,500');
+    await amount(page).blur();
+    await expect(amount(page)).toHaveValue('$787,500');
+    await amount(page).fill('100');
+    await amount(page).press('Enter');
+    await expect(page.getByTestId('obligation-amount-hint')).toContainText('min $262,500');
+    await amount(page).blur();
+    await expect(amount(page)).toHaveValue('$262,500');
+  });
+
+  test('AF4 — ArrowUp nudges by the step, Shift+ArrowUp by 10x the step; each nudge commits', async ({ page }) => {
+    await loadApp(page);
+    await amount(page).scrollIntoViewIfNeeded();
+    await amount(page).focus();
+    await markWf(page);
+    await amount(page).press('ArrowUp');
+    await page.waitForTimeout(150);
+    expect(await wfChanged(page)).toBe(true);
+    await expect(amount(page)).toHaveValue('530000');        // raw while focused
+    await amount(page).press('Shift+ArrowUp');
+    await amount(page).press('ArrowDown');
+    await amount(page).blur();
+    await expect(amount(page)).toHaveValue('$575,000');      // 525K +5K +50K -5K
+  });
+
+  test('AF5 — intermediate digits do not change the sim until commit', async ({ page }) => {
+    await loadApp(page);
+    await amount(page).scrollIntoViewIfNeeded();
+    await amount(page).click();
+    await amount(page).press('Control+a');
+    await markWf(page);
+    await amount(page).pressSequentially('6000', { delay: 30 });
+    await page.waitForTimeout(200);
+    expect(await wfChanged(page)).toBe(false);               // "6", "60", "600", "6000" -- no re-run, no clamp
+    await expect(amount(page)).toHaveValue('6000');
+    await amount(page).pressSequentially('00', { delay: 30 });
+    expect(await wfChanged(page)).toBe(false);
+    await amount(page).press('Enter');
+    await page.waitForTimeout(200);
+    expect(await wfChanged(page)).toBe(true);
+    await amount(page).blur();
+    await expect(amount(page)).toHaveValue('$600,000');
+  });
+
+  test('AF6 — invalid or empty input reverts (never writes NaN)', async ({ page }) => {
+    await loadApp(page);
+    await amount(page).scrollIntoViewIfNeeded();
+    await markWf(page);
+    await amount(page).fill('abc');
+    await amount(page).press('Enter');
+    await amount(page).fill('');
+    await amount(page).blur();
+    await page.waitForTimeout(200);
+    await expect(amount(page)).toHaveValue('$525,000');
+    expect(await wfChanged(page)).toBe(false);
+    const nanRows = await page.evaluate(() => (window.__wfData || []).filter(r => Number.isNaN(r.hiDebt) || Number.isNaN(r.disc)).length);
+    expect(nanRows).toBe(0);
+  });
+
+  test('AF7 — scaled field: personal-use share is typed in percent, stored as a fraction', async ({ page }) => {
+    await loadApp(page);
+    await typeInField(page.getByTestId('personal-use-field-fifteenth'), 75);
+    await page.waitForTimeout(200);
+    await expect(page.getByTestId('personal-use-field-fifteenth')).toHaveValue('75%');
+    await expect(page.getByTestId('personal-use-fifteenth')).toContainText('75%');
+  });
+
+  test('AF8 — month pickers are Jan-Dec buttons (Your SS start month)', async ({ page }) => {
+    await loadApp(page);
+    const row = page.getByTestId('ss-start-month');
+    await row.scrollIntoViewIfNeeded();
+    await row.getByRole('button', { name: 'Mar', exact: true }).click();
+    await page.waitForTimeout(200);
+    const readout = row.locator('xpath=following-sibling::div[1]');
+    await expect(readout).toContainText('Mar');
   });
 
 });
