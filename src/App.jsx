@@ -1,3 +1,17 @@
+// v5.14.0 -- Escrow / title / recording costs on property sales (handoff
+// 2026-10-24, Part B). New per-property hold.closingCostFlat ($; default
+// $5,000 for 15th St and Lafayette, $0 for 6th St -- its 5% agent-net-sheet
+// rate already includes title/closing, so a flat line would double-count).
+// disposeAsset subtracts it once per sale: netSale = gross - commission% -
+// flat, so it lowers after-tax proceeds AND taxable gain (except where
+// sellingCostsInBasis -- 6th St -- already embeds closing costs in basis).
+// The % line is relabeled "Commission & concessions" and is now editable per
+// property in the Disposition block (stored as hold.sellingCostsPct; shows
+// the DISPO_DEFAULTS global until moved). Liquidation NW (live + pins) drops
+// the hardcoded BASE.sellingCosts (0.05, retired) and uses each property's
+// own % + flat instead -- rentals go 5% -> 6% + $5K. Breakdown, Defaults-tab
+// audit and Glossary (NW, Sale Proceeds) updated.
+//
 // v5.13.0 -- session-44 open items:
 // (1) Net Worth now subtracts LI loan balances (loans[]) -- book NW
 // (aggregateMonthlyToPeriod, engine.js; pins inherit it) and liquidation NW
@@ -591,7 +605,6 @@ const DEFAULTS_REGISTRY = [
   ]},
   {group:"Liquidation-View Constants", items:[
     ["BASE.marriedExcl","§121 married exclusion $"],
-    ["BASE.sellingCosts","Selling costs (liq view, fraction)"],
     ["BASE.fedCapGains","Fed cap gains (liq view)"],
     ["BASE.coCapGains","CO cap gains (liq view)"],
   ]},
@@ -627,7 +640,7 @@ const DEFAULTS_REGISTRY = [
     ["DISPO_DEFAULTS.recaptureRate","§1250 recapture"],
     ["DISPO_DEFAULTS.coTaxRate","CO flat"],
     ["DISPO_DEFAULTS.caClawbackRate","CA clawback"],
-    ["DISPO_DEFAULTS.sellingCostsPct","Selling costs (dispositions)"],
+    ["DISPO_DEFAULTS.sellingCostsPct","Commission & concessions (dispositions, global default)"],
     ["DISPO_DEFAULTS.forcedSaleDiscount","Forced-sale discount"],
     // v5.6.0: was a scenario param (p.caGainCap) with NO UI anywhere -- see
     // DISPO_DEFAULTS.caGainCap's comment in engine.js.
@@ -806,7 +819,12 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
 
   // Liquidation NW constants
   const _CGRATE = BASE.fedCapGains + BASE.coCapGains; // 0.282
-  const _SCOST  = BASE.sellingCosts;                  // 0.05
+  // v5.14.0: was a flat BASE.sellingCosts (0.05) for every property, separate
+  // from the disposition math -- now each property's own commission % (the
+  // per-property override, else the DISPO_DEFAULTS global) plus its flat
+  // escrow/title/recording $, matching disposeAsset's netSale.
+  const liqSaleNet = (prop, pv) =>
+    pv*(1-(prop?.hold?.sellingCostsPct ?? DISPO_DEFAULTS.sellingCostsPct)) - (prop?.hold?.closingCostFlat||0);
   const _liqPropById = Object.fromEntries((liveParams.properties||[]).map(pr=>[pr.id,pr]));
   const _liqReApp     = liveParams.reAppreciation;
   const _liqSixthYr = _liqPropById.sixth?.hold.mode    ==='keep' ? Infinity : (_liqPropById.sixth?.hold.year    || 2055);
@@ -882,7 +900,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
       if(sixthOwned){
         const pv=(_liqPropById.sixth?.value||0)*app;
         const pb=r.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
-        const sn=pv*(1-_SCOST);
+        const sn=liqSaleNet(_liqPropById.sixth,pv);
         const taxable=Math.max(0,Math.max(0,sn-(_liqPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
         primNet=sn-pb-taxable*_CGRATE;
       }
@@ -890,14 +908,14 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
       if(dupOwned){
         const dv=(_liqPropById.fifteenth?.value||0)*app;
         const db=r.dplxBalRaw ?? 0;
-        const dsn=dv*(1-_SCOST);
+        const dsn=liqSaleNet(_liqPropById.fifteenth,dv);
         dplxNet=dsn-db-Math.max(0,dsn-(_liqPropById.fifteenth?.hold.basis||0))*_CGRATE;
       }
       let lafNet=0;
       if(lafOwned){
         const lv=(_liqPropById.barberry?.value||0)*app;
         const lb=r.lafBalRaw ?? 0;
-        const lsn=lv*(1-_SCOST);
+        const lsn=liqSaleNet(_liqPropById.barberry,lv);
         lafNet=lsn-lb-Math.max(0,lsn-(_liqPropById.barberry?.hold.basis||0))*_CGRATE;
       }
       pt.liqNW=(primNet+dplxNet+lafNet+r.invested*1000+savAccRaw-r.hiDebtRaw-(r.loansBalRaw||0))/1e6;   // v5.13.0: - LI loans
@@ -927,7 +945,8 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
         const pSnap=pin.paramSnapshot||{};
         const pElapsedYears = (pr?.cal ?? r.cal) - BASE.startYear;
         const pApp=Math.pow(1+(pSnap.reApp??4)/100,pElapsedYears);
-        const pPropById = Object.fromEntries((pSnap.properties||freshPropertiesDefaults()).map(pr2=>[pr2.id,pr2]));
+        // v5.14.0: merged so a pin saved before closingCostFlat existed backfills it
+        const pPropById = Object.fromEntries(mergeProperties(pSnap.properties).map(pr2=>[pr2.id,pr2]));
         const pSixthYr = pPropById.sixth?.hold.mode    ==='keep' ? Infinity : (pPropById.sixth?.hold.year    || 2055);
         const pDupYr   = pPropById.fifteenth?.hold.mode==='keep' ? Infinity : (pPropById.fifteenth?.hold.year|| 2055);
         const pLafYr   = pPropById.barberry?.hold.mode ==='keep' ? Infinity : (pPropById.barberry?.hold.year || 2055);
@@ -938,7 +957,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
         if(pSixthOwned){
           const pv=(pPropById.sixth?.value||0)*pApp;
           const pb=pr?.primBalRaw ?? 0;   // v3.4.0 IO/recast state balance
-          const sn=pv*(1-_SCOST);
+          const sn=liqSaleNet(pPropById.sixth,pv);
           const taxable=Math.max(0,Math.max(0,sn-(pPropById.sixth?.hold.basis||0))-BASE.marriedExcl);
           pPrimNet=sn-pb-taxable*_CGRATE;
         }
@@ -946,14 +965,14 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
         if(pDupOwned){
           const dv=(pPropById.fifteenth?.value||0)*pApp;
           const db=pr?.dplxBalRaw ?? 0;
-          const dsn=dv*(1-_SCOST);
+          const dsn=liqSaleNet(pPropById.fifteenth,dv);
           pDplxNet=dsn-db-Math.max(0,dsn-(pPropById.fifteenth?.hold.basis||0))*_CGRATE;
         }
         let pLafNet=0;
         if(pLafOwned){
           const lv=(pPropById.barberry?.value||0)*pApp;
           const lb=pr?.lafBalRaw ?? 0;
-          const lsn=lv*(1-_SCOST);
+          const lsn=liqSaleNet(pPropById.barberry,lv);
           pLafNet=lsn-lb-Math.max(0,lsn-(pPropById.barberry?.hold.basis||0))*_CGRATE;
         }
         const pInvested=(pr?.invested??0)*1000;
@@ -1222,6 +1241,9 @@ export default function App(){
   // v4.2.1 property value slider top-end anchored to each property's *default* value (not its
   // live/current value) so the range stays fixed while dragging instead of receding as you approach it.
   const defaultPropValueById = useMemo(()=>Object.fromEntries(freshPropertiesDefaults().map(p=>[p.id,p.value])),[]);
+  // v5.14.0: display fallback for a saved scenario predating hold.closingCostFlat --
+  // the engine already backfills it via makeParams/mergeProperties, so the UI must show the same value.
+  const defaultClosingFlatById = useMemo(()=>Object.fromEntries(freshPropertiesDefaults().map(p=>[p.id,p.hold.closingCostFlat||0])),[]);
   // CF waterfall state now in sc object (see setSc setters above)
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
   const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Costs columns in month table
@@ -1321,8 +1343,8 @@ export default function App(){
     for(const {k,d} of settleData.sellers){
       if(d.mode==='full_1031') continue;
       const preTax = d.mode==='partial_1031' ? (d.cashBoot||0) : d.netSale - d.mortgagePayoff;
-      if(Math.abs((d.grossPrice - d.sellingCosts) - d.netSale) > 1)
-        console.warn(`[obligation audit] ${k}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts ($${Math.round(d.grossPrice - d.sellingCosts)})`);
+      if(Math.abs((d.grossPrice - d.sellingCosts - (d.closingCostFlat||0)) - d.netSale) > 1)
+        console.warn(`[obligation audit] ${k}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts - closingCostFlat ($${Math.round(d.grossPrice - d.sellingCosts - (d.closingCostFlat||0))})`);
       if(Math.abs((preTax - d.totalTax) - d.afterTaxNetProceeds) > 1)
         console.warn(`[obligation audit] ${k}: displayed after-tax ($${Math.round(d.afterTaxNetProceeds)}) != pre-tax - totalTax ($${Math.round(preTax - d.totalTax)}) -- UI drifting from disposeAsset`);
     }
@@ -1353,8 +1375,8 @@ export default function App(){
     for(const prop of properties){
       const d = dr[prop.id];
       if(!d || !d.mode || d.mode==='keep') continue;
-      if(Math.abs((d.grossPrice - d.sellingCosts) - d.netSale) > 1)
-        console.warn(`[dispo breakdown] ${prop.id}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts ($${Math.round(d.grossPrice - d.sellingCosts)})`);
+      if(Math.abs((d.grossPrice - d.sellingCosts - (d.closingCostFlat||0)) - d.netSale) > 1)
+        console.warn(`[dispo breakdown] ${prop.id}: netSale ($${Math.round(d.netSale)}) != grossPrice - sellingCosts - closingCostFlat ($${Math.round(d.grossPrice - d.sellingCosts - (d.closingCostFlat||0))})`);
       if(d.mode==='full_1031') continue; // rolled, not cashed out -- afterTaxNetProceeds is deliberately 0, not preTax-totalTax
       const preTax = d.mode==='partial_1031' ? (d.cashBoot||0) : d.netSale - d.mortgagePayoff;
       if(Math.abs((preTax - d.totalTax) - d.afterTaxNetProceeds) > 1)
@@ -1752,7 +1774,8 @@ export default function App(){
             for 6th St, whose actual computation uses hold.sellingCostsPct
             (5%). d.sellingCostsPct is the ACTUAL rate disposeAsset applied
             (engine.js), so the label can never disagree with the math again. */}
-        {dispoRow(`Selling costs (${dispoPct(d.sellingCostsPct)})`, d.sellingCosts, "sub")}
+        {dispoRow(`Commission & concessions (${dispoPct(d.sellingCostsPct)})`, d.sellingCosts, "sub")}
+        {dispoRow("Escrow / title / recording", d.closingCostFlat||0, "sub")}
         {dispoRow("Net sale", d.netSale, "eq")}
         {dispoRow("Mortgage payoff", d.mortgagePayoff, "sub")}
         {dispoRow("Pre-tax proceeds", preTaxProceeds, "eq")}
@@ -2356,7 +2379,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.13.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.14.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2674,6 +2697,14 @@ export default function App(){
                           {v:'market',l:'Market'},{v:'forced',l:'Forced (-15%)',c:red}
                         ])}
                       </div>
+                      {/* v5.14.0: commission % (per-property; falls back to the DISPO_DEFAULTS
+                          global until moved, then stored as hold.sellingCostsPct) + flat
+                          escrow/title/recording $ -- both feed disposeAsset's netSale. */}
+                      {slider("Commission & concessions (%)",hold.sellingCostsPct ?? DISPO_DEFAULTS.sellingCostsPct,
+                        v=>setPropertyHold(prop.id,{sellingCostsPct:Math.round(v*10000)/10000}),0,0.10,0.0025,
+                        v=>(v*100).toFixed(2).replace(/\.?0+$/,"")+"%"+(hold.sellingCostsPct!=null?"":" (global)"))}
+                      {slider("Escrow / title / recording ($)",hold.closingCostFlat ?? defaultClosingFlatById[prop.id] ?? 0,
+                        v=>setPropertyHold(prop.id,{closingCostFlat:v}),0,25000,500,v=>"$"+Math.round(v).toLocaleString())}
                       {slider("Adjusted basis",hold.basis||0,v=>setPropertyHold(prop.id,{basis:v}),
                         Math.round((hold.basis||400000)*0.5),Math.round((hold.basis||400000)*1.5),5000,v=>"$"+Math.round(v/1000)+"K")}
                       {prop.isPrimary && slider("§121 exclusion",hold.sec121Exclusion||0,v=>setPropertyHold(prop.id,{sec121Exclusion:v}),0,500000,10000,v=>"$"+Math.round(v/1000)+"K")}
@@ -3064,7 +3095,7 @@ export default function App(){
             </div>
 
             {sect("Liquidation NW Basis")}
-            <div style={{fontSize:8,color:dim,marginBottom:8}}>Cost basis for the "liq" toggle on the NW chart now comes directly from each property's disposition basis (above) -- 5% selling costs + 28.2% cap gains on taxable gain; rentals get no exclusion, 6th St gets the $500K married exclusion.</div>
+            <div style={{fontSize:8,color:dim,marginBottom:8}}>Cost basis for the "liq" toggle on the NW chart now comes directly from each property's disposition basis (above) -- its commission & concessions % + flat escrow/title/recording $ + 28.2% cap gains on taxable gain; rentals get no exclusion, 6th St gets the $500K married exclusion.</div>
 
           </div>
         </div>
@@ -4378,7 +4409,8 @@ export default function App(){
           // disposition breakdown -- mirrored here too now, flagged when it
           // diverges from the global DISPO_DEFAULTS rate.
           const effSellPct = h.sellingCostsPct ?? DISPO_DEFAULTS.sellingCostsPct;
-          items.push(["Selling costs %", dispoPct(effSellPct) + (h.sellingCostsPct!=null ? " (override)" : " (global default)")]);
+          items.push(["Commission & concessions %", dispoPct(effSellPct) + (h.sellingCostsPct!=null ? " (override)" : " (global default)")]);
+          items.push(["Escrow / title / recording $", fmtUsd(h.closingCostFlat ?? defaultClosingFlatById[prop.id] ?? 0)]);   // v5.14.0
           items.push(["Selling costs in basis?", h.sellingCostsInBasis ? "Yes" : "No"]);
           items.push(["CPA est. tax", fmtUsd(h.cpaEstTax)]);
           items.push(["CPA net proceeds after tax", fmtUsd(h.cpaNetProceedsAfterTax)]);
@@ -4790,7 +4822,7 @@ export default function App(){
               {
                 term:"Net Worth: Book vs Liquidation",
                 short:"Two views, toggled on the Net Worth chart (book / liq)",
-                detail:"Book NW = value of properties still held (appreciated at the RE appreciation rate) + sweep savings, minus mortgage balances, HI debt, and LI loan balances. It does NOT deduct the cost of selling. Liquidation NW = what you'd actually net selling every property that period: value minus 5% selling costs, minus the mortgage, minus capital-gains tax (28.2% federal + NIIT + Colorado, after the $500K married exclusion on 6th St), plus sweep savings, minus HI debt and LI loans. On $3-4M of real estate the gap is several hundred thousand dollars. Book is the right number for tracking FI progress, since you aren't planning to sell everything at once; liq is the 'cash-out today' number.",
+                detail:"Book NW = value of properties still held (appreciated at the RE appreciation rate) + sweep savings, minus mortgage balances, HI debt, and LI loan balances. It does NOT deduct the cost of selling. Liquidation NW = what you'd actually net selling every property that period: value minus that property's commission & concessions % and its flat escrow/title/recording $ (same two lines as a modeled sale), minus the mortgage, minus capital-gains tax (28.2% federal + NIIT + Colorado, after the $500K married exclusion on 6th St), plus sweep savings, minus HI debt and LI loans. On $3-4M of real estate the gap is several hundred thousand dollars. Book is the right number for tracking FI progress, since you aren't planning to sell everything at once; liq is the 'cash-out today' number.",
                 tag:"Output",tagColor:green,
               },
               {
@@ -4820,7 +4852,7 @@ export default function App(){
               {
                 term:"One-Time Obligation & Sale Proceeds",
                 short:"Lump sums are routed debt-first -- unlike the monthly waterfall",
-                detail:"When a property sells or the One-Time Obligation comes due, the money is applied in that event's own quarter: the obligation/draw comes out first, then the remainder pays down HI debt (and closing-eligible LI loans) highest-rate-first, then tops up reserves and buffers, and anything left joins the normal sweep. This debt-first order applies ONLY to these one-time lump sums -- the ordinary monthly waterfall still fills buffers before sweeping debt. The one-time draw is reported separately so it doesn't spike the Free Cash Flow chart.",
+                detail:"When a property sells or the One-Time Obligation comes due, the money is applied in that event's own quarter: the obligation/draw comes out first, then the remainder pays down HI debt (and closing-eligible LI loans) highest-rate-first, then tops up reserves and buffers, and anything left joins the normal sweep. This debt-first order applies ONLY to these one-time lump sums -- the ordinary monthly waterfall still fills buffers before sweeping debt. The one-time draw is reported separately so it doesn't spike the Free Cash Flow chart. Each sale's proceeds = sale price minus two selling-cost lines -- Commission & concessions (a % of price: 6% global default, 5% for 6th St) and a flat Escrow / title / recording $ (default $5,000 per rental, $0 for 6th St, whose 5% already includes title/closing) -- minus the mortgage payoff and tax. Both cost lines also reduce the taxable gain, except on 6th St, whose basis already includes its closing costs.",
                 tag:"Model Logic",tagColor:dim,
               },
               {

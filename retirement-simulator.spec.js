@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.13.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.14.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.13.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.13.0');
+    await expect(page.locator('text=v5.14.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.14.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.13.0', async ({ page }) => {
+  test('L1 — Version header shows v5.14.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.13.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.13.0 confirmed');
+    await expect(page.locator('text=v5.14.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.14.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1562,7 +1562,7 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
       return cases.map(({ id, hold }) => {
         const rows = buildScenario(makeParams({ properties: [{ id, hold }] }));
         const d = rows.dispoResults[id];
-        const netSaleCheck = (d.grossPrice - d.sellingCosts) - d.netSale;
+        const netSaleCheck = (d.grossPrice - d.sellingCosts - (d.closingCostFlat || 0)) - d.netSale;   // v5.14.0: - flat
         // full_1031 is rolled, not cashed out -- afterTaxNetProceeds is deliberately 0 by
         // design (disposeAsset), not derivable from preTax-totalTax; skip that leg for it,
         // same exception the pre-existing "obligation audit" useEffect already carries.
@@ -1576,7 +1576,7 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     });
     console.log('  R13 — ' + JSON.stringify(result));
     for (const r of result) {
-      expect(Math.abs(r.netSaleCheck)).toBeLessThanOrEqual(1);   // netSale === gross - sellingCosts
+      expect(Math.abs(r.netSaleCheck)).toBeLessThanOrEqual(1);   // netSale === gross - sellingCosts - closingCostFlat
       expect(Math.abs(r.afterTaxCheck)).toBeLessThanOrEqual(1);  // afterTax === preTax - totalTax (n/a for full_1031)
     }
   });
@@ -1640,8 +1640,10 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
         // offset so this isolates the pure per-property disposition math --
         // matches the codebase's own dispoResultsNoOffset/CPA-comparison
         // convention (see App.jsx's "Reconciliation vs CPA" card).
+        // v5.14.0: closingCostFlat:0 isolates the v4.3.1 gain fix from the
+        // new flat escrow/title/recording line (covered by Group AC).
         const rows = buildScenario(makeParams({
-          properties: [{ id, hold: { mode: 'sell', year: 2026, quarter: 1 } }],
+          properties: [{ id, hold: { mode: 'sell', year: 2026, quarter: 1, closingCostFlat: 0 } }],
           obligation: { amount: 0 },
         }));
         const d = rows.dispoResults[id];
@@ -3608,6 +3610,69 @@ test.describe('Group AB — v5.13.0 NW LI Loans / Cumulative Chart Fixes', () =>
       expect(y).toBeGreaterThanOrEqual(base + 5);
       expect(y).toBeLessThanOrEqual(base + 9);
     }
+  });
+
+});
+
+// ─── Group AC: v5.14.0 Escrow / title / recording flat closing cost on sales ─
+test.describe('Group AC — v5.14.0 Flat Closing Cost on Sales', () => {
+
+  test('AC1 — flat $5,000 vs $0: net sale and taxable gain differ by exactly $5,000 (6th St gain unchanged)', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, aggregateMonthlyToAnnual, makeParams } = window.__engine;
+      const dispo = (id, flat) => {
+        const params = makeParams({
+          properties: [{ id, hold: { mode: 'sell', year: 2030, quarter: 2, closingCostFlat: flat } }],
+          obligation: { amount: 0 },
+        });
+        return aggregateMonthlyToAnnual(buildMonthlyScenario(params), params).dispoResults[id];
+      };
+      const diff = (id) => {
+        const a = dispo(id, 0), b = dispo(id, 5000);
+        return {
+          flatField: b.closingCostFlat,
+          netSale: Math.round(a.netSale - b.netSale),
+          realizedGain: Math.round(a.realizedGain - b.realizedGain),
+          recognizedGain: Math.round(a.recognizedGain - b.recognizedGain),
+          afterTax: Math.round(a.afterTaxNetProceeds - b.afterTaxNetProceeds),
+        };
+      };
+      return { fifteenth: diff('fifteenth'), barberry: diff('barberry'), sixth: diff('sixth') };
+    });
+    console.log('  AC1 — ' + JSON.stringify(result));
+    for (const id of ['fifteenth', 'barberry']) {
+      const r = result[id];
+      expect(r.flatField).toBe(5000);
+      expect(r.netSale).toBe(5000);
+      expect(r.realizedGain).toBe(5000);
+      expect(r.recognizedGain).toBe(5000);
+      // cash falls by $5K minus the tax the lower gain saves
+      expect(r.afterTax).toBeGreaterThan(0);
+      expect(r.afterTax).toBeLessThan(5000);
+    }
+    // 6th St: sellingCostsInBasis -- cash still nets the flat cost, gain does not
+    expect(result.sixth.netSale).toBe(5000);
+    expect(result.sixth.realizedGain).toBe(0);
+  });
+
+  test('AC2 — sale details show the commission % and escrow/title/recording fields + breakdown row', async ({ page }) => {
+    await loadApp(page);
+    const card = page.locator('[data-testid="property-fifteenth-card"]');
+    await card.scrollIntoViewIfNeeded();
+    await card.locator('[data-testid="mode-toggle-fifteenth"]').getByRole('button', { name: 'Sell', exact: true }).click();
+    await page.waitForTimeout(300);
+    await expect(card.locator('text=Commission & concessions (%)')).toBeVisible();
+    await expect(card.locator('text=Escrow / title / recording ($)')).toBeVisible();
+    await expect(card.locator('text=$5,000').first()).toBeVisible();
+
+    await page.locator('[data-testid="dispo-breakdown-toggle-fifteenth"]').click();
+    await page.waitForTimeout(200);
+    const text = await page.locator('[data-testid="dispo-breakdown-fifteenth"]').textContent();
+    console.log('  AC2 — breakdown: ' + text.slice(0, 160));
+    expect(text).toContain('Commission & concessions (6%)');
+    expect(text).toContain('Escrow / title / recording');
+    expect(text).not.toContain('Selling costs');
   });
 
 });

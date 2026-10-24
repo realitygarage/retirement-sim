@@ -58,7 +58,8 @@ export const BASE = {
   // recomputed from birth date every time overrides are applied.
   yourBirthYear:1961, yourBirthMonth:10,     // Bob: Oct 18 1961
   brendaBirthYear:1967, brendaBirthMonth:1,  // Brenda: Jan 19 1967
-  sellingCosts:0.05,   // liq-NW quick-calc constant (not the per-disposition sellingCostsPct)
+  // v5.14.0: sellingCosts (hardcoded 0.05 liq-NW constant) retired -- liq NW
+  // now uses each property's own hold.sellingCostsPct + hold.closingCostFlat.
   healthYouEricsson:839, healthYouMedicare:335, healthMedicareInflation:0.04,
   healthBrendaEricsson:839, healthBrendaMedicare:335, ericssonInflation:0.015,
   healthKids:414,
@@ -665,20 +666,24 @@ export function taxRecognized(recognized, opts = {}) {
 // prop: { fmv, basis, mortgageBalance, isPrimary?, sec121Exclusion?,
 //         caSourceDeferredGain?, depreciationTaken?, sellingCostsInBasis? }
 // mode: 'keep' | 'sell' (primary: no 1031) | 'full_1031' | 'partial_1031' (rentals)
-// opts: { saleMode?, cashBoot?, sellingCostsPct?, rates? }
+// opts: { saleMode?, cashBoot?, sellingCostsPct?, closingCostFlat?, rates? }
 export function disposeAsset(prop, mode, opts = {}) {
   if (mode === 'keep') return null;
   const cfg = { ...DISPO_DEFAULTS, ...(opts.rates || {}) };
   const sellingCostsPct = opts.sellingCostsPct ?? cfg.sellingCostsPct;
+  // v5.14.0: flat escrow/title/recording $ -- once per sale event, not scaled
+  // by price (a forced-sale discount doesn't shrink it).
+  const closingCostFlat = Math.max(0, opts.closingCostFlat || 0);
   const forced = opts.saleMode === 'forced';
 
   const grossPrice   = prop.fmv * (forced ? (1 - cfg.forcedSaleDiscount) : 1);
-  const sellingCosts = grossPrice * sellingCostsPct;
+  const sellingCosts = grossPrice * sellingCostsPct;   // commission & concessions (%)
   // netSale is the CASH side -- always nets the real cost of sale, regardless
   // of basis treatment below. Used for afterTaxNetProceeds and (in
   // partial_1031) freedEquity; a dev-mode audit elsewhere in the app asserts
-  // netSale === grossPrice - sellingCosts, so don't repurpose this field.
-  const netSale      = grossPrice - sellingCosts;
+  // netSale === grossPrice - sellingCosts - closingCostFlat, so don't
+  // repurpose this field.
+  const netSale      = grossPrice - sellingCosts - closingCostFlat;
   const mortgagePayoff = prop.mortgageBalance || 0;
   // v4.3.1: gainBasisPrice is the GAIN/TAX side, which can differ from netSale
   // -- some properties' adjustedBasis default already capitalizes their own
@@ -687,6 +692,8 @@ export function disposeAsset(prop, mode, opts = {}) {
   // For THOSE properties only, subtracting sellingCostsPct again on top of an
   // already-cost-inclusive basis double-counts the cost and understates
   // taxable gain -- so the gain calc uses the gross price verbatim instead.
+  // (v5.14.0: same for closingCostFlat -- seller-paid closing costs reduce
+  // amount realized via netSale, except where basis already embeds them.)
   // This must stay an explicit per-property opt-in (not a global toggle):
   // a property without a documented cost-inclusive basis must fall through
   // to the normal netSale-based gain calc, same as before this fix.
@@ -694,7 +701,7 @@ export function disposeAsset(prop, mode, opts = {}) {
   const realizedGain = Math.max(0, gainBasisPrice - (prop.basis || 0));
 
   const r = {
-    mode, grossPrice, sellingCosts, sellingCostsPct, netSale, mortgagePayoff, realizedGain,
+    mode, grossPrice, sellingCosts, sellingCostsPct, closingCostFlat, netSale, mortgagePayoff, realizedGain,
     recognizedGain: 0, deferredGain: 0, cashBoot: 0,
     recaptureTax: 0, fedCapGainsTax: 0, caClawbackTax: 0,
     coTax: 0, otherStateCredit: 0, totalTax: 0,
@@ -793,6 +800,7 @@ export function computeDispositions(p){
       saleMode: hold.saleMode,
       cashBoot: hold.cashBoot || 0,
       sellingCostsPct: hold.sellingCostsPct,
+      closingCostFlat: hold.closingCostFlat || 0,
     });
     return { ...res, year: hold.year, quarter: hold.quarter, mode: hold.mode, caSourceDeferredGain: hold.caSourceDeferredGain || 0 };
   }

@@ -50,6 +50,10 @@ export function freshPropertiesDefaults(){
         // disposeAsset's opts.sellingCostsPct, falling back to the 6% global
         // default for every other property, unaffected by this line).
         sellingCostsPct: 0.05,
+        // v5.14.0: flat escrow/title/recording $ -- $0 here because the 5%
+        // above (agent net sheet) already includes title + closing; a flat
+        // line on top would double-count. Rentals default $5,000.
+        closingCostFlat: 0,
         cpaEstTax: 62_000, cpaNetProceedsAfterTax: 708_881,
       },
       units: [
@@ -64,6 +68,7 @@ export function freshPropertiesDefaults(){
       hold: {
         mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
         basis: 424_309, sec121Exclusion: 0, caSourceDeferredGain: 801_441, depreciationRecapture: 44_000,
+        closingCostFlat: 5_000,   // v5.14.0: escrow/title/recording $
         cpaEstTax: 288_000, cpaNetProceedsAfterTax: 656_470,
       },
       units: [
@@ -93,6 +98,7 @@ export function freshPropertiesDefaults(){
       hold: {
         mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
         basis: 183_043, sec121Exclusion: 0, caSourceDeferredGain: 391_507, depreciationRecapture: 21_500,
+        closingCostFlat: 5_000,   // v5.14.0: escrow/title/recording $
         cpaEstTax: 124_000, cpaNetProceedsAfterTax: 283_567,
       },
       units: [
