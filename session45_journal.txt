@@ -1,0 +1,137 @@
+=== SESSION 45 JOURNAL -- Sale closing costs (v5.14.0), Personal Income vs Expenses (v5.15.0), month-level sale dates (v5.16.0), typed number fields (v5.17.0) ===
+
+Date: 2026-10-24
+
+Source: claude-code-handoff-2026-10-24.md (Parts B -> A -> C, one commit
+each, stop after each for Bob's review). Bob inserted a fourth task between
+A and C (month-level sale dates), so the handoff's Part C version (v5.16.0)
+became v5.17.0 and its test group AE became AF. The handoff doc itself was
+committed as design trail (35adf9b), per Bob.
+
+--- v5.14.0 (PART B): ESCROW / TITLE / RECORDING FLAT CLOSING COST -- e33d9d0 ---
+
+- disposeAsset (engine.js) takes opts.closingCostFlat:
+  netSale = gross - commission% - flat. Applied once per sale event, so it
+  flows through to mortgage payoff, HI payoff, invested cash, and cap gains
+  (the amount realized is reduced; with sellingCostsInBasis (6th St), the
+  gain still starts from the gross price, as before).
+- Bob's decisions: the commission % is a PER-PROPERTY field
+  (hold.sellingCostsPct; falls back to the DISPO_DEFAULTS global until moved);
+  liquidation NW uses each property's own % + flat $ (liqSaleNet);
+  BASE.sellingCosts (a separate hardcoded 5%) RETIRED -- flagged per the
+  handoff, not silently picked. Defaults: 6th St $0 flat, rentals $5,000.
+- UI: "Commission & concessions (%)" (relabelled) + "Escrow / title /
+  recording ($)" in each Disposition block; breakdown rows; Defaults-tab
+  mirror rows; Glossary NW / sale-proceeds / liquidation note updated.
+- Tests: R13/R15 adjusted (R15 isolated with closingCostFlat:0); new Group AC
+  (AC1 $5K delta in proceeds and gain; AC2 labels/rows). 8/8 targeted + R/J/D
+  49/49.
+
+--- v5.15.0 (PART A): PERSONAL INCOME vs EXPENSES CHART -- 006b506 ---
+
+- New per-property personalUseShare in defaults.js (15th St 0.60, Lafayette
+  0, 6th St 0). Bob first said "don't change defaults.js", then chose (when
+  asked) to add only this field there -- no 6th St sale/price data.
+- Engine: per-month carrying-cost split rows (carryRent*/carryPers*,
+  carrySixth). Rule for the primary (6th St): months it has rental income go
+  to the rental business, unrented-while-owned months go to "6th St carrying
+  cost" -- decided PER MONTH from the engine's own rental income (not the
+  sixthMTR flag). aggregateMonthlyToPeriod emits rentCarry for pins.
+- Chart: "Personal Income vs Expenses / yr". The rental-share carrying cost
+  moves off BOTH lines (income becomes Rental profit, can be negative), so
+  surplus is unchanged by construction. Three housing expense rows (Bob
+  chose three over one). Breakdown: Rental business sub-block (gross, op
+  costs, mortgage/tax&ins/maintenance rental share, = Rental profit);
+  breakdown renderer gained header rows. tier1/totalInc/waterfall/other
+  charts untouched.
+- Tests: AA1-AA3 updated; new Group AD (AD1 surplus invariant live + pin --
+  diff 0 every year; AD2 60%->100%; AD3 sums; AD4 6th St carrying cost > 0 in
+  the 2026 row only, so it survives Bob's planned Dec 2026 sale).
+  AA/AD/E5/L1/T/U 25/25.
+- Observed, NOT a code issue: the duplex bottom unit still carries LTR rent
+  segments while personalUseShare is 60% -- Bob will fix that in his own
+  scenario.
+
+--- v5.16.0: MONTH-LEVEL SALE DATES -- b164723 ---
+
+- Property sales and the One-Time Obligation are dated Year + Month (effective
+  the 1st) instead of Year + Quarter. saleMonthOf(t) (engine.js) is the one
+  reader (falls back to a legacy quarter's first month) used by the ownership
+  gate, the sale-date mortgage payoff, proceeds/obligation event timing, and
+  the settlement year. Liquidation NW and the Cash Flow tab's "kept" flags
+  are now month-precise too (Bob chose to fix those in this commit).
+- Saved pins migrate Q1->Jan, Q2->Apr, Q3->Jul, Q4->Oct (migrateQuarterToMonth,
+  run BEFORE merging defaults so the default month can't override a saved
+  quarter). Bob explicitly asked for this migration -- an exception to the
+  no-shims convention. SAVE_SCHEMA_VERSION unchanged (7).
+- defaults.js: hold/obligation default month 4 (== old Q2). No sale data
+  changed; Bob sets 6th St to Dec 2026 + the contract price in the UI.
+- Tests: sellProperty helpers map quarter -> month; Group AE (AE1 Dec 2026
+  sale via the UI: carrying cost Jul-Nov, $0 from Dec, proceeds in Dec;
+  AE2 Q4 pin == Oct pin, 0 diffs over 210 values after a localStorage round
+  trip). R/S/V/AD/AE/E5/L1 59/59 + Group B 11/11.
+
+--- v5.17.0 (PART C): TYPED NUMBER FIELDS REPLACE EVERY SLIDER -- 9c1d3ed ---
+
+- New module-level NumberField (module-level so an App re-render doesn't
+  remount it mid-typing). Typed in display units via scale/offset; commits
+  on Enter/blur only (Esc reverts) so intermediate keystrokes never re-run the
+  sim; Up/Down = step, Shift = 10x; clamps to the old min/max on commit with a
+  ~1.5s "max $X" hint; empty/non-numeric input reverts. Typed values are NOT
+  snapped to step (so $1,856 works). Focus-then-leave without editing is a
+  no-op (no rounding of values stored at higher precision).
+- slider() keeps its signature + optional opts and renders it (all 49 calls);
+  sliderTypeIn/propValueEdit retired. The 16 raw range inputs use numField().
+- Bob's decisions: month pickers (Nolan deferment, LI loan start, both SS
+  starts) became Jan-Dec button rows like sale month; $ fields type full
+  dollars (Property value was $K; structure values stay STORED in $K,
+  scale 1000); the property mortgage grid moved onto NumberField (it was
+  committing every keystroke). Defaults tab (empty = reset to code value)
+  and the Work Income Curve (already commit-on-blur) left alone.
+- Bug found by the full run and fixed before commit: the focus handler's
+  formatted->raw swap landed a beat late (React re-render), so a
+  select-all-and-type right after focus APPENDED to the raw text
+  ("525000"+"600000" -> clamped to max). Now swapped in the DOM synchronously.
+- Tests: setSlider/setSliderExact reimplemented as type + Enter (call sites
+  unchanged); A3, F1 (was range nth(9)), J5 (was an ambiguous near-match --
+  now the 15th St property value field), S1 (was setting a Cash Flow tab
+  field from the Simulator tab -- the fuzzy helper silently moved some other
+  slider), S3/S5/S6, Group B/R sale year, Y/AB zoom, AE1. New Group AF
+  (AF1-AF8: commit, Esc, clamp+hint, arrow nudge, intermediate digits,
+  invalid revert, % scaling, month buttons).
+- A1 REWRITTEN (Bob chose option 1): under current defaults keep% barely
+  matters (0% vs 100% moves total sweep by ~$437 over the whole horizon, the
+  badge rounds to $0) -- A1 only ever passed because the fuzzy near-helper
+  moved a DIFFERENT slider. It now sets every Work Income Curve point to
+  $8,000/mo first, then compares: keep 100% -> $0/mo sweep, $120K interest,
+  clear 2037; keep 0% -> $970/mo, $57K, clear 2032.
+- FULL SUITE: 168/168 passed (8.1m). (First full run: 158/10 -- the append
+  bug, S1 and A1 above.)
+
+--- VERIFICATION (all commits) ---
+
+npm run build clean throughout. npm run lint 26 errors / 9 warnings,
+unchanged (all pre-existing).
+
+--- PUSH STATUS ---
+
+e33d9d0 pushed (with Bob's permission). 006b506, b164723, 35adf9b, 9c1d3ed
+and this journal NOT pushed -- Bob pushes.
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+Same list as session44, plus:
+- estimateTax deducts ALL mortgage interest from rental income; it should
+  deduct only the rental share (1 - personalUseShare). Bob: don't fix this
+  session.
+- Keep % has almost no effect under the current defaults (little or no
+  surplus above the $800 floor). Not a bug per se, but worth Bob knowing.
+- Adjusted basis / CA-source deferred gain / Depreciation recapture ranges
+  are relative to the CURRENT value (0.5x-1.5x / up to 1.5x) -- kept as-is
+  (no range changes in Part C), but with typing it means a much larger value
+  takes two commits. Candidate for fixed bounds.
+- Duplex bottom-unit LTR segments vs. 60% personal use -- Bob fixing in his
+  scenario (no code change).
+Still open from session44: Cumulative chart COST view stacked bands omit LI
+loan payments, IRMAA and extra principal; Sophia's $55K round-number balance
+awaits a real per-loan refresh.
