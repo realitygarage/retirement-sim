@@ -1250,10 +1250,12 @@ export function buildMonthlyScenario(p){
     // D2: per-debt balances, same pre-decrement snapshot convention as hiDebtNow.
     const ccBalNow=ccBal, sophiaBalNow=sophiaBal, nolanBalNow=nolanBal;
     let mtg = 0;
-    const propMtgBal = {}, propIoMode = {};
+    const propMtgBal = {}, propIoMode = {}, propMtgPmtMo = {};
     for(const prop of _properties){
       const owned = ownedMo(prop.id, calYear, calMonth1to12);
-      mtg += _stepMtg(_mtgSt[prop.id], calYear, calMonth1to12, owned);
+      const _pmt = _stepMtg(_mtgSt[prop.id], calYear, calMonth1to12, owned);
+      mtg += _pmt;
+      propMtgPmtMo[prop.id] = _pmt;   // v5.15.0: per-property scheduled payment (carrying-cost split below)
       // Gated by ownership (0 once sold) -- matches the old annual engine's
       // `balById[id] = keepMap[id] ? mtgById[id].bal : 0` convention. Without
       // this gate, a sold property's mortgage state simply stops being
@@ -1315,6 +1317,32 @@ export function buildMonthlyScenario(p){
     // report/audit of the A1 maintenance change can read the real engine
     // computation directly instead of re-deriving the formula separately.
     const propMaintMo = { sixth: Math.round(maint6Mo), fifteenth: Math.round(maint15Mo), barberry: Math.round(maintLafMo) };
+    // v5.15.0: carrying-cost split for the Personal Income vs Expenses chart --
+    // display-only, nothing below reads it (tier1/totalInc/the waterfall are
+    // unchanged). Each owned property's mortgage payment + tax/ins + maint goes
+    // to the rental business, personal housing, or (primary home only) its own
+    // "6th St carrying cost" line. The three buckets sum to mtg+propCost+
+    // maintTotal (up to propCost's rounding). Primary: a month with any rental
+    // segment income -> all rental; unrented while owned -> carrying cost.
+    // Others: personalUseShare (0-1) of each piece is personal, the rest rental.
+    const _maintRawById = { sixth: maint6Mo, fifteenth: maint15Mo, barberry: maintLafMo };
+    const propTaxInsMo = {};
+    let carryRentMtg=0, carryRentTaxIns=0, carryRentMaint=0;
+    let carryPersMtg=0, carryPersTaxIns=0, carryPersMaint=0, carrySixth=0;
+    for(const prop of _properties){
+      if(!ownedMo(prop.id, calYear, calMonth1to12)){ propTaxInsMo[prop.id]=0; continue; }
+      const ti = PROP_TAX_INS[prop.id];
+      const m = propMtgPmtMo[prop.id]||0, t = ti ? (ti.tax+ti.ins)*pinf : 0, mt = _maintRawById[prop.id]||0;
+      propTaxInsMo[prop.id] = Math.round(t);
+      if(prop.isPrimary){
+        if((propRentalMo[prop.id]||0) > 0){ carryRentMtg+=m; carryRentTaxIns+=t; carryRentMaint+=mt; }
+        else carrySixth += m+t+mt;
+        continue;
+      }
+      const sh = Math.min(1, Math.max(0, prop.personalUseShare||0));
+      carryRentMtg+=(1-sh)*m; carryRentTaxIns+=(1-sh)*t; carryRentMaint+=(1-sh)*mt;
+      carryPersMtg+=sh*m;     carryPersTaxIns+=sh*t;     carryPersMaint+=sh*mt;
+    }
     // v5.0.0 fix: IRMAA (Medicare Part B/D surcharge, triggered 2 years after
     // any taxable property disposition -- mode!=='full_1031', recognizedGain>0)
     // was a separate cost term (`irmaaAdd`) in the pre-v5 annual engine's
@@ -1493,6 +1521,10 @@ export function buildMonthlyScenario(p){
       mtgBal15: propMtgBal.fifteenth||0,
       mtgBalLaf: propMtgBal.barberry||0,      // D2: was missing entirely pre-v5
       propMtgBal, propRentalMo, propValue, propIoMode, propMaintMo,  // D1/D2/A1: generic per-property state
+      propMtgPmtMo, propTaxInsMo,   // v5.15.0: per-property scheduled mortgage payment / tax+ins ($/mo)
+      // v5.15.0: carrying-cost split (Personal Income vs Expenses chart only)
+      carryRentMtg, carryRentTaxIns, carryRentMaint,
+      carryPersMtg, carryPersTaxIns, carryPersMaint, carrySixth,
       ccBalRaw: Math.round(ccBalNow), sophiaBalRaw: Math.round(sophiaBalNow), nolanBalRaw: Math.round(nolanBalNow), // D2
       loanStartLabels, loanPayoffLabels, mtgTransitionEvents, mtgPayoffLabels,  // D4
       events,
@@ -1659,6 +1691,9 @@ export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
       // v5.12.3: required-cost tier (waterfall tier 1) -- read by the Annual
       // Income chart's expense line, incl. per-pin (pins read periodRows).
       tier1:    Math.round(avgMo('tier1')),
+      // v5.15.0: rental-share carrying cost ($/mo avg) -- pins' personal
+      // income/expense lines are totalInc/tier1 minus this (see buildChartRows).
+      rentCarry: Math.round(avgMo('carryRentMtg')+avgMo('carryRentTaxIns')+avgMo('carryRentMaint')),
       reEquity: Math.round((dplxVal+lafVal+primVal-dplxBal-lafBal-primBal)/1000),
       reValue:  Math.round((dplxVal+lafVal+primVal)/1000),
       reMortgage:Math.round((dplxBal+lafBal+primBal)/1000),

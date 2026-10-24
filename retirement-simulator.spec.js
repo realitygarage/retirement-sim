@@ -686,10 +686,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.14.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.15.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.14.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.14.0');
+    await expect(page.locator('text=v5.15.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.15.0');
   });
 
 });
@@ -1146,10 +1146,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.14.0', async ({ page }) => {
+  test('L1 — Version header shows v5.15.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.14.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.14.0 confirmed');
+    await expect(page.locator('text=v5.15.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.15.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -3478,11 +3478,13 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
       const yrRows = wf.filter(r => r.calYear === fullYr);
       const sumTot = yrRows.reduce((s, r) => s + (r.totalInc || 0), 0);
       const sources = row.inc_pension + row.inc_work + row.inc_yourSs + row.inc_brendaSs + row.inc_rental + row.inc_draw;
-      return { fullYr, incTotal: row.incTotal, sumTot, sources, hasIncTotal: 'incTotal' in row };
+      // v5.15.0: personal view -- incTotal = totalInc minus the rental-share carrying cost
+      const rentCarry = row.rent_mtg + row.rent_taxIns + row.rent_maint;
+      return { fullYr, incTotal: row.incTotal, rentCarry, sumTot, sources, hasIncTotal: 'incTotal' in row };
     });
     console.log('  AA1 — ' + JSON.stringify(result));
     expect(result.hasIncTotal).toBe(true);
-    expect(Math.abs(result.incTotal - result.sumTot)).toBeLessThanOrEqual(1);
+    expect(Math.abs(result.incTotal + result.rentCarry - result.sumTot)).toBeLessThanOrEqual(1);
     // Each source is rounded independently -- allow a few dollars of rounding drift
     expect(Math.abs(result.sources - result.incTotal)).toBeLessThanOrEqual(6);
     expect(result.incTotal).toBeGreaterThan(0);
@@ -3494,13 +3496,18 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
     // added. The new secondary-line legend sits beside the title, so the regex
     // now matches the title div itself (not its wrapper) -- one level deeper,
     // hence ancestor::div[3] to reach the chart card (header + table).
-    const incChart = page.locator('div').filter({ hasText: /^Annual Income vs Expenses \/ yr$/ })
+    // v5.15.0: retitled "Personal Income vs Expenses / yr"
+    const incChart = page.locator('div').filter({ hasText: /^Personal Income vs Expenses \/ yr$/ })
       .locator('xpath=ancestor::div[3]').first();
     await expect(incChart).toBeVisible();
     await incChart.locator('button', { hasText: 'breakdown' }).click();
     await page.waitForTimeout(300);
-    for (const label of ['Pension', 'Work income', 'Your SS', 'Brenda SS', 'Rental (net)', 'Total income',
-      'Mortgages', 'Health ins', 'Core living', 'Prop tax/insurance', 'Income tax (est)', 'Maintenance',   // v5.12.4 expense rows
+    for (const label of [
+      'Gross rent', 'Operating costs', 'Mortgages (rental share)', 'Tax & insurance (rental share)',   // v5.15.0 rental sub-block
+      'Maintenance (rental share)', 'Rental profit',
+      'Pension', 'Work income', 'Your SS', 'Brenda SS', 'Total income',
+      'Housing: mortgage (personal)', 'Housing: tax & insurance (personal)', 'Housing: maintenance (personal)',
+      'Health ins', 'Core living', 'Income tax (est)',
       'Total expenses', 'Surplus / (shortfall)']) {
       await expect(incChart.locator('td', { hasText: label }).first()).toBeVisible();
     }
@@ -3521,10 +3528,12 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
       const sumTier1 = yrRows.reduce((s, r) => s + (r.tier1 || 0), 0);
       const sumTotalOut = yrRows.reduce((s, r) => s + (r.totalOut || 0), 0);
       const lrRow = lr.find(r => r.cal === fullYr);
-      // v5.12.4: the nine itemized expense rows
-      const parts = ['fc_mtg','fc_health','fc_core','fc_famLoan','fc_hiMins','fc_propCost','fc_tax','maintRes','fc_irmaa']
+      // v5.12.4/v5.15.0: the itemized personal expense rows
+      const parts = ['fc_health','fc_core','fc_famLoan','fc_hiMins','fc_tax','fc_irmaa',
+        'carryPersMtg','carryPersTaxIns','carryPersMaint','carrySixth']
         .reduce((s, f) => s + (row['exp_' + f] || 0), 0);
-      return { fullYr, expTotal: row.expTotal, sumTier1, sumTotalOut, incTotal: row.incTotal,
+      const rentCarry = row.rent_mtg + row.rent_taxIns + row.rent_maint;
+      return { fullYr, expTotal: row.expTotal, rentCarry, sumTier1, sumTotalOut, incTotal: row.incTotal,
         incSurplus: row.incSurplus, aggTier1: lrRow?.tier1, sumTier1Avg: Math.round(sumTier1 / 12), parts };
     });
     console.log('  AA3 — ' + JSON.stringify(result));
@@ -3532,7 +3541,8 @@ test.describe('Group AA — v5.12.0 Annual Income Chart', () => {
     // components separately) -- allow a little rounding drift
     expect(Math.abs(result.parts - result.expTotal)).toBeLessThanOrEqual(15);
     expect(result.expTotal).toBeGreaterThan(0);
-    expect(Math.abs(result.expTotal - result.sumTier1)).toBeLessThanOrEqual(1);
+    // v5.15.0: personal expenses = tier1 minus the rental-share carrying cost
+    expect(Math.abs(result.expTotal + result.rentCarry - result.sumTier1)).toBeLessThanOrEqual(1);
     expect(result.incSurplus).toBe(result.incTotal - result.expTotal);
     // aggregateMonthlyToPeriod's new tier1 field (what pins read) is the same monthly average
     expect(result.aggTier1).toBe(result.sumTier1Avg);
@@ -3673,6 +3683,120 @@ test.describe('Group AC — v5.14.0 Flat Closing Cost on Sales', () => {
     expect(text).toContain('Commission & concessions (6%)');
     expect(text).toContain('Escrow / title / recording');
     expect(text).not.toContain('Selling costs');
+  });
+
+});
+
+// ─── Group AD: v5.15.0 Personal Income vs Expenses (personal-use share) ─────
+// Rental carrying costs move off BOTH sides of the chart (out of expenses,
+// netted into Rental profit), so Surplus / (shortfall) must equal the
+// pre-v5.15.0 definition (annualized totalInc - tier1) in every period.
+test.describe('Group AD — v5.15.0 Personal Income vs Expenses', () => {
+
+  test('AD1 — invariant: surplus equals annualized (totalInc - tier1) every year, live and for a pin', async ({ page }) => {
+    await loadApp(page);
+    await page.locator('input[placeholder*="Name this scenario"]').fill('AD1 pin');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(400);
+    const result = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      const wf = window.__wfData || [];
+      const by = {};
+      wf.forEach(r => { (by[r.calYear] = by[r.calYear] || []).push(r); });
+      const pinKey = Object.keys(cd[0] || {}).find(k => /^pin_.+_inc$/.test(k));
+      const pinId = pinKey ? pinKey.slice(4, -4) : null;
+      return cd.map(row => {
+        const ms = by[row.cal] || [];
+        const ann = f => Math.round(ms.reduce((s, r) => s + (r[f] || 0), 0) / ms.length * 12);
+        return {
+          cal: row.cal,
+          surplusDiff: row.incSurplus - (ann('totalInc') - ann('tier1')),
+          linesDiff: row.incSurplus - (row.incTotal - row.expTotal),
+          // pin has identical params to live -> its personal surplus matches live's
+          pinDiff: pinId ? (row[`pin_${pinId}_inc`] - row[`pin_${pinId}_exp`]) - row.incSurplus : null,
+          pinIncDiff: pinId ? row[`pin_${pinId}_inc`] - row.incTotal : null,
+        };
+      });
+    });
+    const worst = k => result.reduce((m, r) => Math.max(m, Math.abs(r[k] ?? 0)), 0);
+    console.log(`  AD1 — years=${result.length} worst surplusDiff=${worst('surplusDiff')} linesDiff=${worst('linesDiff')} pinDiff=${worst('pinDiff')} pinIncDiff=${worst('pinIncDiff')}`);
+    expect(result.length).toBeGreaterThan(10);
+    expect(result[0].pinDiff).not.toBeNull();
+    for (const r of result) {
+      expect(r.surplusDiff).toBe(0);
+      expect(r.linesDiff).toBe(0);
+      // pin values are rounded per-$/mo average then x12 -- allow that drift
+      expect(Math.abs(r.pinDiff)).toBeLessThanOrEqual(30);
+      expect(Math.abs(r.pinIncDiff)).toBeLessThanOrEqual(30);
+    }
+  });
+
+  test('AD2 — duplex personal-use share 60% -> 100%: rental profit and personal housing rise equally, surplus unchanged', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams } = window.__engine;
+      const run = share => {
+        const wf = buildMonthlyScenario(makeParams({ properties: [{ id: 'fifteenth', personalUseShare: share }] }));
+        const yr = wf.filter(r => r.calYear === 2028);
+        const sum = f => yr.reduce((s, r) => s + (r[f] || 0), 0);
+        const rentCarry = sum('carryRentMtg') + sum('carryRentTaxIns') + sum('carryRentMaint');
+        return {
+          profit: sum('rental') - sum('rentalOpCost') - rentCarry,
+          housing: sum('carryPersMtg') + sum('carryPersTaxIns') + sum('carryPersMaint'),
+          surplus: sum('totalInc') - sum('tier1'),
+        };
+      };
+      return { s60: run(0.6), s100: run(1.0) };
+    });
+    console.log('  AD2 — ' + JSON.stringify(result));
+    const dProfit = result.s100.profit - result.s60.profit;
+    const dHousing = result.s100.housing - result.s60.housing;
+    expect(dProfit).toBeGreaterThan(1000);
+    expect(Math.abs(dProfit - dHousing)).toBeLessThanOrEqual(1);
+    expect(result.s100.surplus).toBe(result.s60.surplus);
+  });
+
+  test('AD3 — rental sub-block sums to Rental profit; income and expense rows sum to their totals; split covers all carrying cost', async ({ page }) => {
+    await loadApp(page);
+    const result = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      const wf = window.__wfData || [];
+      const splitWorst = wf.reduce((m, r) => Math.max(m, Math.abs(
+        (r.carryRentMtg + r.carryRentTaxIns + r.carryRentMaint + r.carryPersMtg + r.carryPersTaxIns + r.carryPersMaint + r.carrySixth)
+        - (r.fc_mtg + r.fc_propCost + r.maintRes))), 0);
+      const expF = ['fc_health','fc_core','fc_famLoan','fc_hiMins','fc_tax','fc_irmaa','carryPersMtg','carryPersTaxIns','carryPersMaint','carrySixth'];
+      return { splitWorst, rows: cd.map(r => ({
+        cal: r.cal,
+        rentDiff: (r.rent_gross - r.rent_op - r.rent_mtg - r.rent_taxIns - r.rent_maint) - r.rent_profit,
+        profitSame: r.rent_profit === r.inc_rental,
+        incDiff: (r.inc_pension + r.inc_work + r.inc_yourSs + r.inc_brendaSs + r.inc_rental + r.inc_draw) - r.incTotal,
+        expDiff: expF.reduce((s, f) => s + (r['exp_' + f] || 0), 0) - r.expTotal,
+      })) };
+    });
+    const worst = k => result.rows.reduce((m, r) => Math.max(m, Math.abs(r[k])), 0);
+    console.log(`  AD3 — splitWorst=${result.splitWorst} rentDiff=${worst('rentDiff')} incDiff=${worst('incDiff')} expDiff=${worst('expDiff')}`);
+    // monthly split vs engine's own rounded fields (propCost is rounded as a total)
+    expect(result.splitWorst).toBeLessThanOrEqual(3);
+    for (const r of result.rows) {
+      expect(r.profitSame).toBe(true);
+      expect(Math.abs(r.rentDiff)).toBeLessThanOrEqual(3);   // independently-rounded rows
+      expect(Math.abs(r.incDiff)).toBeLessThanOrEqual(8);
+      expect(Math.abs(r.expDiff)).toBeLessThanOrEqual(15);
+    }
+  });
+
+  test('AD4 — 6th St carrying cost is non-zero in the start year (owned, not rented)', async ({ page }) => {
+    await loadApp(page);
+    // Start-year row only, so this holds both under keep-forever defaults and
+    // once 6th St carries a late-start-year sale (still owned for the months before it).
+    const result = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      const start = window.__engine.BASE.startYear;
+      const row = cd.find(r => r.cal === start);
+      return { start, carrySixth: row?.exp_carrySixth };
+    });
+    console.log('  AD4 — ' + JSON.stringify(result));
+    expect(result.carrySixth).toBeGreaterThan(0);
   });
 
 });

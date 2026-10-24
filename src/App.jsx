@@ -1,3 +1,21 @@
+// v5.15.0 -- Annual Income chart -> "Personal Income vs Expenses / yr"
+// (handoff 2026-10-24, Part A). Rental carrying costs (mortgage payment,
+// prop tax/ins, maintenance) are reclassified for THIS chart only: new
+// per-property personalUseShare (0-1; 15th St 0.60, Lafayette 0) splits each
+// property's carrying cost into personal Housing expense vs a rental-business
+// cost netted into Rental profit (replaces "Rental (net)"; can be negative).
+// 6th St (primary) is decided per month: any rental income that month ->
+// all rental; owned but unrented -> its own "6th St carrying cost" expense.
+// buildMonthlyScenario adds the split as display-only row fields
+// (carryRent*/carryPers*/carrySixth, plus per-property propMtgPmtMo/
+// propTaxInsMo); aggregateMonthlyToPeriod adds rentCarry so pins use their
+// own split. The same dollars come off both lines, so Surplus/(shortfall)
+// is unchanged by construction; tier1/totalInc/the waterfall and every other
+// chart are untouched. Breakdown gains a Rental business sub-block and
+// section header rows (shared table: new `header` series flag). Property
+// card + Defaults-tab audit + Glossary (Rental Gross/Net/Profit, new
+// Personal-use share card, Chart Units) updated.
+//
 // v5.14.0 -- Escrow / title / recording costs on property sales (handoff
 // 2026-10-24, Part B). New per-property hold.closingCostFlat ($; default
 // $5,000 for 15th St and Lafayette, $0 for 6th St -- its 5% agent-net-sheet
@@ -784,8 +802,15 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
   const expByKey={};   // v5.12.3: required costs (tier1), same bucketing
   // v5.12.4: tier1's components, for the Annual Income chart's expense
   // breakdown rows -- exactly the nine terms engine.js sums into tier1.
-  const EXP_FIELDS = ['fc_mtg','fc_health','fc_core','fc_famLoan','fc_hiMins','fc_propCost','fc_tax','maintRes','fc_irmaa'];
+  // v5.15.0: PERSONAL view -- tier1's mortgage/prop tax-ins/maintenance are
+  // replaced by their personal-share pieces (+ the 6th St carrying cost); the
+  // rental share moves to the income side, netted into Rental profit.
+  const EXP_FIELDS = ['fc_health','fc_core','fc_famLoan','fc_hiMins','fc_tax','fc_irmaa',
+    'carryPersMtg','carryPersTaxIns','carryPersMaint','carrySixth'];
+  // Rental-business sub-block: gross rent, op costs, rental-share carrying costs.
+  const RENT_FIELDS = ['rental','rentalOpCost','carryRentMtg','carryRentTaxIns','carryRentMaint'];
   const expPartByKey = Object.fromEntries(EXP_FIELDS.map(f=>[f,{}]));
+  const rentPartByKey = Object.fromEntries(RENT_FIELDS.map(f=>[f,{}]));
   (wfRows||[]).forEach(r=>{
     const k=periodKeyOf(r, periodMonths);
     discByKey[k]=(discByKey[k]||0)+(r.disc||0);
@@ -812,6 +837,7 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     inc_totByKey[k]=(inc_totByKey[k]||0)+(r.totalInc||0);
     expByKey[k]=(expByKey[k]||0)+(r.tier1||0);
     EXP_FIELDS.forEach(f=>{ expPartByKey[f][k]=(expPartByKey[f][k]||0)+(r[f]||0); });
+    RENT_FIELDS.forEach(f=>{ rentPartByKey[f][k]=(rentPartByKey[f][k]||0)+(r[f]||0); });
     cntByKey[k]=(cntByKey[k]||0)+1;
     // savingsAcc is a running total — take the last month value per period (end-of-period balance)
     savAccByKey[k]=r.savingsAcc||0;
@@ -862,12 +888,21 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     // is the same at annual and quarterly zoom; a full calendar year equals
     // its true total.
     const annInc = m => Math.round((m[key]||0)/cnt*12);
+    // v5.15.0: rental-share carrying cost ($/yr) -- moved off BOTH sides of the
+    // personal chart (out of expenses, netted into Rental profit), so
+    // incSurplus is unchanged by construction.
+    const rentCarryMtg=annInc(rentPartByKey.carryRentMtg), rentCarryTaxIns=annInc(rentPartByKey.carryRentTaxIns), rentCarryMaint=annInc(rentPartByKey.carryRentMaint);
+    const rentCarry=rentCarryMtg+rentCarryTaxIns+rentCarryMaint;
     const pt={year:r.cal, cal:r.cal, reqWork:r.reqWork, surplus:disc, surplusPool, floorLine, hiDebt:r.hiDebt,
       fixedTotal, fc_mtg:fc_mtg_, fc_hlth:fc_hlth_, fc_core:fc_core_, fc_fam:fc_fam_, fc_hiMins:fc_hiMins_, fc_rop:fc_rop_, fc_prop:fc_prop_, fc_tax:fc_tax_,
       inc_pension:annInc(inc_penByKey), inc_yourSs:annInc(inc_yssByKey), inc_brendaSs:annInc(inc_bssByKey),
-      inc_rental:annInc(inc_rentByKey), inc_work:annInc(inc_workByKey), inc_draw:annInc(inc_drawByKey),
-      incTotal:annInc(inc_totByKey),
-      expTotal:annInc(expByKey),
+      inc_rental:annInc(inc_rentByKey)-rentCarry,   // v5.15.0: Rental profit (can be negative)
+      inc_work:annInc(inc_workByKey), inc_draw:annInc(inc_drawByKey),
+      rent_gross:annInc(rentPartByKey.rental), rent_op:annInc(rentPartByKey.rentalOpCost),
+      rent_mtg:rentCarryMtg, rent_taxIns:rentCarryTaxIns, rent_maint:rentCarryMaint,
+      rent_profit:annInc(inc_rentByKey)-rentCarry,   // same value as inc_rental; own key for the sub-block row
+      incTotal:annInc(inc_totByKey)-rentCarry,
+      expTotal:annInc(expByKey)-rentCarry,
       ...Object.fromEntries(EXP_FIELDS.map(f=>['exp_'+f, annInc(expPartByKey[f])])),
       incSurplus:annInc(inc_totByKey)-annInc(expByKey),
       // v5.0.0: r.nw already includes savingsAcc natively (aggregateMonthlyToAnnual,
@@ -925,8 +960,10 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
       const pr = pin.periodRows[i];
       pt[`pin_${pin.id}_fc`]=Math.abs(pr?.mtg||0)+Math.abs(pr?.health||0)+Math.abs(pr?.core||0)+Math.abs(pr?.famLoan||0)+Math.abs(pr?.minDebt||0);
       pt[`pin_${pin.id}_rw`]=pr?.reqWork;
-      pt[`pin_${pin.id}_inc`]=Math.round((pr?.totalInc||0)*12);   // $/yr, same annualization as incTotal
-      pt[`pin_${pin.id}_exp`]=Math.round((pr?.tier1||0)*12);      // $/yr, same annualization as expTotal
+      // $/yr, same annualization + v5.15.0 personal view as incTotal/expTotal:
+      // the pin's own rental-share carrying cost comes off both lines.
+      pt[`pin_${pin.id}_inc`]=Math.round(((pr?.totalInc||0)-(pr?.rentCarry||0))*12);
+      pt[`pin_${pin.id}_exp`]=Math.round(((pr?.tier1||0)-(pr?.rentCarry||0))*12);
       // v5.0.0 (A4): pins run the full monthly engine now (A2) -- `surplus`
       // IS the disc-based FCF figure (aggregateMonthlyToAnnual), same
       // definition live's own `disc` above uses. `pin_id_sweep` mirrors
@@ -1244,6 +1281,7 @@ export default function App(){
   // v5.14.0: display fallback for a saved scenario predating hold.closingCostFlat --
   // the engine already backfills it via makeParams/mergeProperties, so the UI must show the same value.
   const defaultClosingFlatById = useMemo(()=>Object.fromEntries(freshPropertiesDefaults().map(p=>[p.id,p.hold.closingCostFlat||0])),[]);
+  const defaultPersonalShareById = useMemo(()=>Object.fromEntries(freshPropertiesDefaults().map(p=>[p.id,p.personalUseShare||0])),[]);   // v5.15.0, same reason
   // CF waterfall state now in sc object (see setSc setters above)
   const [wfMonths,  setWfMonths]  = useState(72);     // months to show in table
   const [mbmBreakdown, setMbmBreakdown] = useState(false);  // v3.2.0 Costs columns in month table
@@ -1906,29 +1944,42 @@ export default function App(){
       note:"Monthly average fixed costs. Income tax uses the same federal+CO estimator as the annual engine, annualizing each month's income. Prop tax/ins covers all three properties. Free Cash is after all modeled costs.",
     },
     income: {
-      label:"Annual Income vs Expenses",
+      label:"Personal Income vs Expenses",
       series:[
+        // v5.15.0: rental P&L sub-block -- rental-share carrying costs (per
+        // property personalUseShare; 6th St only while rented) net into Rental profit
+        {key:"hdr_rent",     label:"Rental business", header:true},
+        {key:"rent_gross",   label:"Gross rent",                     color:"#34d399"},
+        {key:"rent_op",      label:"Operating costs",                color:"#6ee7b7", cost:true},
+        {key:"rent_mtg",     label:"Mortgages (rental share)",       color:"#f87171", cost:true},
+        {key:"rent_taxIns",  label:"Tax & insurance (rental share)", color:"#e879f9", cost:true},
+        {key:"rent_maint",   label:"Maintenance (rental share)",     color:"#ef4444", cost:true},
+        {key:"rent_profit",  label:"Rental profit",                  color:"#34d399", bold:true},
+        {key:"hdr_inc",      label:"Personal income", header:true},
         {key:"inc_pension",  label:"Pension",        color:"#a78bfa"},
         {key:"inc_work",     label:"Work income",    color:"#fb923c"},
         {key:"inc_yourSs",   label:"Your SS",        color:"#60a5fa"},
         {key:"inc_brendaSs", label:"Brenda SS",      color:"#38bdf8"},
-        {key:"inc_rental",   label:"Rental (net)",   color:"#34d399"},
+        {key:"inc_rental",   label:"Rental profit",  color:"#34d399"},
         {key:"inc_draw",     label:"Lifestyle Draw", color:"#f472b6", hideZero:true},
         {key:"incTotal",     label:"Total income",   color:"#34d399", bold:true},
-        // v5.12.4: expense breakdown -- tier1's nine components ($/yr)
-        {key:"exp_fc_mtg",      label:"Mortgages",          color:"#f87171", cost:true},
+        // v5.12.4/v5.15.0: tier1's components, with mortgage/tax-ins/maint
+        // reduced to their personal share + the 6th St carrying cost
+        {key:"hdr_exp",      label:"Personal expenses", header:true},
+        {key:"exp_carryPersMtg",    label:"Housing: mortgage (personal)",        color:"#f87171", cost:true, hideZero:true},
+        {key:"exp_carryPersTaxIns", label:"Housing: tax & insurance (personal)", color:"#e879f9", cost:true, hideZero:true},
+        {key:"exp_carryPersMaint",  label:"Housing: maintenance (personal)",     color:"#ef4444", cost:true, hideZero:true},
+        {key:"exp_carrySixth",      label:"6th St carrying cost",                color:"#fca5a5", cost:true, hideZero:true},
         {key:"exp_fc_health",   label:"Health ins",         color:"#c084fc", cost:true},
         {key:"exp_fc_core",     label:"Core living",        color:"#60a5fa", cost:true},
         {key:"exp_fc_famLoan",  label:"Loan payments",      color:"#f59e0b", cost:true, hideZero:true},
         {key:"exp_fc_hiMins",   label:"HI debt minimums",   color:"#fb923c", cost:true, hideZero:true},
-        {key:"exp_fc_propCost", label:"Prop tax/insurance", color:"#e879f9", cost:true},
         {key:"exp_fc_tax",      label:"Income tax (est)",   color:"#facc15", cost:true},
-        {key:"exp_maintRes",    label:"Maintenance",        color:"#ef4444", cost:true},
         {key:"exp_fc_irmaa",    label:"IRMAA surcharge",    color:"#a3e635", cost:true, hideZero:true},
         {key:"expTotal",     label:"Total expenses", color:"#f87171", cost:true, bold:true},
         {key:"incSurplus",   label:"Surplus / (shortfall)", color:"#fbbf24", bold:true},
       ],
-      note:"Income per year (not cumulative) by source -- rental is net of op costs, so sources sum to the total. Total expenses = required costs, itemized above it; it excludes the debt sweep and buffer top-ups, which are funded FROM the surplus -- so it's lower than the Cumulative chart's 'Total spent', which includes the sweep. Partial years are annualized. Excludes one-time sale-year flows.",
+      note:"Personal view — rental carrying costs are netted into Rental profit; surplus matches the waterfall. Rental profit = gross rent minus op costs minus each rental's mortgage/tax & ins/maintenance share (set by its Personal-use share); 6th St's costs are rental while it's rented, else its own carrying-cost line. Expenses exclude the debt sweep and buffer top-ups (funded FROM the surplus), so they won't match the Fixed Costs chart's total or the Cumulative chart's 'Total spent'. Partial years are annualized. Excludes one-time sale-year flows.",
     },
     nw: {
       label:"Net Worth -- breakdown ($K)",
@@ -2096,6 +2147,11 @@ export default function App(){
                 </thead>
                 <tbody>
                   {bd.series.map(s=>{
+                    // v5.15.0: label-only section header row
+                    if(s.header) return (
+                      <tr key={s.key}><td colSpan={bdRows.length+1} style={{padding:"8px 8px 2px",color:muted,
+                        fontSize:10,fontWeight:"bold",textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</td></tr>
+                    );
                     const isCost = s.cost;
                     if(s.hideZero && bdRows.every(r=>(r[s.key]??0)===0)) return null;
                     return (
@@ -2379,7 +2435,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.14.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.15.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2486,6 +2542,18 @@ export default function App(){
                     5000,v=>"$"+Math.round(v/1000)+"K",
                     v=>String(Math.round(v/1000)),t=>Math.round(parseFloat(t)*1000),
                     `prop-value-${prop.id}`)}
+                  {/* v5.15.0: Personal Income vs Expenses chart split only -- no effect on the waterfall */}
+                  {prop.isPrimary ? (
+                    <div data-testid={`personal-use-${prop.id}`} style={{fontSize:8,color:dim,marginBottom:8}}>
+                      Personal-use share: n/a for the home -- months it's rented count as rental business; unrented while owned, its costs show as "6th St carrying cost".
+                    </div>
+                  ) : (
+                    <div data-testid={`personal-use-${prop.id}`}>
+                      {slider("Personal-use share",prop.personalUseShare ?? defaultPersonalShareById[prop.id] ?? 0,
+                        v=>setProperty(prop.id,{personalUseShare:Math.round(v*100)/100}),0,1,0.05,v=>Math.round(v*100)+"%")}
+                      <div style={{fontSize:8,color:dim,marginTop:-6,marginBottom:8}}>share of mortgage, tax, insurance &amp; maintenance that is your own housing; the rest is rental business.</div>
+                    </div>
+                  )}
                   <div style={{marginBottom:8}}>
                     <div style={{fontSize:9,color:muted,fontWeight:"bold",marginBottom:6}}>Mortgage</div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
@@ -3291,8 +3359,8 @@ export default function App(){
               refLines={[]}/>
             {/* v5.12.0: non-cumulative counterpart to the Cumulative Income
                 panel directly below -- fills the grid's 6th cell. */}
-            <Chart title="Annual Income vs Expenses / yr" dataKey="incTotal" pinKey="inc" color={green} chartId="income"
-              mainName="Income" secondaryDataKey="expTotal" secondaryColor={red} secondaryName="Expenses" pinSecondaryKey="exp"
+            <Chart title="Personal Income vs Expenses / yr" dataKey="incTotal" pinKey="inc" color={green} chartId="income"
+              mainName="Personal income" secondaryDataKey="expTotal" secondaryColor={red} secondaryName="Personal expenses" pinSecondaryKey="exp"
               annualBreakdown
               yFmt={v=>`$${Math.round(v/1000)}K`}
               refLines={[]}/>
@@ -4393,6 +4461,9 @@ export default function App(){
               // v5.6.0: was hardcoded MTG_PRINCIPAL_ELIGIBLE_IDS, no UI --
               // now a real per-property flag, mirrored here too.
               ["Principal-sweep eligible?", prop.mtgPrincipalEligible ? "Yes" : "No"],
+              // v5.15.0: Personal Income vs Expenses chart split
+              ["Personal-use share", prop.isPrimary ? "n/a (rented → rental; unrented → 6th St carrying cost)"
+                : Math.round((prop.personalUseShare ?? defaultPersonalShareById[prop.id] ?? 0)*100)+"%"],
             ],
           });
         }
@@ -4826,10 +4897,16 @@ export default function App(){
                 tag:"Output",tagColor:green,
               },
               {
-                term:"Rental: Gross vs Net",
-                short:"Net = gross rent minus operating costs -- not minus the mortgage",
-                detail:"Rental (gross) is what tenants/guests pay. Rental op costs are subtracted per segment type: STR = platform % + cleaning % + manager %; MTR = a flat cleaning fee per rental block + manager %; LTR = vacancy % + manager %. Rental (net) = gross minus those op costs. Mortgage payments are NOT netted here -- they're their own Mortgages line in Fixed Costs, so nothing is counted twice. The Cash Flow tab shows gross with op costs as a separate cost column; the Annual Income chart shows net so its sources add up to total income. (Separately, the income-tax estimate uses gross rent minus mortgage interest -- a tax concept, not shown on any chart.)",
+                term:"Rental: Gross vs Net vs Profit",
+                short:"Three levels: gross rent → net of op costs → rental profit after carrying costs",
+                detail:"(1) Rental (gross) is what tenants/guests pay. (2) Rental (net) = gross minus op costs, subtracted per segment type: STR = platform % + cleaning % + manager %; MTR = a flat cleaning fee per rental block + manager %; LTR = vacancy % + manager %. Net is what the waterfall, Fixed Costs and Cumulative charts use -- there the mortgage, prop tax/ins and maintenance stay on the cost side, so nothing is counted twice. (3) Rental profit (Personal Income vs Expenses chart only) = net minus the RENTAL share of each property's mortgage payment, tax & insurance, and maintenance. That share is 1 − the property's Personal-use share; the personal share shows as Housing expense instead. 6th St (the home) has no share setting: in months it's rented its costs are all rental; owned but unrented, they're a separate '6th St carrying cost' expense. Rental profit can be negative. The Cash Flow tab shows gross with op costs as a separate cost column. (Separately, the income-tax estimate uses gross rent minus mortgage interest -- a tax concept, not shown on any chart.)",
                 tag:"Key Distinction",tagColor:blue,
+              },
+              {
+                term:"Personal-use share",
+                short:"How much of a property's carrying cost is your own housing",
+                detail:"Per property, 0-100%, set on the property card (15th St duplex defaults to 60% -- you're moving into the 3-BR bottom unit and renting the top; Lafayette 0%). It splits that property's mortgage payment, tax & insurance, and maintenance: the personal share is Housing expense on the Personal Income vs Expenses chart, the rest is a rental-business cost netted into Rental profit. It only reclassifies -- the same dollars move off both sides, so Surplus / (shortfall), the waterfall and every other chart are unchanged. It doesn't change rent: set the unit's rental segments to match who actually rents.",
+                tag:"Model Logic",tagColor:dim,
               },
               {
                 term:"HI vs LI Debt",
@@ -4875,8 +4952,8 @@ export default function App(){
               },
               {
                 term:"Chart Units: $/mo vs $/yr",
-                short:"Most charts are monthly averages -- Annual Income is per year",
-                detail:"Work Required, Free Cash Flow, and Fixed Costs show the average $/month within each year. Annual Income shows $/year: a full calendar year is its true total, while a partial year (like the start year) shows its annualized rate. Debt and Net Worth are start-of-year balances. Zooming the chart range to 8 years or fewer switches to quarterly points (Q2'27), same units.",
+                short:"Most charts are monthly averages -- Personal Income vs Expenses is per year",
+                detail:"Work Required, Free Cash Flow, and Fixed Costs show the average $/month within each year. Personal Income vs Expenses shows $/year: a full calendar year is its true total, while a partial year (like the start year) shows its annualized rate. Its scope is also different by design: rental carrying costs are netted into Rental profit rather than counted as expenses, so its expenses won't match the Fixed Costs chart's total or the Cumulative chart's 'Total spent' (its surplus does match the waterfall). Debt and Net Worth are start-of-year balances. Zooming the chart range to 8 years or fewer switches to quarterly points (Q2'27), same units.",
                 tag:"Key Distinction",tagColor:blue,
               },
               {

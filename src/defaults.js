@@ -28,6 +28,10 @@ export function freshPropertiesDefaults(){
       // Principal Paydown controls. True here/on 'fifteenth' preserves the
       // exact pre-v5.6.0 default behavior.
       mtgPrincipalEligible: true,
+      // v5.15.0: share (0-1) of carrying costs that is personal housing -- unused
+      // for the primary home, whose split is per-month: rented -> rental
+      // business, unrented while owned -> its own "6th St carrying cost" line.
+      personalUseShare: 0,
       mortgage: { balance: 805_495, rate: 0.04875, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
       hold: {
         mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
@@ -64,6 +68,9 @@ export function freshPropertiesDefaults(){
       id: 'fifteenth', label: '2224 15th St (rental)', isPrimary: false,
       value: 1_375_000, appreciationPct: null,
       mtgPrincipalEligible: true,   // v5.6.0 -- see 'sixth' comment above
+      // v5.15.0: Bob & Brenda are moving into the 3-BR bottom unit; the 2-BR
+      // top is rented -- 60% of mortgage/tax/ins/maint is personal housing.
+      personalUseShare: 0.60,
       mortgage: { balance: 347_601, rate: 0.0435, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
       hold: {
         mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
@@ -89,6 +96,7 @@ export function freshPropertiesDefaults(){
       // v5.6.0: false -- was hardcoded EXCLUDED from MTG_PRINCIPAL_ELIGIBLE_IDS
       // (low rate/balance, per the old Cash Flow tab prose note this replaces).
       mtgPrincipalEligible: false,
+      personalUseShare: 0,   // v5.15.0: pure rental
       // ioYears:0 -- amortizing from origination (no interest-only period), matching the
       // pre-v4 Lafayette treatment. Same mortgage state machine as the IO/recast properties.
       // originMonth:1 (not 7, unlike sixth/fifteenth's servicer-calibrated Jul origin) --
