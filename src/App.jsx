@@ -1,3 +1,18 @@
+// v5.16.0 -- Month-level sale dates. Property sales (hold) and the One-Time
+// Obligation are dated Year + Month (effective the 1st) instead of Year +
+// Quarter; UI toggles are now Jan..Dec. engine.js's new saleMonthOf() is the
+// one reader (falls back to a legacy quarter's first month), used by the
+// ownership gate (rent, mortgage stepping, carrying cost, maintenance, value),
+// the sale-date mortgage payoff, proceeds/obligation cash-event timing, the
+// quarterly-zoom dispo bucketing, and the segment-clip notice. Saved pins
+// migrate (defaults.js migrateQuarterToMonth: Q1->Jan, Q2->Apr, Q3->Jul,
+// Q4->Oct) in mergeProperties/makeParams/loadPinIntoLive, so they reproduce
+// their old results exactly; default quarter:2 -> month:4 (same April).
+// Also month-precise now: liquidation NW counts a property owned in the
+// period's first month (was dropped for its whole sale year), and the Cash
+// Flow tab's "kept" flags / mortgage label use ownership at the start month
+// (was sale year > start year).
+//
 // v5.15.0 -- Annual Income chart -> "Personal Income vs Expenses / yr"
 // (handoff 2026-10-24, Part A). Rental carrying costs (mortgage payment,
 // prop tax/ins, maintenance) are reclassified for THIS chart only: new
@@ -550,21 +565,21 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
-import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggregateMonthlyToAnnual, aggregateMonthlyToPeriod, periodKeyOf, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo, segmentStartAbsMonth, segmentEndAbsMonth, segmentCoversMonth, segmentCapMonths, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
+import { BASE, HI_TOTAL, SOPHIA_LOANS, NOLAN_LOANS, buildMonthlyScenario, aggregateMonthlyToAnnual, aggregateMonthlyToPeriod, periodKeyOf, computeDispositions, keyStats, workFromCurve, remainBal, estimateTax, disposeAsset, taxRecognized, DISPO_DEFAULTS, unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps, yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, saleMonthOf, segmentClipInfo, segmentStartAbsMonth, segmentEndAbsMonth, segmentCoversMonth, segmentCapMonths, mortgageBalanceClosed, mortgageMonthsSince, planHiPaydown, splitResidual, loanMonthlyPmt, applyDefaultsOverrides, getDefaultsCode, healthMonthly, monthsInYear, monthsElapsedBeforeYear, ssClaimAge, deriveAgeAnchors, buildDebtList, applyDebtPlan, rankSweepQueue } from "./engine.js";
 // v4.3.0: BASE.startYear/startMonth (imported above) are the single source
 // of truth for the model's "now" -- both are Defaults-tab-editable (see
 // DEFAULTS_REGISTRY below), replacing the old implicit Jan-1 assumption and
 // wfData's hardcoded June-2026 startDate.
-import { SC_DEFAULTS, makeParams, mergeProperties, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS_SC, freshPropertiesDefaults, freshObligationDefaults } from "./defaults.js";
+import { SC_DEFAULTS, makeParams, mergeProperties, migrateQuarterToMonth, PIN_COLORS, SAVE_SCHEMA_VERSION, DEFAULT_LOANS_SC, freshPropertiesDefaults, freshObligationDefaults } from "./defaults.js";
 
 // v3.1.0: expose engine on window for Playwright unit tests via page.evaluate
 if (typeof window !== 'undefined') {
   window.__engine = {
     BASE, HI_TOTAL, buildMonthlyScenario, aggregateMonthlyToAnnual, aggregateMonthlyToPeriod, periodKeyOf, computeDispositions, keyStats, disposeAsset, taxRecognized,
-    DISPO_DEFAULTS, makeParams,
+    DISPO_DEFAULTS, makeParams, mergeProperties, migrateQuarterToMonth,
     workFromCurve, remainBal, estimateTax,
     unitSegmentGross, unitSegmentNet, validateUnitSegments, unitSegmentOverlaps,
-    yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, segmentClipInfo,
+    yearHeldFraction, unitOwnedThisMonth, quarterStartMonth, saleMonthOf, segmentClipInfo,
     segmentStartAbsMonth, segmentEndAbsMonth, segmentCoversMonth, segmentCapMonths,
     planHiPaydown, splitResidual, loanMonthlyPmt,
     mortgageBalanceClosed, mortgageMonthsSince,
@@ -853,9 +868,17 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     pv*(1-(prop?.hold?.sellingCostsPct ?? DISPO_DEFAULTS.sellingCostsPct)) - (prop?.hold?.closingCostFlat||0);
   const _liqPropById = Object.fromEntries((liveParams.properties||[]).map(pr=>[pr.id,pr]));
   const _liqReApp     = liveParams.reAppreciation;
-  const _liqSixthYr = _liqPropById.sixth?.hold.mode    ==='keep' ? Infinity : (_liqPropById.sixth?.hold.year    || 2055);
-  const _liqLafYr   = _liqPropById.barberry?.hold.mode ==='keep' ? Infinity : (_liqPropById.barberry?.hold.year || 2055);
-  const _liqDupYr   = _liqPropById.fifteenth?.hold.mode==='keep' ? Infinity : (_liqPropById.fifteenth?.hold.year|| 2055);
+  // v5.16.0: liquidation NW counts a property if it's still owned in the
+  // period's FIRST month -- the same snapshot month book NW uses
+  // (aggregateMonthlyToPeriod's `first` row). Was year-granular (`cal <
+  // saleYear`), which dropped a property for its whole sale year, e.g. a Dec
+  // sale vanished from that January's liquidation NW while book NW kept it.
+  const liqOwnedAtPeriodStart = (prop, cal) => {
+    const yr = Math.floor(cal+1e-9);
+    let m = Math.round((cal-yr)*12)+1;   // annual -> Jan; quarterly cal yr+q/4 -> the quarter's first month
+    if(yr===BASE.startYear) m = Math.max(m, BASE.startMonth);
+    return unitOwnedThisMonth(prop?.hold, yr, m);
+  };
   // periodKeyOf needs a real calYear/calMonth1to12 wfRow-shape; periodRows only
   // carry `cal` (bare year for annual, calYear+quarterIndex0/4 for quarterly).
   // Both keying schemes reduce to the same bucket key -- pk/4 was how `cal`
@@ -928,9 +951,9 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
     {
       const elapsedYears = r.cal - BASE.startYear;
       const app=Math.pow(1+_liqReApp,elapsedYears);
-      const sixthOwned = r.cal<_liqSixthYr;
-      const dupOwned   = r.cal<_liqDupYr;
-      const lafOwned   = r.cal<_liqLafYr;
+      const sixthOwned = liqOwnedAtPeriodStart(_liqPropById.sixth, r.cal);
+      const dupOwned   = liqOwnedAtPeriodStart(_liqPropById.fifteenth, r.cal);
+      const lafOwned   = liqOwnedAtPeriodStart(_liqPropById.barberry, r.cal);
       let primNet=0;
       if(sixthOwned){
         const pv=(_liqPropById.sixth?.value||0)*app;
@@ -984,12 +1007,9 @@ function buildChartRows(periodRows, wfRows, periodMonths, pinsForChart, livePara
         const pApp=Math.pow(1+(pSnap.reApp??4)/100,pElapsedYears);
         // v5.14.0: merged so a pin saved before closingCostFlat existed backfills it
         const pPropById = Object.fromEntries(mergeProperties(pSnap.properties).map(pr2=>[pr2.id,pr2]));
-        const pSixthYr = pPropById.sixth?.hold.mode    ==='keep' ? Infinity : (pPropById.sixth?.hold.year    || 2055);
-        const pDupYr   = pPropById.fifteenth?.hold.mode==='keep' ? Infinity : (pPropById.fifteenth?.hold.year|| 2055);
-        const pLafYr   = pPropById.barberry?.hold.mode ==='keep' ? Infinity : (pPropById.barberry?.hold.year || 2055);
-        const pSixthOwned = r.cal<pSixthYr;
-        const pDupOwned   = r.cal<pDupYr;
-        const pLafOwned   = r.cal<pLafYr;
+        const pSixthOwned = liqOwnedAtPeriodStart(pPropById.sixth, r.cal);
+        const pDupOwned   = liqOwnedAtPeriodStart(pPropById.fifteenth, r.cal);
+        const pLafOwned   = liqOwnedAtPeriodStart(pPropById.barberry, r.cal);
         let pPrimNet=0;
         if(pSixthOwned){
           const pv=(pPropById.sixth?.value||0)*pApp;
@@ -1308,9 +1328,11 @@ export default function App(){
   // Maintenance: derived from Cash Flow structure values + rate -- source of truth.
   // v4.0.0-A: "still held" now keyed by each property's OWN hold.mode/year
   // (struct6 slider only matters while 6th is held at launch).
-  const uiKeepPrimary = propById.sixth?.hold.mode==='keep' || (propById.sixth?.hold.year||2055) > BASE.startYear;
-  const uiKeepDuplex  = propById.fifteenth?.hold.mode==='keep' || (propById.fifteenth?.hold.year||2055) > BASE.startYear;
-  const uiKeepLaf     = propById.barberry?.hold.mode==='keep' || (propById.barberry?.hold.year||2055) > BASE.startYear;
+  // v5.16.0: owned at the model start month (was: sale year > start year,
+  // which hid a property selling later in the start year, e.g. Dec 2026).
+  const uiKeepPrimary = unitOwnedThisMonth(propById.sixth?.hold,     BASE.startYear, BASE.startMonth);
+  const uiKeepDuplex  = unitOwnedThisMonth(propById.fifteenth?.hold, BASE.startYear, BASE.startMonth);
+  const uiKeepLaf     = unitOwnedThisMonth(propById.barberry?.hold,  BASE.startYear, BASE.startMonth);
   const maintAnnual6   = uiKeepPrimary ? struct6*1000*maintStr/100 : 0;
   const maintAnnual15  = uiKeepDuplex  ? struct15*1000*maintStr/100 : 0;
   const maintAnnualLaf = uiKeepLaf     ? structLaf*1000*maintStr/100 : 0;
@@ -1642,6 +1664,8 @@ export default function App(){
     // state with that field simply missing -- see mergeProperties' comment
     // (defaults.js) for why that's unsafe for a plain boolean flag.
     next.properties = mergeProperties(s.properties);
+    // v5.16.0: a pin saved with obligation.quarter loads as obligation.month
+    next.obligation = { ...freshObligationDefaults(), ...(migrateQuarterToMonth(s.obligation)||{}) };
     if(next.lifestyleDraws) next.lifestyleDraws=next.lifestyleDraws.map(d=>({...d,enabled:d.enabled!==false}));
     setLiveSc(next);
     setPinName(pin.name);
@@ -2435,7 +2459,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.15.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.16.0</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -2529,7 +2553,7 @@ export default function App(){
                       </button>
                       <span style={{fontSize:11,color:bright,fontWeight:"bold"}}>{prop.label}{prop.isPrimary?" (primary -- §121, no 1031)":""}</span>
                     </div>
-                    {isSold && <span data-testid={`sold-badge-${prop.id}`} style={{fontSize:9,color:red,fontFamily:mono,fontWeight:"bold"}}>SOLD {hold.mode} · Q{hold.quarter||1} {hold.year}</span>}
+                    {isSold && <span data-testid={`sold-badge-${prop.id}`} style={{fontSize:9,color:red,fontFamily:mono,fontWeight:"bold"}}>SOLD {hold.mode} · {MONTH_ABBR[saleMonthOf(hold)-1]} {hold.year}</span>}
                   </div>
 
                   {isOpen && (<>
@@ -2577,7 +2601,7 @@ export default function App(){
                     </div>
                   </div>
 
-                  {/* Hold/sell: mode + year + quarter */}
+                  {/* Hold/sell: mode + year + month (v5.16.0; was quarter) */}
                   <div style={{marginTop:8,paddingTop:8,borderTop:`1px dashed ${bdr}`}}>
                     <div data-testid={`mode-toggle-${prop.id}`} style={{marginBottom:8}}>
                       {toggle(hold.mode||'keep', v=>setPropertyHold(prop.id,{mode:v}), modeOpts)}
@@ -2589,9 +2613,10 @@ export default function App(){
                         {slider("Sale year",hold.year||BASE.startYear,v=>setPropertyHold(prop.id,{year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
                       </div>
                       <div>
-                        <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale quarter (assumed at quarter boundary)</div>
-                        <div data-testid={`sale-quarter-toggle-${prop.id}`}>
-                          {toggle(hold.quarter||1, v=>setPropertyHold(prop.id,{quarter:v}), [1,2,3,4].map(q=>({v:q,l:'Q'+q})))}
+                        {/* v5.16.0: month granularity (was Q1-Q4) -- sale effective the 1st of the month */}
+                        <div style={{fontSize:9,color:muted,marginBottom:3}}>Sale month (effective the 1st)</div>
+                        <div data-testid={`sale-month-toggle-${prop.id}`}>
+                          {toggle(saleMonthOf(hold), v=>setPropertyHold(prop.id,{month:v}), MONTH_ABBR.map((l,i)=>({v:i+1,l})))}
                         </div>
                       </div>
                     </>)}
@@ -2733,7 +2758,7 @@ export default function App(){
                                   v=>String(v),t=>parseFloat(t),
                                   `ltr-rent-${unit.id}-${ei}`,green,8)}
                                 {clip && clip.truncated && (
-                                  <div style={{fontSize:8,color:blue,fontStyle:"italic"}}>ⓘ truncated at Q{hold.quarter||1} {hold.year} sale</div>
+                                  <div style={{fontSize:8,color:blue,fontStyle:"italic"}}>ⓘ truncated at {MONTH_ABBR[saleMonthOf(hold)-1]} {hold.year} sale</div>
                                 )}
                               </div>
                             );
@@ -2827,8 +2852,11 @@ export default function App(){
             {/* v4.3.0: BASE.startYear/+20 (was hardcoded 2026/2046) */}
             {slider("Year",obligation.year||BASE.startYear,v=>setObligation({year:v}),BASE.startYear,BASE.startYear+20,1,v=>v+"")}
             <div style={{marginBottom:8}}>
-              <div style={{fontSize:9,color:muted,marginBottom:3}}>Quarter</div>
-              {toggle(obligation.quarter||1, v=>setObligation({quarter:v}), [1,2,3,4].map(q=>({v:q,l:'Q'+q})))}
+              {/* v5.16.0: month (was quarter) -- paid the 1st of the month */}
+              <div style={{fontSize:9,color:muted,marginBottom:3}}>Month</div>
+              <div data-testid="obligation-month-toggle">
+                {toggle(saleMonthOf(obligation), v=>setObligation({month:v}), MONTH_ABBR.map((l,i)=>({v:i+1,l})))}
+              </div>
             </div>
             <div style={{marginBottom:8}}>
               {toggle(obligation.offsetsCapitalGains!==false, v=>setObligation({offsetsCapitalGains:v}), [
@@ -4164,7 +4192,7 @@ export default function App(){
               const r0 = wfData[0];
               // Current month values
               const rows_fc = [
-                {label:"Mortgages",         sub:properties.filter(p=>(p.hold.mode==='keep')||(p.hold.year||2055)>BASE.startYear).map(p=>p.label).join(" + "),  val:r0.fc_mtg,    color:"#f87171", note:null},
+                {label:"Mortgages",         sub:properties.filter(p=>unitOwnedThisMonth(p.hold, BASE.startYear, BASE.startMonth)).map(p=>p.label).join(" + "),  val:r0.fc_mtg,    color:"#f87171", note:null},
                 {label:"Health insurance",  sub:"You + Brenda + kids (until off plan)",                    val:r0.fc_health,  color:"#c084fc", note:null},
                 {label:"Core living",       sub:"Car $250 · Other ins $500 · Food $900 · Utilities $400 · Personal $600", val:r0.fc_core, color:"#60a5fa", note:null},
                 {label:"HI debt minimums",  sub:"CC + Sophia + Nolan loans",                               val:r0.fc_hiMins,  color:"#fb923c", note:r0.fc_hiMins===0?"Paid off or none":null},
@@ -4929,7 +4957,7 @@ export default function App(){
               {
                 term:"One-Time Obligation & Sale Proceeds",
                 short:"Lump sums are routed debt-first -- unlike the monthly waterfall",
-                detail:"When a property sells or the One-Time Obligation comes due, the money is applied in that event's own quarter: the obligation/draw comes out first, then the remainder pays down HI debt (and closing-eligible LI loans) highest-rate-first, then tops up reserves and buffers, and anything left joins the normal sweep. This debt-first order applies ONLY to these one-time lump sums -- the ordinary monthly waterfall still fills buffers before sweeping debt. The one-time draw is reported separately so it doesn't spike the Free Cash Flow chart. Each sale's proceeds = sale price minus two selling-cost lines -- Commission & concessions (a % of price: 6% global default, 5% for 6th St) and a flat Escrow / title / recording $ (default $5,000 per rental, $0 for 6th St, whose 5% already includes title/closing) -- minus the mortgage payoff and tax. Both cost lines also reduce the taxable gain, except on 6th St, whose basis already includes its closing costs.",
+                detail:"When a property sells or the One-Time Obligation comes due, the money is applied in that event's own month (sales and the obligation are dated by year + month, effective the 1st): the obligation/draw comes out first, then the remainder pays down HI debt (and closing-eligible LI loans) highest-rate-first, then tops up reserves and buffers, and anything left joins the normal sweep. This debt-first order applies ONLY to these one-time lump sums -- the ordinary monthly waterfall still fills buffers before sweeping debt. The one-time draw is reported separately so it doesn't spike the Free Cash Flow chart. Each sale's proceeds = sale price minus two selling-cost lines -- Commission & concessions (a % of price: 6% global default, 5% for 6th St) and a flat Escrow / title / recording $ (default $5,000 per rental, $0 for 6th St, whose 5% already includes title/closing) -- minus the mortgage payoff and tax. Both cost lines also reduce the taxable gain, except on 6th St, whose basis already includes its closing costs.",
                 tag:"Model Logic",tagColor:dim,
               },
               {

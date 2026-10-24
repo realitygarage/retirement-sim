@@ -482,22 +482,33 @@ export function unitSegmentOverlaps(segs){
 }
 
 // =============================================================================
-// PROPERTY HOLD / SALE TIMING (v4.0.0-A) -- sale timing granularity is the
-// quarter; hold: { mode, year, quarter (1-4) }.
+// PROPERTY HOLD / SALE TIMING -- v5.16.0: sale timing granularity is the
+// MONTH (was the quarter, v4.0.0-A); hold: { mode, year, month (1-12) }, sale
+// effective the 1st of that month. The One-Time Obligation uses the same
+// { year, month } shape.
 // =============================================================================
 export function quarterStartMonth(q){ return (Math.min(4,Math.max(1,q||1))-1)*3 + 1; }
 
+// v5.16.0: the ONE place a sale/obligation month is read. Falls back to a
+// legacy `quarter` field's first month (Q1->1, Q2->4, Q3->7, Q4->10) so an
+// object that predates month granularity (e.g. a direct engine call with
+// {quarter}) times exactly as it did before -- mergeProperties/makeParams
+// (defaults.js) also migrate saved quarter fields to month up front.
+export function saleMonthOf(t){
+  if(t && t.month!=null) return Math.min(12, Math.max(1, Math.round(t.month)));
+  return quarterStartMonth(t?.quarter);
+}
+
 // Annual proration multiplier for a property's income in calendar year `year`:
 // 1 if fully held (keep, or year strictly before the sale year), 0 if fully
-// after the sale year, else the fraction of quarters held (sale at a quarter
-// boundary -> income counts for quarters STRICTLY BEFORE the sale quarter).
+// after the sale year, else the fraction of months held (sale on the 1st of
+// the sale month -> income counts for months STRICTLY BEFORE it).
 export function yearHeldFraction(hold, year){
   if(!hold || hold.mode==='keep') return 1;
   const saleYear = hold.year||2055;
   if(year < saleYear) return 1;
   if(year > saleYear) return 0;
-  const q = Math.min(4, Math.max(1, hold.quarter||1));
-  return (q-1)/4;
+  return (saleMonthOf(hold)-1)/12;
 }
 
 // True monthly ownership check (drives both rental-income gating and mortgage
@@ -508,18 +519,18 @@ export function unitOwnedThisMonth(hold, calYear, mo1to12){
   const saleYear = hold.year||2055;
   if(calYear < saleYear) return true;
   if(calYear > saleYear) return false;
-  return mo1to12 < quarterStartMonth(hold.quarter);
+  return mo1to12 < saleMonthOf(hold);
 }
 
 // UI-only: is this segment clipped by the property's sale date? Never blocks
 // income calculation (the engine sums whatever's given, gated by ownership) --
-// this just drives the non-blocking "truncated at Q{n} {year} sale" notice.
+// this just drives the non-blocking "truncated at {Mon} {year} sale" notice.
 export function segmentClipInfo(seg, hold){
   if(!hold || hold.mode==='keep') return null;
   const saleYear = hold.year||2055;
   const f=seg.yrFrom??seg.yr, t=seg.yrTo??seg.yr;
   if(f>saleYear) return {fullyAfterSale:true};
-  if(t>=saleYear) return {truncated:true, quarter:hold.quarter||1, year:saleYear};
+  if(t>=saleYear) return {truncated:true, month:saleMonthOf(hold), year:saleYear};
   return null;
 }
 
@@ -783,7 +794,7 @@ export function computeDispositions(p){
     // continuously-appreciating propValue for held properties, the correct place
     // for appreciationPct).
     const fmv = prop.value;
-    const saleMonth = quarterStartMonth(hold.quarter);
+    const saleMonth = saleMonthOf(hold);   // v5.16.0: was quarterStartMonth(hold.quarter)
     const mtgB = mortgageBalanceClosed(prop.mortgage, mortgageMonthsSince(prop.mortgage, hold.year||2055, saleMonth));
     const depTaken = (hold.depreciationRecapture || 0) / DISPO_DEFAULTS.recaptureRate;
     const propObj = {
@@ -802,7 +813,7 @@ export function computeDispositions(p){
       sellingCostsPct: hold.sellingCostsPct,
       closingCostFlat: hold.closingCostFlat || 0,
     });
-    return { ...res, year: hold.year, quarter: hold.quarter, mode: hold.mode, caSourceDeferredGain: hold.caSourceDeferredGain || 0 };
+    return { ...res, year: hold.year, month: saleMonth, mode: hold.mode, caSourceDeferredGain: hold.caSourceDeferredGain || 0 };
   }
   const dispoRes = {};
   for(const prop of properties) dispoRes[prop.id] = computeDispo(prop);
@@ -882,8 +893,8 @@ export function computeDispositions(p){
   }
 
   // Chronological cash events (v5.0.2) -- each disposition's after-tax
-  // proceeds arrive at ITS OWN sale-quarter-start month, and the obligation's
-  // cash payment arrives at ITS OWN quarter-start month, instead of all
+  // proceeds arrive at ITS OWN sale month (v5.16.0; was the sale quarter's
+  // first month), and the obligation's cash payment at ITS OWN month, instead of all
   // same-year events being pre-summed into one lump applied at the year's
   // first month. This is separate from (and does not change) the tax-offset
   // netting above, which stays annual -- that's how capital-gains tax
@@ -906,16 +917,17 @@ export function computeDispositions(p){
   // startMonth as "unowned from month 0"). Clamp the event's effective month
   // to the launch month in that one case, so the cash event lands on the
   // model's very first row instead of silently never matching any row.
-  const effEventMonth = (year, quarter) =>
-    year===BASE.startYear ? Math.max(quarterStartMonth(quarter), BASE.startMonth) : quarterStartMonth(quarter);
+  // v5.16.0: takes the event's month (was its quarter).
+  const effEventMonth = (year, month) =>
+    year===BASE.startYear ? Math.max(month, BASE.startMonth) : month;
   for(const prop of properties){
     const d = dispoRes[prop.id];
     if(d.mode && d.mode!=='keep'){
-      pushCashEvent(d.year, effEventMonth(d.year, d.quarter), d.afterTaxNetProceeds||0, 'sale', prop.label);
+      pushCashEvent(d.year, effEventMonth(d.year, d.month), d.afterTaxNetProceeds||0, 'sale', prop.label);
     }
   }
   if(obligAmt > 0){
-    pushCashEvent(obligYr, effEventMonth(obligYr, obligation.quarter||1), -obligAmt, 'obligation', 'One-time obligation');
+    pushCashEvent(obligYr, effEventMonth(obligYr, saleMonthOf(obligation)), -obligAmt, 'obligation', 'One-time obligation');
   }
   for(const yr of Object.keys(cashEvents)) cashEvents[yr].sort((a,b)=>a.month-b.month);
 
@@ -1648,12 +1660,13 @@ export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
     // within the year matches) is unchanged since periodMonths===12 skips
     // the quarter gate entirely.
     const curQuarter1to4 = Math.floor(((first.calMonth1to12??1)-1)/3)+1;
-    const inThisPeriod = d => d.year===first.calYear && (periodMonths!==3 || (d.quarter||1)===curQuarter1to4);
+    // v5.16.0: the event's quarter is derived from its month (saleMonthOf).
+    const inThisPeriod = d => d.year===first.calYear && (periodMonths!==3 || Math.floor((saleMonthOf(d)-1)/3)+1===curQuarter1to4);
     const dispoRes = wfRows.dispoResults || {};
     const dispoTaxYr = Object.values(dispoRes).reduce((s,d)=>s+(inThisPeriod(d) ? d.totalTax : 0), 0);
     const dispoNetYr = Object.values(dispoRes).reduce((s,d)=>s+(inThisPeriod(d) ? (d.afterTaxNetProceeds||0) : 0), 0);
     const obligation = p.obligation || {};
-    const settlementOutYr = inThisPeriod({year:obligation.year||BASE.startYear, quarter:obligation.quarter||1}) ? (obligation.amount||0) : 0;
+    const settlementOutYr = inThisPeriod({year:obligation.year||BASE.startYear, month:saleMonthOf(obligation)}) ? (obligation.amount||0) : 0;
     // ioMode: still inside its contractual IO window on the first day of this
     // period -- same definition (and same field name) the old annual engine used.
     const ioModeYr = Object.values(first.propIoMode||{}).some(Boolean);

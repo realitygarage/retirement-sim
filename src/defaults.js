@@ -4,7 +4,7 @@
 //           dispositions/sixthIncomeSegments/topUnit/lafRental model.
 //           NO backward compatibility -- fresh schema, no migration.
 // =============================================================================
-import { BASE, DISPO_DEFAULTS, NOLAN_BAL } from "./engine.js";
+import { BASE, DISPO_DEFAULTS, NOLAN_BAL, quarterStartMonth } from "./engine.js";
 
 // -----------------------------------------------------------------------------
 // PROPERTIES_DEFAULTS (v4.0.0-A) -- one entry per property; units array length
@@ -34,7 +34,7 @@ export function freshPropertiesDefaults(){
       personalUseShare: 0,
       mortgage: { balance: 805_495, rate: 0.04875, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
       hold: {
-        mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
+        mode: 'keep', year: 2055, month: 4, saleMode: 'market', cashBoot: 0,
         // basis = $735K cost + $76K improvements + $88.55K closing costs (per the
         // agent's net sheet, capitalized into the CPA's adjusted-basis worksheet
         // figure) -- sellingCostsInBasis:true tells disposeAsset NOT to subtract
@@ -73,7 +73,7 @@ export function freshPropertiesDefaults(){
       personalUseShare: 0.60,
       mortgage: { balance: 347_601, rate: 0.0435, originYear: 2021, originMonth: 7, termYears: 30, ioYears: 10 },
       hold: {
-        mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
+        mode: 'keep', year: 2055, month: 4, saleMode: 'market', cashBoot: 0,
         basis: 424_309, sec121Exclusion: 0, caSourceDeferredGain: 801_441, depreciationRecapture: 44_000,
         closingCostFlat: 5_000,   // v5.14.0: escrow/title/recording $
         cpaEstTax: 288_000, cpaNetProceedsAfterTax: 656_470,
@@ -104,7 +104,7 @@ export function freshPropertiesDefaults(){
       // paid as of Jan 2026 (60 months); Barberry's true origination date is uncalibrated.
       mortgage: { balance: 181_115, rate: 0.0410, originYear: 2021, originMonth: 1, termYears: 30, ioYears: 0 },
       hold: {
-        mode: 'keep', year: 2055, quarter: 2, saleMode: 'market', cashBoot: 0,
+        mode: 'keep', year: 2055, month: 4, saleMode: 'market', cashBoot: 0,
         basis: 183_043, sec121Exclusion: 0, caSourceDeferredGain: 391_507, depreciationRecapture: 21_500,
         closingCostFlat: 5_000,   // v5.14.0: escrow/title/recording $
         cpaEstTax: 124_000, cpaNetProceedsAfterTax: 283_567,
@@ -126,8 +126,10 @@ export function freshPropertiesDefaults(){
 // (no percentage slider). The obligation still ALSO reduces the year's pooled
 // cash (paid out regardless of the tax treatment).
 // -----------------------------------------------------------------------------
+// v5.16.0: month (1-12, effective the 1st) replaces quarter -- Q2 -> month 4,
+// the same April date, so default results are unchanged.
 export function freshObligationDefaults(){
-  return { amount: 525_000, year: 2026, quarter: 2, offsetsCapitalGains: true };
+  return { amount: 525_000, year: 2026, month: 4, offsetsCapitalGains: true };
 }
 
 // -----------------------------------------------------------------------------
@@ -239,6 +241,18 @@ export const DEFAULTS = {
 // eligibility list -- an old pin loaded into live would silently show every
 // property as sweep-ineligible until the user re-checked the boxes by hand.
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// v5.16.0: sale/obligation timing moved from quarter to month. A saved hold or
+// obligation that predates it carries `quarter` and no `month` -- convert it
+// to that quarter's first month (Q1->Jan, Q2->Apr, Q3->Jul, Q4->Oct) BEFORE
+// merging over the defaults, or the default `month` would silently win and
+// change an old pin's sale date. Same results as before by construction.
+export function migrateQuarterToMonth(t){
+  if(!t || t.month!=null || t.quarter==null) return t;
+  const { quarter, ...rest } = t;
+  return { ...rest, month: quarterStartMonth(quarter) };
+}
+
 export function mergeProperties(ovProps){
   const baseProps = freshPropertiesDefaults();
   const list = Array.isArray(ovProps) ? ovProps : null;
@@ -248,7 +262,7 @@ export function mergeProperties(ovProps){
     return {
       ...base, ...ov,
       mortgage: { ...base.mortgage, ...(ov.mortgage||{}) },
-      hold: { ...base.hold, ...(ov.hold||{}) },
+      hold: { ...base.hold, ...(migrateQuarterToMonth(ov.hold)||{}) },
       units: Array.isArray(ov.units) ? ov.units.map((u,i)=>({ ...(base.units[i]||{}), ...u,
         segments: Array.isArray(u.segments) ? u.segments : (base.units[i]?.segments||[]) })) : base.units,
     };
@@ -264,7 +278,7 @@ export function makeParams(overrides={}){
   // pick up every other default field. Properties not present in the override
   // fall back to fresh defaults untouched.
   p.properties = mergeProperties(overrides.properties);
-  p.obligation = { ...freshObligationDefaults(), ...(overrides.obligation||{}) };
+  p.obligation = { ...freshObligationDefaults(), ...(migrateQuarterToMonth(overrides.obligation)||{}) };   // v5.16.0
   p.loans = (p.loans||[]).filter(l=>l && (l.amount||0)>0 && (l.months||0)>0);
   return p;
 }

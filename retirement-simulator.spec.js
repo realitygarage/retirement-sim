@@ -327,7 +327,8 @@ test.describe('Group B — Chart Display', () => {
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }, '2028');
     await page.waitForTimeout(150);
-    await page.locator('[data-testid="sale-quarter-toggle-fifteenth"]').getByRole('button', { name: 'Q2', exact: true }).click();
+    // v5.16.0: month toggle (was Q2 -- same April date)
+    await page.locator('[data-testid="sale-month-toggle-fifteenth"]').getByRole('button', { name: 'Apr', exact: true }).click();
     await page.waitForTimeout(400);
 
     const nwChart = page.locator('div').filter({ hasText: /^Net Worth \(\$M\)$/ })
@@ -686,10 +687,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.15.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.16.0"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.15.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.15.0');
+    await expect(page.locator('text=v5.16.0').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.16.0');
   });
 
 });
@@ -1146,10 +1147,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.15.0', async ({ page }) => {
+  test('L1 — Version header shows v5.16.0', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.15.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.15.0 confirmed');
+    await expect(page.locator('text=v5.16.0').first()).toBeVisible();
+    console.log('  L1 — Version v5.16.0 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1228,7 +1229,9 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     await setRange(page.locator(`[data-testid="sale-year-slider-${propId}"] input[type="range"]`), year);
     await page.waitForTimeout(150);
     if (quarter) {
-      await page.locator(`[data-testid="sale-quarter-toggle-${propId}"]`).getByRole('button', { name: 'Q' + quarter, exact: true }).click();
+      // v5.16.0: month toggle -- the quarter arg maps to its first month (same date as before)
+      const MON = ['Jan', 'Apr', 'Jul', 'Oct'][quarter - 1];
+      await page.locator(`[data-testid="sale-month-toggle-${propId}"]`).getByRole('button', { name: MON, exact: true }).click();
       await page.waitForTimeout(150);
     }
   }
@@ -2221,7 +2224,9 @@ test.describe('Group S — v4.1.0 Chart Legends / Colors / FCF Draw', () => {
     await setRange(page.locator(`[data-testid="sale-year-slider-${propId}"] input[type="range"]`), year);
     await page.waitForTimeout(150);
     if (quarter) {
-      await page.locator(`[data-testid="sale-quarter-toggle-${propId}"]`).getByRole('button', { name: 'Q' + quarter, exact: true }).click();
+      // v5.16.0: month toggle -- the quarter arg maps to its first month (same date as before)
+      const MON = ['Jan', 'Apr', 'Jul', 'Oct'][quarter - 1];
+      await page.locator(`[data-testid="sale-month-toggle-${propId}"]`).getByRole('button', { name: MON, exact: true }).click();
       await page.waitForTimeout(150);
     }
   }
@@ -3797,6 +3802,112 @@ test.describe('Group AD — v5.15.0 Personal Income vs Expenses', () => {
     });
     console.log('  AD4 — ' + JSON.stringify(result));
     expect(result.carrySixth).toBeGreaterThan(0);
+  });
+
+});
+
+// ─── Group AE: v5.16.0 Month-level sale dates ───────────────────────────────
+test.describe('Group AE — v5.16.0 Month-Level Sale Dates', () => {
+
+  test('AE1 — Dec 2026 sale set via the UI: 6th St carrying cost Jul-Nov 2026, $0 from Dec; proceeds land in Dec', async ({ page }) => {
+    await loadApp(page);
+    const card = page.locator('[data-testid="property-sixth-card"]');
+    await card.scrollIntoViewIfNeeded();
+    await card.locator('[data-testid="mode-toggle-sixth"]').getByRole('button', { name: 'Sell', exact: true }).click();
+    await page.waitForTimeout(200);
+    await page.locator('[data-testid="sale-year-slider-sixth"] input[type="range"]').evaluate((el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, '2026');
+    await page.waitForTimeout(150);
+    await page.locator('[data-testid="sale-month-toggle-sixth"]').getByRole('button', { name: 'Dec', exact: true }).click();
+    await page.waitForTimeout(400);
+    await expect(page.locator('[data-testid="sold-badge-sixth"]')).toContainText('Dec 2026');
+
+    const result = await page.evaluate(() => {
+      const wf = window.__wfData || [];
+      const pick = (y, m) => wf.find(r => r.calYear === y && r.calMonth1to12 === m);
+      const months = [[2026, 7], [2026, 8], [2026, 9], [2026, 10], [2026, 11], [2026, 12], [2027, 1], [2027, 6]];
+      return months.map(([y, m]) => {
+        const r = pick(y, m);
+        return { ym: `${y}-${m}`, carrySixth: Math.round(r.carrySixth || 0),
+          mtgBal6: r.mtgBal6, saleEvt: (r.events || []).some(e => /sold -- net proceeds/.test(e)) };
+      });
+    });
+    console.log('  AE1 — ' + JSON.stringify(result));
+    for (const r of result.slice(0, 5)) {          // Jul-Nov 2026: owned, unrented
+      expect(r.carrySixth).toBeGreaterThan(0);
+      expect(r.mtgBal6).toBeGreaterThan(0);
+      expect(r.saleEvt).toBe(false);
+    }
+    for (const r of result.slice(5)) {             // Dec 2026 on: sold
+      expect(r.carrySixth).toBe(0);
+      expect(r.mtgBal6).toBe(0);
+    }
+    expect(result[5].saleEvt).toBe(true);           // proceeds event in Dec 2026 exactly
+    expect(result.filter(r => r.saleEvt).length).toBe(1);
+  });
+
+  test('AE2 — a saved Q4 pin (hold + obligation quarter:4) migrates to Oct and reproduces its old results exactly', async ({ page }) => {
+    await loadApp(page);
+    // Engine level: quarter:4 vs month:10 give byte-identical monthly rows,
+    // and the merge converts the saved field (no stale quarter left behind).
+    const eng = await page.evaluate(() => {
+      const { buildMonthlyScenario, makeParams, mergeProperties } = window.__engine;
+      const run = (t) => JSON.stringify(buildMonthlyScenario(makeParams({
+        properties: [{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, ...t } }],
+        obligation: { amount: 525000, year: 2027, ...t },
+      })));
+      const merged = mergeProperties([{ id: 'fifteenth', hold: { mode: 'sell', year: 2027, quarter: 4 } }])
+        .find(p => p.id === 'fifteenth').hold;
+      return { same: run({ quarter: 4 }) === run({ month: 10 }),
+        differsFromApr: run({ quarter: 4 }) !== run({ month: 4 }),
+        mergedMonth: merged.month, mergedHasQuarter: 'quarter' in merged };
+    });
+    console.log('  AE2 engine — ' + JSON.stringify(eng));
+    expect(eng.same).toBe(true);
+    expect(eng.differsFromApr).toBe(true);   // guards against the default month silently winning
+    expect(eng.mergedMonth).toBe(10);
+    expect(eng.mergedHasQuarter).toBe(false);
+
+    // End to end through localStorage: two saved pins, one in the old
+    // quarter format and one in the new month format, load to identical lines.
+    await page.locator('input[placeholder*="Name this scenario"]').fill('seed');
+    await page.locator('button', { hasText: 'Pin' }).click();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => {
+      const saved = JSON.parse(localStorage.getItem('retirement_sim_pins'));
+      const base = saved.pins[0];
+      const snap = (t) => ({ ...base.paramSnapshot,
+        properties: (base.paramSnapshot.properties || []).map(p => p.id === 'fifteenth'
+          ? { ...p, hold: { ...Object.fromEntries(Object.entries(p.hold).filter(([k]) => k !== 'month' && k !== 'quarter')), mode: 'sell', year: 2027, ...t } } : p),
+        obligation: { ...Object.fromEntries(Object.entries(base.paramSnapshot.obligation || {}).filter(([k]) => k !== 'month' && k !== 'quarter')), amount: 525000, year: 2027, ...t },
+      });
+      saved.pins = [
+        { ...base, id: 901, name: 'Old Q4', paramSnapshot: snap({ quarter: 4 }) },
+        { ...base, id: 902, name: 'New Oct', paramSnapshot: snap({ month: 10 }) },
+      ];
+      localStorage.setItem('retirement_sim_pins', JSON.stringify(saved));
+    });
+    await page.reload();
+    await page.waitForTimeout(800);
+    const pins = await page.evaluate(() => {
+      const cd = window.__chartData || [];
+      let diffs = 0, fields = 0;
+      for (const row of cd) {
+        for (const k of Object.keys(row)) {
+          if (!k.startsWith('pin_901_')) continue;
+          fields++;
+          if (JSON.stringify(row[k]) !== JSON.stringify(row[k.replace('pin_901_', 'pin_902_')])) diffs++;
+        }
+      }
+      return { rows: cd.length, fields, diffs };
+    });
+    console.log('  AE2 pins — ' + JSON.stringify(pins));
+    expect(pins.fields).toBeGreaterThan(50);
+    expect(pins.diffs).toBe(0);
   });
 
 });
