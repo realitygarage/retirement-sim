@@ -690,10 +690,10 @@ test.describe('Group E — Sanity Checks', () => {
     }
   });
 
-  test('E5 — Version header shows "v5.17.0"', async ({ page }) => {
+  test('E5 — Version header shows "v5.17.1"', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.17.0').first()).toBeVisible();
-    console.log('  Version badge confirmed: v5.17.0');
+    await expect(page.locator('text=v5.17.1').first()).toBeVisible();
+    console.log('  Version badge confirmed: v5.17.1');
   });
 
 });
@@ -1129,7 +1129,9 @@ test.describe('Group K — Pin Import Rate Fix', () => {
       .locator('xpath=ancestor::div[4]').first();
     const cardText = await pinCard.textContent() || '';
     // Extract NW yr10 value — format like "$5.4M"
-    const match = cardText.match(/\$(\d+\.?\d*)M/);
+    // v5.17.1: decimal required -- the sidebar's proceeds card puts "$0" next to
+    // "Mortgage principal", which textContent runs together as "$0M"
+    const match = cardText.match(/\$(\d+\.\d+)M/);
     if (match) {
       const nw = parseFloat(match[1]);
       console.log(`  Imported pin NW yr10: $${nw}M`);
@@ -1146,10 +1148,10 @@ test.describe('Group K — Pin Import Rate Fix', () => {
 
 test.describe('Group L — Regression', () => {
 
-  test('L1 — Version header shows v5.17.0', async ({ page }) => {
+  test('L1 — Version header shows v5.17.1', async ({ page }) => {
     await loadApp(page);
-    await expect(page.locator('text=v5.17.0').first()).toBeVisible();
-    console.log('  L1 — Version v5.17.0 confirmed');
+    await expect(page.locator('text=v5.17.1').first()).toBeVisible();
+    console.log('  L1 — Version v5.17.1 confirmed');
   });
 
   // L2/L3 removed in v4.0.0-A: payOffHI visibility used to be gated on the
@@ -1475,7 +1477,8 @@ test.describe('Group R — v4.0.0-A Property-Centric Schema', () => {
     await expect(page.locator('[data-testid="unit-fifteenth-top"]')).toBeVisible();
     await expect(page.locator('[data-testid="unit-fifteenth-bottom"]')).toBeVisible();
     await expect(page.locator('[data-testid="unit-barberry-main"]')).toBeVisible();
-    await expect(page.getByText('One-Time Obligation')).toBeVisible();
+    // v5.17.1: exact -- the proceeds card's obligation-only title also contains this text
+    await expect(page.getByText('One-Time Obligation', { exact: true })).toBeVisible();
     await expect(page.getByText('Cash-Flow Engine')).toBeVisible();
     await expect(page.locator('[data-testid="pooled-routing-result"]')).toBeVisible();
     console.log('  R10 — all property/unit cards + obligation + routing blocks render');

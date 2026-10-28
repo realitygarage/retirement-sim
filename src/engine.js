@@ -1130,6 +1130,7 @@ export function buildMonthlyScenario(p){
     //    retired], (e) survivor joins this month's sweep/savings.
     let _oneTimeSweep = 0, _settleDrawMo = 0, _oneTimeReserveFill = 0, _payDetailMo = null;
     let _mtgPaydownMo = 0, _mtgPaydownNote = null;
+    let _poolDebtMo = null;   // v5.17.1: per-debt paid/carried at this pass (display only)
     const _yrCashEvents = (_cashEvents[calYear]||[]).filter(e=>e.month===calMonth1to12);
     if(_yrCashEvents.length){
       const monthSum = _yrCashEvents.reduce((s,e)=>s+e.amount, 0);
@@ -1193,6 +1194,16 @@ export function buildMonthlyScenario(p){
           nolan:  pay=>{nolanBal  = Math.max(0, nolanBal-pay);},
         }, _loans);
         _payDetailMo = {perDebt:plan.perDebt, total:plan.total, draw:split.draw, remainder:postPaydownRemainder};
+        // v5.17.1: every HI debt (eligible or not) + every closing-eligible
+        // loan, with what this pass paid and the balance it leaves carried.
+        // Avalanche order (rate desc) -- same order planHiPaydown pays in.
+        _poolDebtMo = [
+          {key:'cc',     label:'Credit Card',  rate:ccRate_,     eligible:p.ccClosingEligible??true,     carried:ccBal},
+          {key:'sophia', label:'Sophia Loans', rate:sophiaRate_, eligible:p.sophiaClosingEligible??true, carried:sophiaBal},
+          {key:'nolan',  label:'Nolan Loans',  rate:nolanRate_,  eligible:p.nolanClosingEligible??true,  carried:nolanBal},
+          ..._loans.filter(L=>L.closingEligible).map(L=>({key:'loan:'+L.label, label:L.label, rate:L.rate, eligible:true, carried:L.bal})),
+        ].map(d=>({...d, paid:Math.round(plan.perDebt[d.key]||0), carried:Math.round(d.carried)}))
+         .sort((a,b)=>b.rate-a.rate);
         let rem = postPaydownRemainder - plan.total;
         const _fill = (bal,cap)=>{const add=Math.min(Math.max(0,cap-bal),rem); rem-=add; return add;};
         const _rdFill = _fill(rdBal, rdCap); rdBal += _rdFill;
@@ -1522,6 +1533,7 @@ export function buildMonthlyScenario(p){
       mtgLumpPaydown: Math.round(_mtgPaydownMo),   // v5.1.0: pooled-routing mortgage-principal stop
       mtgPaydownDetail: _mtgPaydownNote,
       paydownDetail: _payDetailMo ? _payDetailMo.perDebt : null,
+      poolDebt: _poolDebtMo,   // v5.17.1: per-debt paid/carried at a pool pass
       oneTimePaydown: Math.round(_payDetailMo ? _payDetailMo.total : 0),
       oneTimeReserveFill: Math.round(_oneTimeReserveFill),
       oneTimeSweep: Math.round(_oneTimeSweep),
@@ -1718,16 +1730,32 @@ export function aggregateMonthlyToPeriod(wfRows, p, periodMonths=12){
       dispoTax: Math.round(dispoTaxYr),
       dispoNet: Math.round(dispoNetYr),
       settlementOut: Math.round(settlementOutYr),
-      settleDraw:   Math.round(poolRow?.settleDraw||0),
-      wfMtgPaydown: Math.round(poolRow?.mtgLumpPaydown||0),   // v5.1.0: pooled-routing mortgage-principal stop
+      // v5.17.1: summed over every pool pass in the period (was poolRow's
+      // values only) -- a year with two dated events (e.g. a Jul sale, then a
+      // Dec sale + obligation) routes in two passes, and the second pass's
+      // split used to be dropped from these display fields. Non-pool months
+      // carry 0 for each, so the sum is exact. Display-only; no balance reads these.
+      settleDraw:   Math.round(sum('settleDraw')),
+      wfMtgPaydown: Math.round(sum('mtgLumpPaydown')),   // v5.1.0: pooled-routing mortgage-principal stop
       mtgPaydownDetail: poolRow?.mtgPaydownDetail || null,
-      wfDebtPaid:   Math.round(poolRow?.oneTimePaydown||0),
+      wfDebtPaid:   Math.round(sum('oneTimePaydown')),
       // B2 fix: reserve top-ups and true sweep are no longer conflated --
       // wfToSavings now means TRUE savings only (matches the monthly engine's
       // own oneTimeSweep), with the reserve-fill portion broken out separately.
-      wfReserveFill: Math.round(poolRow?.oneTimeReserveFill||0),
-      wfToSavings:  Math.round(poolRow?.oneTimeSweep||0),
+      wfReserveFill: Math.round(sum('oneTimeReserveFill')),
+      wfToSavings:  Math.round(sum('oneTimeSweep')),
       hiPaydownDetail: poolRow?.paydownDetail || null,
+      // v5.17.1: per-debt sale-proceeds payoff for the period -- paid sums
+      // every pass, carried is the LAST pass's post-payoff balance. Null when
+      // no pass ran. Display only (the Simulator tab's proceeds card).
+      poolDebt: (()=>{
+        const passes = yrRows.filter(r=>r.poolDebt);
+        if(!passes.length) return null;
+        const m = new Map();
+        for(const r of passes) for(const d of r.poolDebt)
+          m.set(d.key, {...d, paid:(m.get(d.key)?.paid||0)+d.paid});
+        return [...m.values()].sort((a,b)=>b.rate-a.rate);
+      })(),
       loanStarts, loanPayoffs, mtgTransitions, mtgPayoffs,
       mtgExtra: Math.round(sum('mtgExtra')),
       primBalRaw: Math.round(primBal), dplxBalRaw: Math.round(dplxBal), lafBalRaw: Math.round(lafBal),

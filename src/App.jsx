@@ -1,3 +1,14 @@
+// v5.17.1 -- Sale-proceeds summary is a titled card per pool year (Simulator
+// tab, Cash-Flow Engine section), replacing the one-line footnote: Net
+// proceeds, Obligation, One-time draw (at sale), Mortgage principal, one row
+// per debt paid (avalanche order, rate shown), Reserve/buffer, Savings,
+// Remaining, then a "Debt still carried after sale" list -- mono right-
+// aligned amounts, $0 rows dimmed. Cards cover every sale year (the old line
+// only read the obligation's year) plus an obligation-only card when no sale
+// funds it. engine.js (display fields only): the annual pool fields
+// (settleDraw, wfMtgPaydown, wfDebtPaid, wfReserveFill, wfToSavings) now sum
+// every pool pass in the year -- they kept only the first, dropping a second
+// same-year pass; new poolDebt (per-debt paid + post-payoff carried balance).
 // v5.17.0 -- Typed number fields replace every slider. New module-level
 // NumberField: types in display units (scale/offset convert to stored units:
 // % stored as decimals, structure values stored in $K, lifestyle-draw year
@@ -2518,7 +2529,7 @@ export default function App(){
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <div style={{fontSize:20,fontWeight:"bold",letterSpacing:0.5}}>Retirement Simulator</div>
-            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.17.0</div>
+            <div style={{fontSize:10,color:dim,fontFamily:mono,letterSpacing:0.5}}>v5.17.1</div>
           </div>
           <div style={{fontSize:11,color:muted,marginTop:2}}>Drag sliders to explore -- pin scenarios to compare</div>
         </div>
@@ -3081,13 +3092,77 @@ export default function App(){
                 {heldProperties.map(pr=><option key={pr.id} value={pr.id}>{pr.label}</option>)}
               </select>
             </div>
+            {/* v5.17.1: one card per pool year (every sale year, plus the
+                obligation's year) -- was one sentence keyed to the obligation's
+                year only. Same-year sales share one pool, so they share a card
+                (one Net proceeds row each). Remaining = proceeds minus every
+                stop; should be $0 unless the obligation exceeds the proceeds. */}
             {(()=>{
-              const rSettle = liveRows.find(r=>r.cal===obligation.year) || {};
-              const fmtK = v=>"$"+Math.round((v||0)/1000)+"K";
+              const dr = liveRows.dispoResults || {};
+              const sold = properties
+                .map(pr=>({label:pr.label, d:dr[pr.id]}))
+                .filter(({d})=>d && d.mode && d.mode!=='keep' && Number.isFinite(d.year))
+                .sort((a,b)=>a.d.year-b.d.year || saleMonthOf(a.d)-saleMonthOf(b.d));
+              const hasOblig = (obligation.amount||0)>0;
+              const years = [...new Set([...sold.map(s=>s.d.year), ...(hasOblig?[obligation.year]:[])])].sort((a,b)=>a-b);
+              const fmt$ = v=>(v<0?"−$":"$")+Math.abs(Math.round(v||0)).toLocaleString();
+              const shortName = l=>l.replace(/\s*\(.*\)\s*$/,'');
               const mtgTargetLabel = propById[effectiveMtgPaydownTarget]?.label || '';
+              // soft: zero rows use `muted` at full opacity (readable) instead of the dim fade
+              const line = (label,v,{sub,key,neg,strong,warn,soft}={})=>{
+                const zero = Math.round(v||0)===0;
+                return (
+                  <div key={key||label} style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8,padding:"2px 0",
+                    fontSize:11.5,color:warn?amber:zero?(soft?muted:dim):bright,opacity:zero&&!strong&&!soft?0.55:1,fontWeight:strong?"bold":"normal"}}>
+                    <span>{label}{sub&&<span style={{fontSize:9.5,color:dim}}> ({sub})</span>}</span>
+                    <span style={{fontFamily:mono,whiteSpace:"nowrap"}}>{neg&&!zero?"−":""}{fmt$(v)}</span>
+                  </div>
+                );
+              };
               return (
-                <div data-testid="pooled-routing-result" style={{fontSize:9,color:muted,padding:8,background:bg2,borderRadius:4,marginTop:4}}>
-                  proceeds → obligation {fmtK(obligation.amount)} → draw {fmtK(rSettle.settleDraw)}{settleDrawLabel?` (${settleDrawLabel})`:""} → mortgage principal {fmtK(rSettle.wfMtgPaydown)}{(rSettle.wfMtgPaydown>0&&mtgTargetLabel)?` (${mtgTargetLabel})`:""} → cascade: {fmtK(rSettle.wfDebtPaid)} to HI debt, {fmtK(rSettle.wfReserveFill)} to reserve/buffer caps, {fmtK(rSettle.wfToSavings)} to savings
+                <div data-testid="pooled-routing-result" style={{marginTop:4}}>
+                  {years.map(yr=>{
+                    const r = liveRows.find(x=>x.cal===yr) || {};
+                    const yrSold = sold.filter(s=>s.d.year===yr);
+                    const obl = hasOblig && obligation.year===yr ? obligation.amount : 0;
+                    const proceeds = yrSold.reduce((s,{d})=>s+(d.afterTaxNetProceeds||0),0);
+                    const remaining = proceeds - obl - (r.settleDraw||0) - (r.wfMtgPaydown||0) - (r.wfDebtPaid||0) - (r.wfReserveFill||0) - (r.wfToSavings||0);
+                    const title = yrSold.length
+                      ? `${yrSold.map(s=>`${shortName(s.label)} Sale (${MONTH_ABBR[saleMonthOf(s.d)-1]} ${yr})`).join(" + ")}: Where the Proceeds Go`
+                      : `One-Time Obligation (${MONTH_ABBR[saleMonthOf(obligation)-1]} ${yr}): Not Funded by a Sale`;
+                    return (
+                      <div key={yr} data-testid={`pooled-routing-card-${yr}`}
+                        style={{border:`1px solid ${bdr}`,borderRadius:6,background:bg2,padding:"10px 12px",marginBottom:8}}>
+                        <div style={{fontSize:13,fontWeight:"bold",color:bright,marginBottom:6}}>{title}</div>
+                        {yrSold.length>1
+                          ? yrSold.map(({label,d})=>line(`Net proceeds — ${shortName(label)}`,d.afterTaxNetProceeds,{key:label,strong:true}))
+                          : line("Net proceeds",proceeds,{strong:true})}
+                        {line("Obligation",obl,{neg:true})}
+                        {line("One-time draw (at sale)",r.settleDraw,{neg:true,sub:settleDrawLabel||undefined})}
+                        {line("Mortgage principal",r.wfMtgPaydown,{neg:true,sub:(r.wfMtgPaydown>0&&mtgTargetLabel)?shortName(mtgTargetLabel):undefined})}
+                        {/* v5.17.1: one row per debt in avalanche order (highest rate first) */}
+                        {r.poolDebt
+                          ? r.poolDebt.map(d=>line(d.label,d.paid,{key:'paid-'+d.key,neg:true,
+                              sub:`${(d.rate*100).toFixed(2)}%${d.eligible?"":" · not closing-eligible"}`}))
+                          : line("HI debt + closing-eligible loans",r.wfDebtPaid,{neg:true})}
+                        {line("Reserve/buffer",r.wfReserveFill,{neg:true})}
+                        {line("Savings",r.wfToSavings,{neg:true})}
+                        <div style={{borderTop:`1px solid ${bdr}`,marginTop:4,paddingTop:3}}>
+                          {line("Remaining",remaining,{strong:true,warn:Math.abs(remaining)>2})}
+                        </div>
+                        {r.poolDebt && (
+                          <div data-testid={`pooled-routing-carried-${yr}`} style={{marginTop:8}}>
+                            <div style={{fontSize:10,color:bright,fontWeight:"bold",letterSpacing:0.5,textTransform:"uppercase",marginBottom:2}}>Debt still carried after sale</div>
+                            {r.poolDebt.map(d=>line(d.label,d.carried,{key:'carried-'+d.key,soft:true}))}
+                            <div style={{borderTop:`1px solid ${bdr}`,marginTop:4,paddingTop:3}}>
+                              {line("Total carried",r.poolDebt.reduce((s,d)=>s+d.carried,0),{strong:true,soft:true})}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {years.length===0 && <div style={{fontSize:10,color:dim,fontStyle:"italic"}}>No property sale or obligation scheduled.</div>}
                 </div>
               );
             })()}
