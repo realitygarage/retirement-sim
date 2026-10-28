@@ -1,0 +1,79 @@
+=== SESSION 46 JOURNAL -- Sale-proceeds card (v5.17.1) ===
+
+Date: 2026-10-28
+
+Bob asked for display-only polish: the Simulator tab's one-line pooled-
+routing sentence ("proceeds -> obligation $500K -> draw $0K -> ...") turned
+into a titled card with labeled, right-aligned rows. Plan first; check that
+the sentence adds up to net proceeds before writing.
+
+--- RECONCILIATION FINDINGS (before writing) ---
+
+Ran buildMonthlyScenario/aggregateMonthlyToAnnual in node against several
+scenarios. A single sale in the obligation's year reconciled exactly
+(6th St Dec 2026, $500K obligation: $785,755 - 500,000 - 257,820 HI
+- 27,935 savings = $0, also $0 with a $50K draw + $100K mortgage paydown).
+Three mismatches found, reported to Bob:
+1. Two pool passes in one year (e.g. Barberry Jul + 6th St/obligation Dec)
+   -- the annual row kept only the FIRST pass (poolRow = yrRows.find(...)),
+   so the Dec pass's $266K to savings vanished from the display. Balances
+   were right; display fields only.
+2. The sentence always read the OBLIGATION's year, so a sale in another
+   year never showed its own routing.
+3. Obligation with no sale that year (the shipped defaults): Net $0,
+   obligation $525K -> Remaining -$525K.
+Bob: fix #1 (yes), and show the obligation-only card with the negative
+Remaining (yes).
+
+--- v5.17.1: SALE-PROCEEDS CARD -- 72e1101 ---
+
+- engine.js aggregateMonthlyToPeriod: settleDraw, wfMtgPaydown, wfDebtPaid,
+  wfReserveFill, wfToSavings now SUM every pool month in the period (were
+  poolRow-only). Display fields only -- nothing reads them for balances.
+- engine.js: new poolDebt on monthly rows and annual rows -- per debt
+  {key,label,rate,eligible,paid,carried}, avalanche order (rate desc): the
+  three HI debts (always listed, flagged when not closing-eligible) plus
+  every closing-eligible loan. Annual: paid sums every pass, carried is the
+  last pass's post-payoff balance.
+- App.jsx Cash-Flow Engine section: one card per pool year (every sale year
+  + the obligation's year). Title "6th St Sale (Dec 2026): Where the
+  Proceeds Go" (same-year sales joined with " + ", each gets its own Net
+  proceeds row); obligation-only card "One-Time Obligation (Apr 2026): Not
+  Funded by a Sale". Rows: Net proceeds, Obligation, One-time draw (at
+  sale), Mortgage principal, one row per debt paid (with rate), Reserve/
+  buffer, Savings, Remaining (amber if off by >$2), then "Debt still carried
+  after sale" + Total carried. Full dollars, mono, right-aligned; title 13px
+  bold, rows 11.5px, bordered card. $0 rows dimmed (55% opacity); the carried
+  section uses `muted` at full opacity instead (Bob: the dimmed carried rows
+  were too low-contrast).
+- Bob's rule confirmed (already how the engine works): net proceeds ->
+  obligation -> one-time draw -> [mortgage principal, if set] -> HI debt +
+  closing-eligible loans by rate, highest first -> reserve/buffer -> savings.
+  A draw that squeezes the payoff leaves the rest carried (e.g. a $150K draw:
+  CC paid in full, Nolan partly (-$78,314, $68,909 carried), Sophia
+  untouched ($53,156 carried)).
+- Clarified for Bob: the card's draw is the "One-time draw ($, at sale)"
+  field, NOT Lifestyle Draws (Draw 1 etc.), which pull from invested
+  savings and never touch sale proceeds. Row renamed accordingly.
+- Tests: E5/L1 version strings. R10 getByText('One-Time Obligation') now
+  exact (the obligation-only card title also contains it). K3's regex
+  /\$(\d+\.?\d*)M/ matched the card's "$0" + "Mortgage principal" run
+  together by textContent ("$0M") -- now requires a decimal. R10/E5/L1/K3
+  (+B9/D4/F1 caught by the -g pattern) 7/7; Groups R + V 44/44.
+
+--- VERIFICATION ---
+
+npm run build clean. Full suite NOT run this session.
+
+--- PUSH STATUS ---
+
+Bob asked to commit and push at end of session (pushes the session-45
+commits too).
+
+--- OPEN ITEMS CARRIED FORWARD ---
+
+Same list as session45, plus:
+- The one-time draw (settleLifestyleDraw) is only taken in a pool pass
+  that includes the obligation (hasObligThisPass, engine.js) -- a sale in a
+  different year from the obligation never takes the draw. Reported to
+  Bob; calculation change, not made.
